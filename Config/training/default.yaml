@@ -1,0 +1,2 @@
+# Training setup
+use_ddp: True # whether to use DDP training scheme

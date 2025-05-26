@@ -1,0 +1,24 @@
+# default Model Setup
+## technical setup
+flashed: True  # whether to use FlashAttention
+use_autocast: True  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
+
+## model hyperparameter
+dim: 1536  # hidden layer dim for conv layer output/transformer input
+depth: 8  # transformer layer depth
+heads: 8  # atten head num
+attn_dropout: 0.05  # atten dropout
+attn_dim_key: 64  # set up atten, not used in FlashAttention
+attn_dim_value: 192  # set up atten, not used in FlashAttention
+pos_dropout: 0.01  # set up atten, not used in FlashAttention
+dropout_rate: 0.2  # transformer linear layer dp rate
+upsample_layer_num: 0  # how many upsample layers to use, deciding final resolution, 0 corresponding to 128 bp resolution, 1 -> 64, 2 -> 32
+
+## sequence crop hyperparameter
+return_center_bins_only: True # whether to only use the central bins for loss calculation
+bins_to_return: 896  # how many (central) bins used to calculate loss, same as in enformer (114,688 bp aggregated into 128 bp bins)
+
+## prediction heads
+output_heads: # set up the prediction head name and trial number
+  human: 5313 
+use_head: human

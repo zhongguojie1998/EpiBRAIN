@@ -1,0 +1,17 @@
+shared: &shared_parameter
+  storage_path: ./Data/enformer_style_split # where to store the data embedding, now only support precomputed version
+  refer_genom: ./Data/source/hg38/hg38.fa # path to the reference genome
+  context_length: 196_608  # The length of the DNA serving as one sample. For enformer, the number is 196,608
+
+preprocess:
+  <<: *shared_parameter
+  window_size: 128  # The window size is restricted by the model architecture (the final bp resolution). For enformer, the number is 128
+  n_window: 896 # The central bin number to keep and calculate the label. For enformer, the number is 896 (196,608 / 128 (bins) - 320 (bins per side) * 2)
+  trial_path: ./Data/source/BICAN_BGC_histone_bw_hg38 # path to the trials (label), only support bigwig files
+
+dataset:
+  <<: *shared_parameter
+  return_seq_indices: False # True, return single number encoded sequence, False, return one hot encoding
+  shift_augs: null  # skip seq shift augumentation
+  rc_aug: False # skip reverse strand augumentation
+  return_augs: False # whether to return augumentation records 

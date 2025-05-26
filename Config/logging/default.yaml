@@ -1,0 +1,2 @@
+# logging setup
+log_mode: INFO  # logging level, INFO, DEBUG, etc.

@@ -1,0 +1,3 @@
+# Training setup
+use_ddp: False # whether to use DDP training scheme
+gpu_id: 0 # the gpu used to train the model
