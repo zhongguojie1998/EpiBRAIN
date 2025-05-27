@@ -323,9 +323,9 @@ def divide_contigs_pct(contigs, test_pct, valid_pct, pct_abstain=0.2, seed=42):
 
     logger.info(
         f"""
-        Contigs divided into\n
-        Train: {len(train_contigs):5d} contigs, {train_nt:10d} nt ({train_nt / total_nt:.4f})\n
-        Valid: {len(valid_contigs):5d} contigs, {valid_nt:10d} nt ({valid_nt / total_nt:.4f})\n
+        Contigs divided into
+        Train: {len(train_contigs):5d} contigs, {train_nt:10d} nt ({train_nt / total_nt:.4f})
+        Valid: {len(valid_contigs):5d} contigs, {valid_nt:10d} nt ({valid_nt / total_nt:.4f})
         Test: {len(test_contigs):5d} contigs, {test_nt:10d} nt ({test_nt / total_nt:.4f})
         """
     )
@@ -367,9 +367,9 @@ def divide_contigs_chr(contigs, test_chrs, valid_chrs):
 
     logger.info(
         f"""
-        Contigs divided into\n
-        Train: {len(train_contigs):5d} contigs, {train_nt:10d} nt ({train_nt / total_nt:.4f})\n
-        Valid: {len(valid_contigs):5d} contigs, {valid_nt:10d} nt ({valid_nt / total_nt:.4f})\n
+        Contigs divided into
+        Train: {len(train_contigs):5d} contigs, {train_nt:10d} nt ({train_nt / total_nt:.4f})
+        Valid: {len(valid_contigs):5d} contigs, {valid_nt:10d} nt ({valid_nt / total_nt:.4f})
         Test: {len(test_contigs):5d} contigs, {test_nt:10d} nt ({test_nt / total_nt:.4f})
         """
     )

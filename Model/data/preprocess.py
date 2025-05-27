@@ -7,7 +7,10 @@ from functools import partial
 
 import numpy as np
 import pandas as pd
-from data_utils import (
+from utils.config import LOGGER_PREFIX, get_logger
+from utils.utils import split_tasks
+
+from .data_utils import (
     Contig,
     annotate_unmap,
     break_large_contigs,
@@ -21,8 +24,6 @@ from data_utils import (
     split_contigs,
     write_seqs_bed,
 )
-from utils.config import LOGGER_PREFIX, get_logger
-from utils.utils import split_tasks
 
 logger = get_logger(f"{LOGGER_PREFIX}-Data preprocess")
 
@@ -122,12 +123,12 @@ def preprocess(
 
     logger.info(
         f"""
-        Preprocess config:\n
-        context length: {context_length} bp\n
-        window size: {window_size}\n
-        kept central window num: {n_window}\n
-        stride train: {stride_train} bp\n
-        stride test: {stride_test} bp\n
+        Preprocess config:
+        context length: {context_length} bp
+        window size: {window_size}
+        kept central window num: {n_window}
+        stride train: {stride_train} bp
+        stride test: {stride_test} bp
         """
     )
 
