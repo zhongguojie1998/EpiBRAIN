@@ -10,8 +10,9 @@ sys.path.append(ROOT)
 warnings.filterwarnings("ignore")
 
 import click
-# from data.preprocess import preprocess
+from data.preprocess import preprocess
 from utils.config import LOGGER_PREFIX, get_logger, load_config, set_logging_level
+
 # from utils.trainer import DNASeqModelTrainer
 
 logger = get_logger(f"{LOGGER_PREFIX}-Main")
@@ -39,18 +40,18 @@ def main(config_dir, override_config):
 
     logger.debug(myconfig)
 
-    # # get data
-    # if not os.path.exists(f"{myconfig.data.preprocess.storage_path}/test.pt"):
-    #     logger.info("Start preprocess data")
-    #     try:
-    #         train, valid, test = preprocess(**myconfig.data.preprocess)
-    #     except Exception as e:
-    #         logger.error("Please check preprocess setting")
-    #         logger.exception(e)
-    #         exit(1)
-    #     logger.info(f"Finish preprocess data\nSave at: {myconfig.data.preprocess.storage_path}")
-    # else:
-    #     logger.info(f"Read in preprocess data from: {myconfig.data.preprocess.storage_path}")
+    # get data
+    if not os.path.exists(f"{myconfig.data.preprocess.storage_path}/statistics.json"):
+        logger.info("Start preprocess data")
+        try:
+            preprocess(**myconfig.data.preprocess)
+        except Exception as e:
+            logger.error("Please check preprocess setting")
+            logger.exception(e)
+            exit(1)
+        logger.info(f"Finish preprocess data\nSave at: {myconfig.data.preprocess.storage_path}")
+    else:
+        logger.info(f"Read in preprocess data from: {myconfig.data.preprocess.storage_path}")
 
     # # get the trainer (load the model)
     # mytrainer = DNASeqModelTrainer(myconfig)
