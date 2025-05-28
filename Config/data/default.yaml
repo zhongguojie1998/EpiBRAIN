@@ -6,14 +6,18 @@ shared: &shared_parameter
 preprocess:
   <<: *shared_parameter
   trial_path: ./data_summary.csv # path to the trials (label), only support bigwig files
-  gap_bed: ./Data/source/hg38_umap_macro.bed # if provided, delete all the reads from gap regions so that they are not included in the datasets
-  blacklist_bed: null # if provided, set all the reads value from blacklist regions to the baseline value
-  umap_bed: null # if provided, delete all the reads from gap regions so that they are not included in the datasets
+  gap_bed: ./Data/source/hg38_unmap_macro.bed # if provided, delete all the reads from gap regions so that they are not included in the datasets
+
+  unmap_bed: null # if provided, delete reads with too many unmap regions so that they are not included in the datasets
+  unmap_threshold: 0.5 # the threshold to filter the unmap regions, if unmap_bed is provided, remove sequences with more than this unmappable bin percentile (should be between 0 and 1)
+
+  blacklist_bed: ./Data/source/hg38-blacklist.v2.bed # if provided, set all the reads value from blacklist regions to within the baseline value
+  baseline_pct: 0.25 # for a given region, the baseline value is the percentile of the reads in the region, e.g., 0.25 means the baseline value is the 25th percentile of the reads in the region, this is to remove the noise from the data
 
   break_threshold: 1_179_648 # the threshold to break the long contig into smaller pieces to preprocess, for enformer, the number is 1,179,648 (196,608 * 6). This is to speed up the preprocessing
 
-  stride_train: 1.0 # the stride to get the next context, can be given in relative percentage of the context_length (1.0 means no overlap, 0.5 means half overlap, etc.), or in absolute number of base pairs (e.g., 196,608 etc.).
-  stride_test: 1.0 
+  stride_train: 98_367 # the stride to get the next context, can be given in relative percentage of the context_length (1.0 means no overlap, 0.5 means half overlap, etc.), or in absolute number of base pairs (e.g., 196,608 etc.). Here, the stride is 196,608 / 2 (50% overlap) + 63, to slightly shift the window boundary
+  stride_test: 98_367 
   snap: 1 # align the sampling init point of each contig, e.g., 1000 means the sampling will start from the closest multiple of 1000th base pair of each contig, this is to ensure the same sampling point for each contig, so that the training and testing data are aligned
   window_size: 128  # The window size is restricted by the model architecture (the final bp resolution). For enformer, the number is 128
   n_window: 896 # The central bin number to keep and calculate the label. For enformer, the number is 896 (196,608 / 128 (bins) - 320 (bins per side) * 2)
@@ -21,12 +25,12 @@ preprocess:
   folds: null # if provided, process the data in the cross validation manner
   valid_pct_or_chr: 0.1 # the percentage of the samples to use for validation, if folds is provided, this will be ignored. if provided as chromosome names divided by comma, e.g., chr1,chr2,chr3, will use these chromosomes for validation
   test_pct_or_chr: 0.1 # the percentage of the samples to use for testing, if folds is provided, this will be ignored. if provided as chromosome names divided by comma, e.g., chr1,chr2,chr3, will use these chromosomes for test
-  sample_pct: 1.0 # the percentage of the samples to use, 1.0 means all samples, 0.1 means 10% of the samples
-
-  umap_threshold: 0.5 # the threshold to filter the umap regions, if umap_bed is provided, remove sequences with more than this unmappable bin
+  sample_pct: 1.0 # the percentage of the samples (for all sets) to use, 1.0 means all samples, 0.1 means 10% of the samples
 
   seed: 42 # random seed for reproducibility
   num_worker: 24 # number of workers to use for the preprocessing
+
+  force_restart: False # whether to restart the preprocessing, if True, will overwrite the existing data
 
 dataset:
   <<: *shared_parameter

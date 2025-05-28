@@ -1,4 +1,5 @@
-# Adapted from https://github.com/calico/basenji/blob/master/bin/basenji_data.py
+# Adapted from https://github.com/calico/basenji/blob/master/bin/basenji_data.py, https://github.com/calico/basenji/blob/master/bin/basenji_data_read.py
+
 import collections
 import heapq
 import math
@@ -18,6 +19,8 @@ logger = get_logger(f"{LOGGER_PREFIX}-Data preprocess")
 
 Contig = collections.namedtuple("Contig", ["chr", "start", "end"])
 ModelSeq = collections.namedtuple("ModelSeq", ["chr", "start", "end", "label"])
+
+STD_CHR = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"]
 
 
 def load_chromosomes(genome_file):
@@ -322,12 +325,10 @@ def divide_contigs_pct(contigs, test_pct, valid_pct, pct_abstain=0.2, seed=42):
             exit(1)
 
     logger.info(
-        f"""
-        Contigs divided into
+        f"""Contigs divided into
         Train: {len(train_contigs):5d} contigs, {train_nt:10d} nt ({train_nt / total_nt:.4f})
         Valid: {len(valid_contigs):5d} contigs, {valid_nt:10d} nt ({valid_nt / total_nt:.4f})
-        Test: {len(test_contigs):5d} contigs, {test_nt:10d} nt ({test_nt / total_nt:.4f})
-        """
+        Test: {len(test_contigs):5d} contigs, {test_nt:10d} nt ({test_nt / total_nt:.4f})"""
     )
 
     return [train_contigs, valid_contigs, test_contigs]
@@ -366,12 +367,10 @@ def divide_contigs_chr(contigs, test_chrs, valid_chrs):
     total_nt = train_nt + valid_nt + test_nt
 
     logger.info(
-        f"""
-        Contigs divided into
+        f"""Contigs divided into
         Train: {len(train_contigs):5d} contigs, {train_nt:10d} nt ({train_nt / total_nt:.4f})
         Valid: {len(valid_contigs):5d} contigs, {valid_nt:10d} nt ({valid_nt / total_nt:.4f})
-        Test: {len(test_contigs):5d} contigs, {test_nt:10d} nt ({test_nt / total_nt:.4f})
-        """
+        Test: {len(test_contigs):5d} contigs, {test_nt:10d} nt ({test_nt / total_nt:.4f})"""
     )
 
     return [train_contigs, valid_contigs, test_contigs]
@@ -483,6 +482,7 @@ def read_blacklist(blacklist_bed, black_buffer=20):
 def get_labels(
     model_seqs,
     blacklist_bed,
+    baseline_pct,
     pool_width,
     kept_num_after_crop,
     scale,
@@ -492,7 +492,6 @@ def get_labels(
     seqs_cov_file,
     genome_cov_file,
     clip_pct=0.9999999,
-    blacklist_pct=0.5,
 ):
 
     # read blacklist regions
@@ -522,7 +521,7 @@ def get_labels(
 
         # determine baseline coverage
         if target_length >= 8:
-            baseline_cov = np.percentile(seq_cov_nt, 100 * blacklist_pct)
+            baseline_cov = np.percentile(seq_cov_nt, 100 * baseline_pct)
             baseline_cov = np.nan_to_num(baseline_cov)
         else:
             baseline_cov = 0
@@ -536,6 +535,8 @@ def get_labels(
                 black_seq_values = seq_cov_nt[black_seq_start:black_seq_end]
                 seq_cov_nt[black_seq_start:black_seq_end] = np.clip(black_seq_values, -baseline_cov, baseline_cov)
                 # seq_cov_nt[black_seq_start:black_seq_end] = baseline_cov
+
+        # TODO: set umap list value to baseline
 
         # set NaN's to baseline
         nan_mask = np.isnan(seq_cov_nt)
@@ -589,9 +590,14 @@ def get_labels(
         # seqs_cov_open['targets'][si,:] = seq_cov.astype('float16')
 
     # clip extreme values
+    ## we disabled this for now as it causes overflow issue for the data
     targets = np.array(targets, dtype="float16")
-    extreme_clip = np.percentile(targets, 100 * clip_pct)
-    targets = np.clip(targets, -extreme_clip, extreme_clip)
+    # targets = np.array(targets, dtype="float32")
+    # extreme_clip = np.percentile(targets, 100 * clip_pct)
+    # targets = np.clip(targets, -extreme_clip, extreme_clip)
+
+    if np.isnan(targets).any():
+        raise ValueError("NaN values in targets.")
 
     # write all
     seqs_cov_open.create_dataset("targets", data=targets, dtype="float16", compression="gzip")

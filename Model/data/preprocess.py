@@ -1,16 +1,18 @@
 # Adapted from https://github.com/calico/basenji/blob/master/bin/basenji_data.py, https://github.com/calico/basenji/blob/master/bin/basenji_data_read.py
 import json
+import logging
 import multiprocessing as mp
 import os
 import random
+import time
 from functools import partial
 
 import numpy as np
 import pandas as pd
 from utils.config import LOGGER_PREFIX, get_logger
-from utils.utils import split_tasks
 
 from .data_utils import (
+    STD_CHR,
     Contig,
     annotate_unmap,
     break_large_contigs,
@@ -28,38 +30,47 @@ from .data_utils import (
 logger = get_logger(f"{LOGGER_PREFIX}-Data preprocess")
 
 
-def get_trail_value_mp(trial_files, storage_path, mseqs, blacklist_bed, window_size, n_window):
-    for trial_file in trial_files.index:
-        genome_cov_file = trial_files.loc[trial_file, "file"]
-        seqs_cov_file = f"{storage_path}/labels/{trial_file}.h5"
+def get_trail_value_mp(
+    trial, storage_path, mseqs, blacklist_bed, baseline_pct, window_size, n_window, restart=False
+):
 
-        clip_ti = None
-        if "clip" in trial_files.columns:
-            clip_ti = trial_files.loc[trial_file, "clip"]
+    exp = trial["exp"]
+    genome_cov_file = trial["file"]
+    seqs_cov_file = f"{storage_path}/labels/{exp}.h5"
+    sum_stat = trial["sum_stat"]
 
-        clipsoft_ti = None
-        if "clip_soft" in trial_files.columns:
-            clipsoft_ti = trial_files.loc[trial_file, "clip_soft"]
+    clip_ti = trial.get("clip", None)
+    clipsoft_ti = trial.get("clip_soft", None)
+    scale_ti = trial.get("scale", 1)
 
-        scale_ti = 1
-        if "scale" in trial_files.columns:
-            scale_ti = trial_files.loc[trial_file, "scale"]
+    if os.path.exists(seqs_cov_file) and not restart:
+        logger.info("Skipping existing %s" % seqs_cov_file)
+        return None
 
-        if os.path.exists(seqs_cov_file):
-            logger.info("Skipping existing %s" % seqs_cov_file)
-
+    try:
         get_labels(
             model_seqs=mseqs,
             blacklist_bed=blacklist_bed,
+            baseline_pct=baseline_pct,
             pool_width=window_size,
             kept_num_after_crop=n_window,
             scale=scale_ti,
             clip=clip_ti,
             clip_soft=clipsoft_ti,
-            sum_stat=trial_files.loc[trial_file, "sum_stat"],
+            sum_stat=sum_stat,
             seqs_cov_file=seqs_cov_file,
             genome_cov_file=genome_cov_file,
         )
+    except Exception as e:
+        logger.error(f"Fail to process {exp}. Manually check.")
+        if logger.getEffectiveLevel() > logging.DEBUG:
+            logger.error(e)
+        else:
+            # If the logging level is DEBUG, log the full traceback
+            logger.exception(e)
+        return exp
+
+    return None
 
 
 def preprocess(
@@ -67,8 +78,10 @@ def preprocess(
     refer_genom,
     trial_path,
     gap_bed=None,
+    unmap_bed=None,
+    unmap_threshold=0.5,
     blacklist_bed=None,
-    umap_bed=None,
+    baseline_pct=0.25,
     break_threshold=1_179_648,
     stride_train=1.0,
     stride_test=1.0,
@@ -80,20 +93,16 @@ def preprocess(
     valid_pct_or_chr=0.1,
     test_pct_or_chr=0.1,
     sample_pct=1.0,
-    umap_threshold=0.5,
     seed=42,
     num_worker=16,
+    force_restart=False,
 ):
     #################################################
     # basic settings
     #################################################
 
     ## output setting
-    if os.path.isdir(storage_path):
-        os.makedirs(storage_path, exist_ok=True)
-    else:
-        logger.error(f"The storage path {storage_path} should be a directory.")
-        exit(1)
+    os.makedirs(storage_path, exist_ok=True)
 
     ## random seed setting
     random.seed(seed)
@@ -122,168 +131,199 @@ def preprocess(
             raise ValueError("stride_test must be a multiple of snap")
 
     logger.info(
-        f"""
-        Preprocess config:
+        f"""Preprocess config:
         context length: {context_length} bp
         window size: {window_size}
         kept central window num: {n_window}
         stride train: {stride_train} bp
-        stride test: {stride_test} bp
-        """
+        stride test: {stride_test} bp"""
     )
 
-    #################################################
-    # read in / curate the reference genome
-    #################################################
+    if force_restart or not os.path.exists(f"{storage_path}/statistics.json"):
+        logger.info("Start preprocess data")
 
-    # load the reference data
-    chrom_contigs = load_chromosomes(refer_genom)
+        #################################################
+        # read in / curate the reference genome
+        #################################################
 
-    # if gap bed file is provided, split the contig and remove the gaps
-    if gap_bed is not None:
-        if not os.path.isfile(gap_bed):
-            logger.error(f"The gap bed file {gap_bed} does not exist.")
-            exit(1)
-        chrom_contigs = split_contigs(chrom_contigs, gap_bed)
+        # load the reference data
+        chrom_contigs = load_chromosomes(refer_genom)
 
-    # ditch the chromosomes for contigs
-    contigs = []
-    for chrom in chrom_contigs:
-        contigs += [Contig(chrom, ctg_start, ctg_end) for ctg_start, ctg_end in chrom_contigs[chrom]]
+        # if gap bed file is provided, split the contig and remove the gaps
+        if gap_bed is not None:
+            if not os.path.isfile(gap_bed):
+                logger.error(f"The gap bed file {gap_bed} does not exist.")
+                exit(1)
+            chrom_contigs = split_contigs(chrom_contigs, gap_bed)
 
-    # filter for large enough contigs
-    contigs = [ctg for ctg in contigs if ctg.end - ctg.start >= context_length]
+        # ditch the chromosomes for contigs
+        contigs = []
+        for chrom in chrom_contigs:
+            contigs += [Contig(chrom, ctg_start, ctg_end) for ctg_start, ctg_end in chrom_contigs[chrom]]
 
-    # break up large contigs
-    if break_threshold is not None:
-        contigs = break_large_contigs(contigs, break_threshold)
+        # filter for large enough contigs
+        contigs = [ctg for ctg in contigs if ctg.end - ctg.start >= context_length]
 
-    ################################################################
-    # divide between train/valid/test (contigs)
-    ################################################################\
+        # filter for specified chromosomes
+        contigs = [ctg for ctg in contigs if ctg.chr in STD_CHR]
 
-    if folds is not None:
-        fold_labels = ["fold%d" % fi for fi in range(folds)]
-        num_folds = folds
-    else:
-        fold_labels = ["train", "valid", "test"]
-        num_folds = 3
+        # break up large contigs
+        if break_threshold is not None:
+            contigs = break_large_contigs(contigs, break_threshold)
 
-    if folds is not None:
-        # divide by fold pct
-        fold_contigs = divide_contigs_folds(contigs, folds)
+        ################################################################
+        # divide between train/valid/test (contigs)
+        ################################################################\
 
-    else:
-        try:
-            # convert to float pct
-            valid_pct = float(valid_pct_or_chr)
-            test_pct = float(test_pct_or_chr)
-            assert 0 <= valid_pct <= 1
-            assert 0 <= test_pct <= 1
-
-            # divide by pct
-            fold_contigs = divide_contigs_pct(contigs, test_pct, valid_pct)
-
-        except (ValueError, AssertionError):
-            # divide by chr
-            valid_chrs = valid_pct_or_chr.split(",")
-            test_chrs = test_pct_or_chr.split(",")
-            fold_contigs = divide_contigs_chr(contigs, test_chrs, valid_chrs)
-
-    # rejoin broken contigs within set
-    for fi in range(len(fold_contigs)):
-        fold_contigs[fi] = rejoin_large_contigs(fold_contigs[fi])
-
-    # write labeled contigs to BED file
-    ctg_bed_file = f"{storage_path}/contigs.bed"
-    with open(ctg_bed_file, "w") as f:
-        for fi in range(len(fold_contigs)):
-            for ctg in fold_contigs[fi]:
-                line = "%s\t%d\t%d\t%s" % (ctg.chr, ctg.start, ctg.end, fold_labels[fi])
-                f.write(line + "\n")
-
-    ################################################################
-    # define model sequences (in each contig, stride across contig)
-    ################################################################
-    fold_mseqs = []
-    for fi in range(num_folds):
-        if fold_labels[fi] in ["valid", "test"]:
-            stride_fold = stride_test
+        if folds is not None:
+            fold_labels = ["fold%d" % fi for fi in range(folds)]
+            num_folds = folds
         else:
-            stride_fold = stride_train
+            fold_labels = ["train", "valid", "test"]
+            num_folds = 3
 
-        # stride sequences across contig
-        fold_mseqs_fi = contig_sequences(fold_contigs[fi], context_length, stride_fold, snap, fold_labels[fi])
-        fold_mseqs.append(fold_mseqs_fi)
+        if folds is not None:
+            # divide by fold pct
+            fold_contigs = divide_contigs_folds(contigs, folds)
 
-        # shuffle
-        random.shuffle(fold_mseqs[fi])
+        else:
+            try:
+                # convert to float pct
+                valid_pct = float(valid_pct_or_chr)
+                test_pct = float(test_pct_or_chr)
+                assert 0 <= valid_pct <= 1
+                assert 0 <= test_pct <= 1
 
-        # down-sample
-        if sample_pct < 1.0:
-            fold_mseqs[fi] = random.sample(fold_mseqs[fi], int(sample_pct * len(fold_mseqs[fi])))
+                # divide by pct
+                fold_contigs = divide_contigs_pct(contigs, test_pct, valid_pct)
 
-    # merge into one list
-    mseqs = [ms for fm in fold_mseqs for ms in fm]
+            except (ValueError, AssertionError):
+                # divide by chr
+                valid_chrs = valid_pct_or_chr.split(",")
+                test_chrs = test_pct_or_chr.split(",")
+                fold_contigs = divide_contigs_chr(contigs, test_chrs, valid_chrs)
 
-    # mappability filter
-    if umap_bed is not None:
-        # annotate unmappable positions
-        mseqs_unmap = annotate_unmap(mseqs, umap_bed, context_length, window_size)
+        # rejoin broken contigs within set
+        for fi in range(len(fold_contigs)):
+            fold_contigs[fi] = rejoin_large_contigs(fold_contigs[fi])
 
-        # filter unmappable
-        mseqs_map_mask = mseqs_unmap.mean(axis=1, dtype="float64") < umap_threshold
-        mseqs = [mseqs[i] for i in range(len(mseqs)) if mseqs_map_mask[i]]
-        mseqs_unmap = mseqs_unmap[mseqs_map_mask, :]
+        # write labeled contigs to BED file
+        ctg_bed_file = f"{storage_path}/contigs.bed"
+        with open(ctg_bed_file, "w") as f:
+            for fi in range(len(fold_contigs)):
+                for ctg in fold_contigs[fi]:
+                    line = "%s\t%d\t%d\t%s" % (ctg.chr, ctg.start, ctg.end, fold_labels[fi])
+                    f.write(line + "\n")
 
-        # write to file
-        unmap_npy = f"{storage_path}/mseqs_unmap.npy"
-        np.save(unmap_npy, mseqs_unmap)
+        ################################################################
+        # define model sequences (in each contig, stride across contig)
+        ################################################################
+        fold_mseqs = []
+        for fi in range(num_folds):
+            if fold_labels[fi] in ["valid", "test"]:
+                stride_fold = stride_test
+            else:
+                stride_fold = stride_train
 
-    # write all the sequences to BED
-    seqs_bed_file = f"{storage_path}/sequences.bed"
-    write_seqs_bed(seqs_bed_file, mseqs, labels=True)
+            # stride sequences across contig
+            fold_mseqs_fi = contig_sequences(fold_contigs[fi], context_length, stride_fold, snap, fold_labels[fi])
+            fold_mseqs.append(fold_mseqs_fi)
 
-    ################################################################
-    # generate labels for the model sequences
-    ################################################################
+            # shuffle
+            random.shuffle(fold_mseqs[fi])
 
-    # read in the trail bigwig summary files
-    try:
-        trial_files = pd.read_csv(trial_path, index_col=0)
-    except FileNotFoundError:
-        logger.error(
-            "The trial files should be provided in a summary csv file, with at least the file path (`file`) and summary statistics (`sum_stat`) provided."
+            # down-sample
+            if sample_pct < 1.0:
+                fold_mseqs[fi] = random.sample(fold_mseqs[fi], int(sample_pct * len(fold_mseqs[fi])))
+
+        # merge into one list
+        mseqs = [ms for fm in fold_mseqs for ms in fm]
+
+        # mappability filter
+        if unmap_bed is not None:
+            # annotate unmappable positions
+            mseqs_unmap = annotate_unmap(mseqs, unmap_bed, context_length, window_size)
+
+            # filter unmappable
+            mseqs_map_mask = mseqs_unmap.mean(axis=1, dtype="float64") < unmap_threshold
+            mseqs = [mseqs[i] for i in range(len(mseqs)) if mseqs_map_mask[i]]
+            mseqs_unmap = mseqs_unmap[mseqs_map_mask, :]
+
+            # save the mappability mask for kept model sequences
+            unmap_npy = f"{storage_path}/mseqs_unmap.npy"
+            np.save(unmap_npy, mseqs_unmap)
+
+        # write all the sequences to BED
+        seqs_bed_file = f"{storage_path}/sequences.bed"
+        write_seqs_bed(seqs_bed_file, mseqs, labels=True)
+
+        logger.info(
+            "Finally get\n" + "\n".join(f"{fold_labels[fi]}_num: {len(fold_mseqs[fi])}" for fi in range(num_folds))
         )
-        exit(1)
-    logger.info(f"Found {len(trial_files)} trial files.")
 
-    os.makedirs(f"{storage_path}/labels", exist_ok=True)
+        ################################################################
+        # generate labels for the model sequences
+        ################################################################
 
-    # get summary statistics
-    get_trail_value_mp_prebound = partial(
-        get_trail_value_mp,
-        storage_path=storage_path,
-        mseqs=mseqs,
-        blacklist_bed=blacklist_bed,
-        window_size=window_size,
-        n_window=n_window,
-    )
-    tasks = split_tasks(trial_files, num_worker)
-    with mp.Pool(processes=num_worker) as pool:
-        pool.map(get_trail_value_mp_prebound, tasks)
+        # read in the trail bigwig summary files
+        try:
+            trial_files = pd.read_csv(trial_path)
+            assert "file" in trial_files.columns
+            assert "exp" in trial_files.columns
+            assert "sum_stat" in trial_files.columns
+        except FileNotFoundError or AssertionError:
+            logger.error(
+                "The trial files should be provided in a summary csv file, with at least the file path (`file`), the trial name (`exp`) and summary statistics (`sum_stat`) provided."
+            )
+            exit(1)
+        logger.info(f"Found {len(trial_files)} trial files. Start generate labels.")
 
-    ################################################################
-    # stats
-    ################################################################
-    stats_dict = {}
-    stats_dict["num_targets"] = trial_files.shape[0]
-    stats_dict["context_length"] = context_length
-    stats_dict["window_size"] = window_size
-    stats_dict["kept_bin_num"] = n_window
+        os.makedirs(f"{storage_path}/labels", exist_ok=True)
 
-    for fi in range(num_folds):
-        stats_dict["%s_seqs" % fold_labels[fi]] = len(fold_mseqs[fi])
+        # get summary statistics
+        get_trail_value_mp_prebound = partial(
+            get_trail_value_mp,
+            storage_path=storage_path,
+            mseqs=mseqs,
+            blacklist_bed=blacklist_bed,
+            baseline_pct=baseline_pct,
+            window_size=window_size,
+            n_window=n_window,
+            restart=force_restart,
+        )
 
-    with open(f"{storage_path}/statistics.json", "w") as stats_json_out:
-        json.dump(stats_dict, stats_json_out, indent=4)
+        start_time = time.perf_counter()
+        with mp.Pool(processes=num_worker) as pool:
+            failed_targets = pool.map(get_trail_value_mp_prebound, trial_files.to_dict(orient="records"))
+        end_time = time.perf_counter()
+
+        failed_targets = [item for item in failed_targets if item is not None]
+        failed_num = sum(failed_targets)
+        if failed_num > 0:
+            logger.warning(f"Failed to process {failed_num} trial files. Please check the log for details.")
+            with open(f"{storage_path}/failed_trials.txt", "w") as f:
+                for trial in failed_targets:
+                    f.write(f"{trial}\n")
+
+        ################################################################
+        # stats
+        ################################################################
+        stats_dict = {}
+        stats_dict["total_targets"] = trial_files.shape[0]
+        stats_dict["succeeded_targets_num"] = trial_files.shape[0] - failed_num
+        stats_dict["failed_targets_num"] = failed_num
+        stats_dict["context_length"] = context_length
+        stats_dict["window_size"] = window_size
+        stats_dict["kept_bin_num"] = n_window
+        stats_dict["time"] = end_time - start_time
+
+        for fi in range(num_folds):
+            stats_dict["%s_seqs" % fold_labels[fi]] = len(fold_mseqs[fi])
+
+        with open(f"{storage_path}/statistics.json", "w") as stats_json_out:
+            json.dump(stats_dict, stats_json_out, indent=4)
+
+        logger.info(f"Finish preprocess data in {(end_time - start_time) / 60:.2f} minutes\nSave at: {storage_path}")
+
+    else:
+        logger.info(f"Preprocess data already exists at {storage_path}. Skipping preprocess step.")

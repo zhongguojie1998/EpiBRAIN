@@ -11,7 +11,7 @@ warnings.filterwarnings("ignore")
 
 import click
 from data.preprocess import preprocess
-from utils.config import LOGGER_PREFIX, get_logger, load_config, set_logging_level
+from utils.config import LOGGER_PREFIX, get_logger, load_config, setup_logging
 
 # from utils.trainer import DNASeqModelTrainer
 
@@ -22,6 +22,7 @@ logger = get_logger(f"{LOGGER_PREFIX}-Main")
 @click.option(
     "--config_dir",
     "-c",
+    default="./Config",
     required=True,
     type=click.Path(exists=True, file_okay=False),
     help="Path to the Hydra config directory (contains config.yaml + groups)",
@@ -35,23 +36,25 @@ logger = get_logger(f"{LOGGER_PREFIX}-Main")
 def main(config_dir, override_config):
     # read in config file
     myconfig = load_config(config_dir, override_config)
-    logging_level = myconfig.logging.get("log_mode", "INFO")
-    set_logging_level(eval(f"logging.{logging_level}"))
+    logging_level = myconfig.logging.get("logging_level", "INFO")
+    logging_file = myconfig.logging.get("log_file", None)
+    overwrite = myconfig.logging.get("overwrite_log_file", True)
+    setup_logging(
+        level=eval(f"logging.{logging_level}"),
+        log_file=logging_file,
+        overwrite=overwrite,
+        logger_prefix=LOGGER_PREFIX,
+    )
 
     logger.debug(myconfig)
 
-    # get data
-    if not os.path.exists(f"{myconfig.data.preprocess.storage_path}/statistics.json"):
-        logger.info("Start preprocess data")
-        try:
-            preprocess(**myconfig.data.preprocess)
-        except Exception as e:
-            logger.error("Please check preprocess setting")
-            logger.exception(e)
-            exit(1)
-        logger.info(f"Finish preprocess data\nSave at: {myconfig.data.preprocess.storage_path}")
-    else:
-        logger.info(f"Read in preprocess data from: {myconfig.data.preprocess.storage_path}")
+    # get data split and labels
+    try:
+        preprocess(**myconfig.data.preprocess)
+    except Exception as e:
+        logger.error("Please check preprocess setting")
+        logger.exception(e)
+        exit(1)
 
     # # get the trainer (load the model)
     # mytrainer = DNASeqModelTrainer(myconfig)

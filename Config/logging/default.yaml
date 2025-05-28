@@ -1,2 +1,4 @@
 # logging setup
-log_mode: INFO  # logging level, INFO, DEBUG, etc.
+logging_level: INFO  # logging level, INFO, DEBUG, etc.
+log_file: ./logs/default.log  # if null/not provided, otput the logs to the console, if provided, output the logs to the file
+overwrite_log_file: True  # whether to overwrite the log file, if True, will overwrite the existing log file
