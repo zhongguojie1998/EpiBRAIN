@@ -1,4 +1,6 @@
 # logging setup
-logging_level: INFO  # logging level, INFO, DEBUG, etc.
-log_file: ./logs/default.log  # if null/not provided, otput the logs to the console, if provided, output the logs to the file
-overwrite_log_file: True  # whether to overwrite the log file, if True, will overwrite the existing log file
+log_level: INFO  # logging level, INFO, DEBUG, etc.
+log_dir: ./logs/default  # if null/not provided, otput the logs to the console, if provided, output the logs to the file
+write_log_to_file: True  # whether to output the logs to the file, if True, will output the logs to the file
+overwrite_log_file: False  # whether to overwrite the log file, if True, will overwrite the existing log file
+use_tensorboard: True  # whether to use tensorboard to log the training process, if True, will log the training process to tensorboard

@@ -1,3 +1,3 @@
 # Training setup
-use_ddp: False # whether to use DDP training scheme
-gpu_id: 0 # the gpu used to train the model
+world_size: 1 # how many GPUs to use for training, 1 for single GPU training, >1 for DDP training
+gpu_id: 2 # the gpu used to train the model

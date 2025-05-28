@@ -1,9 +1,10 @@
 from pathlib import Path
 
 import pandas as pd
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader, distributed
 
-from .toeknizer import FastaInterval
+
+from data.tokenizer import FastaInterval
 
 
 class GenomeIntervalDataset(Dataset):
@@ -42,3 +43,19 @@ class GenomeIntervalDataset(Dataset):
         interval = self.df.row(ind)
         chr_name, start, end = (interval[0], interval[1], interval[2])
         return self.tokenizer(chr_name, start, end, return_augs=self.return_augs)
+
+
+def get_dataloader(params, rank, world_size):
+    """get DDP dataloader"""
+    dataset = GenomeIntervalDataset(**params.dataset)
+    sampler = distributed.DistributedSampler(
+        dataset, num_replicas=world_size, rank=rank, shuffle=True
+    )
+
+    return DataLoader(
+        dataset,
+        batch_size=params.training.batch_size,
+        sampler=sampler,
+        num_workers=params.training.num_workers,
+        pin_memory=True,
+    )

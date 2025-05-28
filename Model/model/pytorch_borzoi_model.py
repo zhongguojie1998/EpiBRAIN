@@ -24,9 +24,9 @@ import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
 
-from .config_borzoi import BorzoiConfig
-from .pytorch_borzoi_transformer import Attention, FlashAttention
-from .pytorch_borzoi_utils import Residual, TargetLengthCrop, undo_squashed_scale
+from model.config_borzoi import BorzoiConfig
+from model.pytorch_borzoi_transformer import Attention, FlashAttention
+from model.pytorch_borzoi_utils import Residual, TargetLengthCrop, undo_squashed_scale
 
 ## these for AnnotatedBorzoi
 # DIR = Path(__file__).parents[0]

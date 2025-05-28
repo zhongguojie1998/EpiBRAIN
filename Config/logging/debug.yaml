@@ -2,4 +2,5 @@ defaults:
   - default
 
 # logging setup
-log_mode: DEBUG  # logging level, INFO, DEBUG, etc.
+log_level: DEBUG  
+log_dir: ./logs/debug

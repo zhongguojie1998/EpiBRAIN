@@ -9,7 +9,7 @@ from functools import partial
 
 import numpy as np
 import pandas as pd
-from utils.config import LOGGER_PREFIX, get_logger
+from utils.logging import LOGGER_PREFIX, LazyLogger
 
 from .data_utils import (
     STD_CHR,
@@ -27,7 +27,28 @@ from .data_utils import (
     write_seqs_bed,
 )
 
-logger = get_logger(f"{LOGGER_PREFIX}-Data preprocess")
+logger = LazyLogger(f"{LOGGER_PREFIX}-Data Preprocess")
+
+PARA_CHECK = [
+    "refer_genom",
+    "gap_bed",
+    "unmap_bed",
+    "unmap_threshold",
+    "blacklist_bed",
+    "baseline_pct",
+    "break_threshold",
+    "stride_train",
+    "stride_test",
+    "snap",
+    "context_length",
+    "window_size",
+    "n_window",
+    "folds",
+    "valid_pct_or_chr",
+    "test_pct_or_chr",
+    "sample_pct",
+    "seed",
+]
 
 
 def get_trail_value_mp(
@@ -118,17 +139,21 @@ def preprocess(
 
     ## transform proportion strides to base pairs
     if stride_train <= 1:
-        stride_train = int(np.round(stride_train * context_length))
+        stride_train_int = int(np.round(stride_train * context_length))
+    else:
+        stride_train_int = stride_train
     if stride_test <= 1:
-        stride_test = int(np.round(stride_test * context_length))
+        stride_test_int = int(np.round(stride_test * context_length))
+    else:
+        stride_test_int = stride_test
 
     ## check snap
     if snap is not None:
         if np.mod(context_length, snap) != 0:
             raise ValueError("seq_length must be a multiple of snap")
-        if np.mod(stride_train, snap) != 0:
+        if np.mod(stride_train_int, snap) != 0:
             raise ValueError("stride_train must be a multiple of snap")
-        if np.mod(stride_test, snap) != 0:
+        if np.mod(stride_test_int, snap) != 0:
             raise ValueError("stride_test must be a multiple of snap")
 
     logger.info(
@@ -136,8 +161,8 @@ def preprocess(
         context length: {context_length} bp
         window size: {window_size}
         kept central window num: {n_window}
-        stride train: {stride_train} bp
-        stride test: {stride_test} bp"""
+        stride train: {stride_train_int} bp
+        stride test: {stride_train_int} bp"""
     )
 
     if force_restart or not os.path.exists(f"{storage_path}/statistics.json"):
@@ -222,9 +247,9 @@ def preprocess(
         fold_mseqs = []
         for fi in range(num_folds):
             if fold_labels[fi] in ["valid", "test"]:
-                stride_fold = stride_test
+                stride_fold = stride_test_int
             else:
-                stride_fold = stride_train
+                stride_fold = stride_train_int
 
             # stride sequences across contig
             fold_mseqs_fi = contig_sequences(fold_contigs[fi], context_length, stride_fold, snap, fold_labels[fi])
@@ -259,7 +284,7 @@ def preprocess(
         write_seqs_bed(seqs_bed_file, mseqs, labels=True)
 
         logger.info(
-            "Finally get\n" + "\n".join(f"{fold_labels[fi]}_num: {len(fold_mseqs[fi])}" for fi in range(num_folds))
+            "Get\n" + "\n".join(f"{fold_labels[fi]}_num: {len(fold_mseqs[fi])}" for fi in range(num_folds))
         )
 
         ################################################################
@@ -301,7 +326,9 @@ def preprocess(
         failed_targets = [item for item in failed_targets if item is not None]
         failed_num = sum(failed_targets)
         if failed_num > 0:
-            logger.warning(f"Failed to process {failed_num} trial files. Please check the log for details.")
+            logger.warning(
+                f"Failed to process {failed_num} trial files. Please check the log for details. The failed trials are saved in {storage_path}/failed_trials.txt"
+            )
             with open(f"{storage_path}/failed_trials.txt", "w") as f:
                 for trial in failed_targets:
                     f.write(f"{trial}\n")
@@ -324,7 +351,37 @@ def preprocess(
         with open(f"{storage_path}/statistics.json", "w") as stats_json_out:
             json.dump(stats_dict, stats_json_out, indent=4)
 
-        logger.info(f"Finish preprocess data in {(end_time - start_time) / 60:.2f} minutes\nSave at: {storage_path}")
+        with open(f"{storage_path}/para.json", "w") as para_json_out:
+            para = {k: v for k, v in locals().items() if k in PARA_CHECK}
+            json.dump(para, para_json_out, indent=4)
+
+        logger.info(
+            f"Finish preprocess data in {(end_time - start_time) / 60:.2f} minutes\nSave at: {storage_path}"
+        )
 
     else:
+        # check if the preprocess para setting is the same
+        with open(f"{storage_path}/para.json", "r") as para_json_in:
+            para_dict = json.load(para_json_in)
+        for para in PARA_CHECK:
+            if para not in para_dict:
+                logger.error(
+                    f"The parameter {para} is missing in the preprocessed data. Please re-run preprocess."
+                )
+                exit(1)
+            if locals()[para] != para_dict[para]:
+                logger.error(
+                    f"The parameter {para} is different from the preprocessed data. Please re-run preprocess."
+                )
+                exit(1)
+
+        # load statistics
+        with open(f"{storage_path}/statistics.json", "r") as stats_json_in:
+            stats_dict = json.load(stats_json_in)
+        logger.info(
+            "Get\n"
+            + "\n".join(
+                f"{stats.split('_')[0]}_num: {stats_dict[stats]}" for stats in stats_dict if "_seqs" in stats
+            )
+        )
         logger.info(f"Preprocess data already exists at {storage_path}. Skipping preprocess step.")

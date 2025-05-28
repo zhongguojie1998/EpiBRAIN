@@ -57,6 +57,7 @@ pip install flash-attn --no-build-isolation  # flash attention
 # util packages
 pip install click # command line tool
 pip install hydra-core  # better config
+pip install tensorboard  # better logging
 ```
 
 # Q & A

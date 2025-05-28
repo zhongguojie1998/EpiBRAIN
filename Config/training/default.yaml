@@ -1,2 +1,4 @@
 # Training setup
-use_ddp: True # whether to use DDP training scheme
+world_size: 4 # how many GPUs to use for training, 1 for single GPU training, >1 for DDP training
+MASTER_ADDR: localhost # master address for DDP training
+MASTER_PORT: 12320 # master port for DDP training

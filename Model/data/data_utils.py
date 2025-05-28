@@ -13,9 +13,9 @@ import numpy as np
 import pandas as pd
 import pyBigWig
 import pysam
-from utils.config import LOGGER_PREFIX, get_logger
+from utils.logging import LOGGER_PREFIX, LazyLogger
 
-logger = get_logger(f"{LOGGER_PREFIX}-Data preprocess")
+logger = LazyLogger(f"{LOGGER_PREFIX}-Data Preprocess")
 
 Contig = collections.namedtuple("Contig", ["chr", "start", "end"])
 ModelSeq = collections.namedtuple("ModelSeq", ["chr", "start", "end", "label"])
