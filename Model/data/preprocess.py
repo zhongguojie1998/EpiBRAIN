@@ -60,6 +60,7 @@ def get_trail_value_mp(
             sum_stat=sum_stat,
             seqs_cov_file=seqs_cov_file,
             genome_cov_file=genome_cov_file,
+            clip_pct=0.9999999,
         )
     except Exception as e:
         logger.error(f"Fail to process {exp}. Manually check.")

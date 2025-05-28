@@ -491,7 +491,7 @@ def get_labels(
     sum_stat,
     seqs_cov_file,
     genome_cov_file,
-    clip_pct=0.9999999,
+    clip_pct=None,
 ):
 
     # read blacklist regions
@@ -580,24 +580,20 @@ def get_labels(
         if clip is not None:
             seq_cov = np.clip(seq_cov, -clip, clip)
 
-        # clip float16 min/max
-        seq_cov = np.clip(seq_cov, np.finfo(np.float16).min, np.finfo(np.float16).max)
-
         # save
-        targets.append(seq_cov.astype("float16"))
-
-        # write
-        # seqs_cov_open['targets'][si,:] = seq_cov.astype('float16')
+        targets.append(seq_cov)
 
     # clip extreme values
-    ## we disabled this for now as it causes overflow issue for the data
-    targets = np.array(targets, dtype="float16")
-    # targets = np.array(targets, dtype="float32")
-    # extreme_clip = np.percentile(targets, 100 * clip_pct)
-    # targets = np.clip(targets, -extreme_clip, extreme_clip)
+    targets = np.array(targets, dtype="float32")
+    if not clip_pct is None:
+        extreme_clip = np.quantile(targets, clip_pct, method="lower")
+        targets = np.clip(targets, -extreme_clip, extreme_clip)
 
-    if np.isnan(targets).any():
-        raise ValueError("NaN values in targets.")
+    # clip float16 min/max
+    targets = np.clip(targets, np.finfo(np.float16).min, np.finfo(np.float16).max).astype("float16")
+
+    if not np.isfinite(targets).all():
+        raise ValueError("Non-finite values (NaN or Inf) found in targets.")
 
     # write all
     seqs_cov_open.create_dataset("targets", data=targets, dtype="float16", compression="gzip")

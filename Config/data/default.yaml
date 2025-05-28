@@ -30,8 +30,6 @@ preprocess:
   seed: 42 # random seed for reproducibility
   num_worker: 24 # number of workers to use for the preprocessing
 
-  force_restart: False # whether to restart the preprocessing, if True, will overwrite the existing data
-
 dataset:
   <<: *shared_parameter
   return_seq_indices: False # if True, return single number encoded sequence, if False, return one hot encoding
