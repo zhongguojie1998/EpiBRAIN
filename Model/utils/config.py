@@ -2,6 +2,7 @@ import os
 from typing import Literal
 
 from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
 from utils.logging import LOGGER_PREFIX, LazyLogger
 
 logger = LazyLogger(f"{LOGGER_PREFIX}-Config")
@@ -34,6 +35,8 @@ def load_config(config_dir: str, overrides: tuple[str, ...]):
             config_name="config",
             overrides=list(overrides),
         )
+        config = OmegaConf.to_container(config, resolve=True)
+        config = OmegaConf.create(config)
 
     input_check(
         config.model.bins_to_return,

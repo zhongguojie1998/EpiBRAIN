@@ -20,7 +20,7 @@ accum_step: 1 # gradient accumulation step (effective batchsize=world_size * bat
 ## optimizer setup
 optimizer: AdamW # optimizer to use, the name should be in the torch.optim package
 optimizer_params: # optimizer parameters
-  lr: ${lr}
+  lr: ${training.lr}
 
 scheduler: ReduceLROnPlateau # learning rate scheduler to use, the name should be in the torch.optim.lr_scheduler package
 scheduler_params: # scheduler parameters
@@ -30,6 +30,6 @@ scheduler_params: # scheduler parameters
 
 ## dataloader setup
 dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader
-  batch_size: ${batch_size}
+  batch_size: ${training.batch_size}
   pin_memory: True
   num_workers: 0

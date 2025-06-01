@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import sys
@@ -13,6 +12,7 @@ warnings.filterwarnings("ignore")
 import click
 import torch
 import torch.multiprocessing as mpt
+from omegaconf import OmegaConf
 from data.preprocess import preprocess
 from utils.config import load_config
 from utils.logging import LOGGER_PREFIX, BaseLogger, setup_logging
@@ -82,8 +82,8 @@ def main(config_dir, override_config):
 
     ## save the configs
     logger.debug(myconfig)
-    with open(f"{myconfig.logging.log_dir}/overall_setting.json", "w") as f:
-        json.dump(myconfig, f, indent=4)
+    with open(f"{myconfig.logging.log_dir}/overall_setting.yaml", "w") as f:
+        OmegaConf.save(myconfig, f)
 
     # get data split and labels
     try:

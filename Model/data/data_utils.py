@@ -715,6 +715,8 @@ def aggregate_data(storage_path, preload_data, task=None):
         # TODO: if the data is too large (if we add the pre tokenization step), save it in chunks given how many GPUs are used, so that each dataset will only load the data for one GPU
         for dataset_type, tmp in task.groupby(3):
             torch.save({"label": label_data[tmp.index]}, f"{storage_path}/data/{dataset_type}.pt")
+        torch.save(label_data, f"{storage_path}/data/all_label.pt")
+
     else:
         # save per data point separately
         for i in task.index:

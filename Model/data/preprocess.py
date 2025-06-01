@@ -392,7 +392,7 @@ def preprocess(
     os.makedirs(f"{storage_path}/data", exist_ok=True)
 
     if preload_data:
-        if force_restart or not os.path.exists(f"{storage_path}/data/test.pt"):
+        if force_restart or not os.path.exists(f"{storage_path}/data/all_label.pt"):
             logger.info("Start to aggregate data")
             data = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
             aggregate_data(storage_path=storage_path, preload_data=True, task=data)
