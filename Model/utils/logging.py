@@ -1,6 +1,8 @@
 import logging
 import os
 import sys
+import time
+from typing import Optional
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -8,9 +10,9 @@ LOGGER_PREFIX = "BICAN"
 LOGGING_MODULE = [
     f"{LOGGER_PREFIX}-{i}"
     for i in [
-        "Main",
         "Config",
         "Data Preprocess",
+        "Model",
         "Trainer",
         "MultiGPU Setup",
     ]
@@ -66,7 +68,7 @@ class BaseLogger:
     def _format(
         self,
         logger,
-        fmt: str = "[%(asctime)s] [%(name)s:%(levelname)s]\n%(message)s\n",
+        fmt: str = "[%(asctime)s] [%(name)s:%(levelname)s] %(message)s",
         datefmt: str = "%Y-%m-%d %H:%M:%S",
     ):
         formatter = logging.Formatter(fmt, datefmt)
@@ -102,6 +104,9 @@ class BaseLogger:
     def error(self, msg: str):
         self.logger.error(msg)
 
+    def exception(self, msg: str):
+        self.logger.exception(msg)
+
 
 # logger for DDP training, enable extra tensorboard logging
 class TrainingLogger(BaseLogger):
@@ -124,6 +129,8 @@ class TrainingLogger(BaseLogger):
 
         if use_tensorboard and (self.world_size == 1 or self.rank == 0):
             self.add_tb()
+        if not use_tensorboard:
+            os.makedirs(f"{self.log_dir}/metrics", exist_ok=True)
 
     def set_rank(self, rank: int):
         self.rank = rank
@@ -152,6 +159,10 @@ class TrainingLogger(BaseLogger):
     def error(self, msg: str):
         self.logger.error(msg)
 
+    @add_rank
+    def exception(self, msg: str):
+        self.logger.exception(msg)
+
     # show training information
     @check_rank
     def metric(self, k: str, v: float, step: int, log_also=True):
@@ -177,7 +188,8 @@ class LazyLogger:
         if self._real_logger is None:
             if "LOGGERS" not in globals():
                 self._real_logger = self._backup_logger
-            self._real_logger = LOGGERS.get(self._name, self._backup_logger)
+            else:
+                self._real_logger = LOGGERS.get(self._name, self._backup_logger)
 
     def __getattr__(self, name):
         self._ensure_init()
@@ -195,7 +207,6 @@ def setup_logging(
     level: int = logging.INFO,
     log_dir: str = "./logs",
     redirect: bool = False,
-    overwrite: bool = False,
     use_tensorboard: bool = False,
     world_size: int = 1,
     gpu_id: int = None,
@@ -209,15 +220,7 @@ def setup_logging(
     global LOGGERS
     LOGGERS = {}
     for name in LOGGING_MODULE:
-        if name == "Main":
-            LOGGERS[name] = BaseLogger(
-                name=name,
-                level=level,
-                log_dir=log_dir,
-                redirect=redirect,
-                overwrite=overwrite,
-            )
-        elif "Trainer" in name and "rank" in name:
+        if "Trainer" in name and "rank" in name:
             try:
                 rank = int(name.split("_")[-1])
             except ValueError:
@@ -240,3 +243,30 @@ def setup_logging(
                 redirect=redirect,
                 overwrite=False,
             )
+
+
+class timer:
+
+    def __init__(self, name: str, logg: Optional[BaseLogger] = None, rank: int = 0, world_size: int = 0):
+        self.name = name
+        self.logg = logg
+        self.rank = rank
+        self.world_size = world_size
+
+    @check_rank
+    def _write(self, msg: str):
+        if self.logg is None:
+            print(msg)
+        else:
+            self.logg.info(msg)
+
+    def __enter__(self):
+        self._write(f"{self.name} starting...")
+        self.start = time.perf_counter()
+
+    def __exit__(self, *args):
+        self.end = time.perf_counter()
+        interval = self.end - self.start
+        msg = f"{self.name} elapsed time: {interval:4f} seconds"
+
+        self._write(msg)

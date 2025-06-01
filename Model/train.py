@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sys
@@ -13,13 +14,10 @@ import click
 import torch
 import torch.multiprocessing as mpt
 from data.preprocess import preprocess
-from model.pytorch_borzoi_model import Borzoi
 from utils.config import load_config
-from utils.logging import LOGGER_PREFIX, LazyLogger, setup_logging
-from utils.trainer import DNASeqModelTrainer, mp_main
+from utils.logging import LOGGER_PREFIX, BaseLogger, setup_logging
 from utils.multi_gpu import find_free_port
-
-logger = LazyLogger(f"{LOGGER_PREFIX}-Main")
+from utils.trainer import mp_main
 
 
 @click.command()
@@ -40,32 +38,52 @@ logger = LazyLogger(f"{LOGGER_PREFIX}-Main")
 def main(config_dir, override_config):
     # read in config file and setup logging
     myconfig = load_config(config_dir, override_config)
+
     log_level = myconfig.logging.get("log_level", "INFO")
-    log_dir = myconfig.logging.get("log_dir", "./logs/unknown")
-    os.makedirs(log_dir, exist_ok=True)
+    logger = BaseLogger(
+        name=f"{LOGGER_PREFIX}-Main",
+        level=eval(f"logging.{log_level}"),
+        log_dir=myconfig.logging.log_dir,
+        redirect=myconfig.logging.get("write_log_to_file", False),
+        overwrite=myconfig.logging.get("overwrite_log_file", False),
+    )
+
+    ## set up working directory
+    os.makedirs(myconfig.logging.log_dir, exist_ok=True)
+    os.makedirs(myconfig.logging.checkpoint_dir, exist_ok=True)
+    os.makedirs(myconfig.logging.res_dir, exist_ok=True)
+    os.makedirs(myconfig.data.preprocess.storage_path, exist_ok=True)
 
     ## set up training devices (predefine the loggers for each deivce)
     world_size = myconfig.training.get("world_size", 1)
-    world_size = world_size if world_size <= torch.cuda.device_count() else torch.cuda.device_count()
+    available_devices = max(1, torch.cuda.device_count())
+    world_size = min(world_size, available_devices)
     if world_size > 1:
         if myconfig.training.get("gpu_id", None) is not None:
-            logger.warning(f"World size is set, gpu_id will be ignored, using gpu 0 to {world_size - 1}")
+            logger.warning(f"World size is set, gpu_id will be ignored")
         gpu_id = None
+        logger.info(f"Using gpu 0 to {world_size - 1} for training")
     else:
         gpu_id = myconfig.training.get("gpu_id", 0)
-        gpu_id = gpu_id if torch.cuda.is_available() else "cpu"
+        gpu_id = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Using {gpu_id} for training")
+    myconfig.training.world_size = world_size
+    myconfig.training.gpu_id = gpu_id
 
+    ## set up overall loggings
     setup_logging(
         level=eval(f"logging.{log_level}"),
-        log_dir=log_dir,
+        log_dir=myconfig.logging.log_dir,
         redirect=myconfig.logging.get("write_log_to_file", False),
-        overwrite=myconfig.logging.get("overwrite_log_file", False),
         use_tensorboard=myconfig.logging.get("use_tensorboard", False),
         world_size=world_size,
         gpu_id=gpu_id,
     )
 
+    ## save the configs
     logger.debug(myconfig)
+    with open(f"{myconfig.logging.log_dir}/overall_setting.json", "w") as f:
+        json.dump(myconfig, f, indent=4)
 
     # get data split and labels
     try:
@@ -74,13 +92,6 @@ def main(config_dir, override_config):
         logger.error("Please check preprocess setting")
         logger.exception(e)
         exit(1)
-
-    # get the model
-    model = Borzoi.from_hparams(**myconfig.model)
-    # logger.debug(model)
-
-    # get the trainer (load the model)
-    mytrainer = DNASeqModelTrainer(myconfig)
 
     # set up multigpu training if needed
     if world_size > 1:
@@ -98,8 +109,6 @@ def main(config_dir, override_config):
 
     else:
         logger.info("Single GPU training")
-        if gpu_id == "cpu":
-            logger.warning("No GPU specified/available. Training on CPU.")
         mp_main(rank=gpu_id, world_size=world_size, myconfig=myconfig)
 
 

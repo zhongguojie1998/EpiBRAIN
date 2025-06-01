@@ -1,10 +1,10 @@
-from pathlib import Path
+import math
 
 import pandas as pd
-from torch.utils.data import Dataset, DataLoader, distributed
-
-
+import torch
+import torch.distributed as dist
 from data.tokenizer import FastaInterval
+from torch.utils.data import Dataset, Sampler
 
 
 class GenomeIntervalDataset(Dataset):
@@ -15,6 +15,7 @@ class GenomeIntervalDataset(Dataset):
         storage_path,
         refer_genom,
         context_length=196_608,
+        preload_data=True,
         return_seq_indices=False,
         shift_augs=None,
         rc_aug=False,
@@ -22,10 +23,16 @@ class GenomeIntervalDataset(Dataset):
     ):
         super().__init__()
 
-        self.dataset_type = dataset_type
+        self.storage_path = storage_path
 
-        df = pd.read_csv(f"{storage_path}/{dataset_type}.bed", separator="\t", has_header=False)
-        self.df = df
+        df = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
+        df.columns = ["chr", "start", "end", "split"]
+        self.df = df[df["split"] == dataset_type]
+
+        self.preload_data = preload_data
+
+        if preload_data:
+            self.label = torch.load(f"{storage_path}/data/{dataset_type}.pt")["label"][df.index]
 
         self.tokenizer = FastaInterval(
             fasta_file=refer_genom,
@@ -41,21 +48,76 @@ class GenomeIntervalDataset(Dataset):
 
     def __getitem__(self, ind):
         interval = self.df.row(ind)
-        chr_name, start, end = (interval[0], interval[1], interval[2])
-        return self.tokenizer(chr_name, start, end, return_augs=self.return_augs)
+        chrom, start, end, _ = interval
+        if self.preload_data:
+            label = self.label[ind]
+        else:
+            label = torch.load(f"{self.storage_path}/data/{chrom}_{start}_{end}.pt")["label"]
+
+        return self.tokenizer(chrom, start, end, return_augs=self.return_augs), label
 
 
-def get_dataloader(params, rank, world_size):
-    """get DDP dataloader"""
-    dataset = GenomeIntervalDataset(**params.dataset)
-    sampler = distributed.DistributedSampler(
-        dataset, num_replicas=world_size, rank=rank, shuffle=True
-    )
+class DumySampler:
 
-    return DataLoader(
+    def __init__(self, **kwargs):
+        pass
+
+    def set_epoch(self, epoch):
+        pass
+
+
+class StrictDistributedSampler(Sampler):
+    """
+    strict allow once and only once appearance of each data point in the training loop
+    """
+
+    def __init__(
+        self,
         dataset,
-        batch_size=params.training.batch_size,
-        sampler=sampler,
-        num_workers=params.training.num_workers,
-        pin_memory=True,
-    )
+        num_replicas: int = None,
+        rank: int = None,
+        shuffle: bool = False,
+    ):
+        if num_replicas is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires torch.distributed")
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires torch.distributed")
+            rank = dist.get_rank()
+
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.shuffle = shuffle
+        self.epoch = 0
+        self.num_samples = math.ceil(len(self.dataset) / self.num_replicas)
+
+    def __iter__(self):
+        n = len(self.dataset)
+
+        if self.shuffle:
+            # set the random seed based on the epoch
+            g = torch.Generator()
+            g.manual_seed(self.epoch)
+            indices = torch.randperm(n, generator=g).tolist()
+        else:
+            indices = list(range(n))
+
+        # get the start and end based on the rank
+        start = self.rank * self.num_samples
+        end = min(start + self.num_samples, n)
+        # we do not discard any sample, but it may cause the last card has less sample
+        sub_indices = indices[start:end]
+
+        return iter(sub_indices)
+
+    def __len__(self):
+
+        if self.rank == self.num_replicas - 1:
+            return len(self.dataset) - self.num_samples * (self.num_replicas - 1)
+        return self.num_samples
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch

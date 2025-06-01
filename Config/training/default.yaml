@@ -1,4 +1,35 @@
 # Training setup
+
+## basic hardware setup
 world_size: 4 # how many GPUs to use for training, 1 for single GPU training, >1 for DDP training
+gpu_id: null  # when world size > 1, even if specified, will not be used
 MASTER_ADDR: localhost # master address for DDP training
 MASTER_PORT: 12320 # master port for DDP training
+
+## training stage setting
+load_checkpoint: null # path to the checkpoint to load, if not given, will start from scratch, else, will resume training from the given checkpoint
+test_only: False # whether to only run the test stage, if True, load_checkpoint must be given
+
+## training hyperparameter
+lr: 1e-3 # learning rate
+batch_size: 16 # batch size for one single GPU
+total_epoch: 200  # maximum training epoch number
+loss: poisson # the name of the loss function
+accum_step: 1 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
+
+## optimizer setup
+optimizer: AdamW # optimizer to use, the name should be in the torch.optim package
+optimizer_params: # optimizer parameters
+  lr: ${lr}
+
+scheduler: ReduceLROnPlateau # learning rate scheduler to use, the name should be in the torch.optim.lr_scheduler package
+scheduler_params: # scheduler parameters
+  mode: min # mode to use, 'min' or 'max'
+  factor: 0.8 # factor to reduce the learning rate by
+  lr_min: 1e-6 # number of epochs to wait before reducing the learning rate
+
+## dataloader setup
+dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader
+  batch_size: ${batch_size}
+  pin_memory: True
+  num_workers: 0

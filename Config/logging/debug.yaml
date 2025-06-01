@@ -2,5 +2,7 @@ defaults:
   - default
 
 # logging setup
-log_level: DEBUG  
-log_dir: ./logs/debug
+exp_name: debug  # experiment name, used to create the log directory and checkpoint directory
+log_level: DEBUG
+
+save_every: 1

@@ -1,4 +1,7 @@
 # default Model Setup
+
+model_name: borzoi
+
 ## technical setup
 flashed: True  # whether to use FlashAttention
 use_autocast: True  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
@@ -20,5 +23,5 @@ bins_to_return: 896  # how many (central) bins used to calculate loss, same as i
 
 ## prediction heads
 output_heads: # set up the prediction head name and trial number
-  human: 5313 
-use_head: human
+  human: 93 
+use_head: human # the head use for forward pass

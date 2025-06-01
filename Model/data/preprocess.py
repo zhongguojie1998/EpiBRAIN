@@ -14,6 +14,7 @@ from utils.logging import LOGGER_PREFIX, LazyLogger
 from .data_utils import (
     STD_CHR,
     Contig,
+    aggregate_data,
     annotate_unmap,
     break_large_contigs,
     contig_sequences,
@@ -118,6 +119,7 @@ def preprocess(
     seed=42,
     num_worker=16,
     force_restart=False,
+    preload_data=True,
 ):
     #################################################
     # basic settings
@@ -385,3 +387,23 @@ def preprocess(
             )
         )
         logger.info(f"Preprocess data already exists at {storage_path}. Skipping preprocess step.")
+
+    # start to aggregate the preprocessed data
+    os.makedirs(f"{storage_path}/data", exist_ok=True)
+
+    if preload_data:
+        if force_restart or not os.path.exists(f"{storage_path}/data/test.pt"):
+            logger.info("Start to aggregate data")
+            data = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
+            aggregate_data(storage_path=storage_path, preload_data=True, task=data)
+            logger.info("Finish aggregation")
+    else:
+        data = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
+        data["generate"] = data.apply(
+            lambda x: not os.path.exists(f"{storage_path}/data/{x[0]}_{x[1]}_{x[2]}.pt") or force_restart, axis=1
+        )
+
+        if data["generate"].any():
+            logger.info("Start to aggregate data")
+            aggregate_data(storage_path=storage_path, preload_data=False, task=data[data["generate"]])
+            logger.info("Finish aggregation")

@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pyBigWig
 import pysam
+import torch
 from utils.logging import LOGGER_PREFIX, LazyLogger
 
 logger = LazyLogger(f"{LOGGER_PREFIX}-Data Preprocess")
@@ -493,6 +494,7 @@ def get_labels(
     genome_cov_file,
     clip_pct=None,
 ):
+    """Get coverage labels for model sequences."""
 
     # read blacklist regions
     black_chr_trees = read_blacklist(blacklist_bed)
@@ -606,6 +608,8 @@ def get_labels(
 
 
 class CovFace:
+    """Coverage file I/O interface."""
+
     def __init__(self, cov_file):
         self.cov_file = cov_file
         self.bigwig = False
@@ -677,3 +681,42 @@ class CovFace:
     def close(self):
         if not self.bed:
             self.cov_open.close()
+
+
+def aggregate_data(storage_path, preload_data, task=None):
+    """Aggregate the label data from multiple files into a single file."""
+
+    separate_label_file = [
+        f"{storage_path}/labels/{i}" for i in os.listdir(f"{storage_path}/labels") if i.endswith(".h5")
+    ]
+    if not separate_label_file:
+        logger.error("No label files found in the specified directory.")
+        exit(1)
+    else:
+        logger.info(f"Found {len(separate_label_file)} label files to aggregate.")
+
+    # get all the label data
+    label_data = []
+    label_meta = pd.DataFrame()
+    for dim, label_file in enumerate(separate_label_file):
+        with h5py.File(label_file, "r") as f:
+            label_data.append(f["targets"][:])
+        label_meta.loc[dim, "trial"] = label_file.split("/")[-1].split(".")[0]
+    label_meta.index.name = "dim"
+    label_meta.to_csv(f"{storage_path}/label_meta.csv", index=True)
+
+    label_data = np.stack(label_data, axis=-1)
+    label_data = torch.tensor(label_data, dtype=torch.float16)
+
+    # TODO: add data tokenization into the precompute pipeline
+
+    if preload_data:
+        # save the aggregated data
+        # TODO: if the data is too large (if we add the pre tokenization step), save it in chunks given how many GPUs are used, so that each dataset will only load the data for one GPU
+        for dataset_type, tmp in task.groupby(3):
+            torch.save({"label": label_data[tmp.index]}, f"{storage_path}/data/{dataset_type}.pt")
+    else:
+        # save per data point separately
+        for i in task.index:
+            chrom, start, end = task.iloc[i, [0, 1, 2]]
+            torch.save({"label": label_data[i]}, f"{storage_path}/data/{chrom}_{start}_{end}.pt")
