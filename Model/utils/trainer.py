@@ -14,18 +14,18 @@ torch.backends.cudnn.deterministic = True
 
 from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSampler
 from model.pytorch_borzoi_model import Borzoi
-from utils.logging import LOGGER_PREFIX, LazyLogger, timer
+from utils.logging import LOGGER_PREFIX, TrainingLogger, timer
 from utils.loss import LOSS_DICT
 from utils.multi_gpu import blocking_sync_wait, cleanup, global_aggregate, setup
 
 
-def get_metric_collection(prefix: str = "Validation/"):
+def get_metric_collection(prefix: str = "Validation/", num_outputs=1):
     collection = tm.MetricCollection(
         {
-            "MSE": tm.MeanSquaredError(),
-            "MAE": tm.MeanAbsoluteError(),
-            "PearsonR": tm.PearsonCorrCoef(),
-            "SpearmanR": tm.SpearmanCorrCoef(),
+            "MSE": tm.MeanSquaredError(num_outputs=num_outputs),
+            "MAE": tm.MeanAbsoluteError(num_outputs=num_outputs),
+            "PearsonR": tm.PearsonCorrCoef(num_outputs=num_outputs),
+            "SpearmanR": tm.SpearmanCorrCoef(num_outputs=num_outputs),
         },
         prefix=prefix,
     )
@@ -52,6 +52,7 @@ class DNASeqModelTrainer:
         self.current_epoch = 0
         self.best_valid_loss = torch.inf
         self.metrics = {}
+        self.trial_num = self.model_config.output_heads[self.model_config.use_head]
 
         # set up data
         self.data_split = ["train", "valid", "test"]
@@ -85,18 +86,20 @@ class DNASeqModelTrainer:
         if self.training_config.test_only:
             try:
                 self.data_func["test"]["dataset"] = GenomeIntervalDataset("test", **self.dataset_config)
-            except:
+            except Exception as e:
                 self.logger.error(
                     "Failed to load testing dataset in `test_only` mode. Please check the preprocess setting."
                 )
+                self.logger.exception(e)
                 exit(1)
         else:
             for split in self.data_split:
                 try:
                     self.data_func[split]["dataset"] = GenomeIntervalDataset(split, **self.dataset_config)
-                except:
+                except Exception as e:
                     if split == "train":
                         self.logger.error("Failed to load training dataset. Please check the preprocess setting.")
+                        self.logger.exception(e)
                         exit(1)
                     else:
                         self.logger.warning(f"No {split} dataset found.")
@@ -217,7 +220,7 @@ class DNASeqModelTrainer:
         self.model.train()
 
         running_loss = torch.tensor(0.0, device=self.rank)
-        tm_metrics = get_metric_collection(prefix="Train/").to(self.rank)
+        tm_metrics = get_metric_collection(prefix="Train/", num_outputs=self.trial_num).to(self.rank)
         tm_metrics.reset()
 
         dataloader = self.data_func["train"]["data_loader"]
@@ -239,7 +242,7 @@ class DNASeqModelTrainer:
             self.logger.debug(f"Batch {i}, loss {loss.detach().item():.3f}")
 
             # metrics
-            tm_metrics.update(pred, label)
+            tm_metrics.update(pred.reshape(-1, self.trial_num), label.reshape(-1, self.trial_num))
 
             # whether to do the loss aggregation
             is_accum_step = ((i + 1) % self.training_config.accum_step == 0) or (i + 1 == len(dataloader))
@@ -272,7 +275,7 @@ class DNASeqModelTrainer:
             preds = []
             labels = []
 
-        tm_metrics = get_metric_collection(prefix=f"{log_prefix}/").to(self.rank)
+        tm_metrics = get_metric_collection(prefix=f"{log_prefix}/", num_outputs=self.trial_num).to(self.rank)
         tm_metrics.reset()
 
         dataloader = self.data_func[log_prefix.lower()]["data_loader"]
@@ -298,7 +301,7 @@ class DNASeqModelTrainer:
                     preds.append(pred.detach().cpu())
                     labels.append(label.detach().cpu())
                 # metrics
-                tm_metrics.update(pred, label)
+                tm_metrics.update(pred.reshape(-1, self.trial_num), label.reshape(-1, self.trial_num))
 
         # get and write the metric logs
         self.metrics.update(tm_metrics.compute(sync_dist=self.world_size > 1))
@@ -320,7 +323,17 @@ class DNASeqModelTrainer:
 # this function also support single GPU training
 def mp_main(rank, world_size, myconfig):
     # special train loggers which can also log to tensorboard
-    logger = LazyLogger(f"{LOGGER_PREFIX}-Trainer:rank_{rank}")
+
+    logger = TrainingLogger(
+        name=f"{LOGGER_PREFIX}-Trainer:rank_{rank}",
+        level=myconfig.logging.log_level,
+        log_dir=myconfig.logging.log_dir,
+        redirect=myconfig.logging.write_log_to_file,
+        overwrite=False,
+        rank=rank,
+        world_size=world_size,
+        use_tensorboard=myconfig.logging.use_tensorboard,
+    )
 
     # if we have multiple GPUs, we need to set up DDP
     setup(rank, world_size, myconfig.training.MASTER_ADDR, myconfig.training.MASTER_PORT)
@@ -377,17 +390,19 @@ def mp_main(rank, world_size, myconfig):
             # write the metrics
             ## if we use tensorboard, the metrics will be written into tb (initialized when creating the training logger)
             for k, v in trainer.metrics.items():
-                trainer.logger.metric(k, v.item(), step=trainer.current_epoch)
+                trainer.logger.metric(k, v.mean().cpu().item(), step=trainer.current_epoch)
             if not myconfig.logging.use_tensorboard and trainer.should_log:
                 with open(f"{myconfig.logging.log_dir}/metrics/epoch_{trainer.current_epoch}.json", "w") as f:
                     json.dump(
                         {
-                            k: v.cpu().item() if isinstance(v, torch.tensor) else v
+                            k: v.mean().cpu().item() if isinstance(v, torch.tensor) else v
                             for k, v in trainer.metrics.items()
                         },
                         f,
                         indent=4,
                     )
+
+            # save the test result
             if save_test_res and trainer.should_log:
                 # aggregate the results and clear per rank file
                 pattern = f"{trainer.logging_config.res_dir}/preds_rank*_epoch_{trainer.current_epoch}.pt"

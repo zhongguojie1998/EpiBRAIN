@@ -12,7 +12,7 @@ test_only: False # whether to only run the test stage, if True, load_checkpoint 
 
 ## training hyperparameter
 lr: 1e-3 # learning rate
-batch_size: 16 # batch size for one single GPU
+batch_size: 8 # batch size for one single GPU
 total_epoch: 200  # maximum training epoch number
 loss: poisson # the name of the loss function
 accum_step: 1 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
@@ -26,7 +26,8 @@ scheduler: ReduceLROnPlateau # learning rate scheduler to use, the name should b
 scheduler_params: # scheduler parameters
   mode: min # mode to use, 'min' or 'max'
   factor: 0.8 # factor to reduce the learning rate by
-  lr_min: 1e-6 # number of epochs to wait before reducing the learning rate
+  patience: 10 # number of epochs to wait before reducing the learning rate
+  min_lr: 1e-6 # the minimum learning rate
 
 ## dataloader setup
 dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader

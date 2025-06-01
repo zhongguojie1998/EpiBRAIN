@@ -316,6 +316,7 @@ class Borzoi(PreTrainedModel):
                 for head_name, head in self.prediction_head.items():
                     if head != use_head:
                         out += 0 * self.prediction_head[head_name](x.float()).sum()
+                return out
             else:
                 return self.final_softplus(self.prediction_head[use_head](x.float()))
 

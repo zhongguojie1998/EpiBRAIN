@@ -207,42 +207,19 @@ def setup_logging(
     level: int = logging.INFO,
     log_dir: str = "./logs",
     redirect: bool = False,
-    use_tensorboard: bool = False,
-    world_size: int = 1,
-    gpu_id: int = None,
 ):
     global LOGGING_MODULE
-    if world_size > 1:
-        LOGGING_MODULE += [f"{LOGGER_PREFIX}-Trainer:rank_{i}" for i in range(world_size)]
-    else:
-        LOGGING_MODULE += [f"{LOGGER_PREFIX}-Trainer:rank_{gpu_id}"]
 
     global LOGGERS
     LOGGERS = {}
     for name in LOGGING_MODULE:
-        if "Trainer" in name and "rank" in name:
-            try:
-                rank = int(name.split("_")[-1])
-            except ValueError:
-                rank = 0
-            LOGGERS[name] = TrainingLogger(
-                name=name,
-                level=level,
-                log_dir=log_dir,
-                redirect=redirect,
-                overwrite=False,
-                rank=rank,
-                world_size=world_size,
-                use_tensorboard=use_tensorboard,
-            )
-        else:
-            LOGGERS[name] = BaseLogger(
-                name=name,
-                level=level,
-                log_dir=log_dir,
-                redirect=redirect,
-                overwrite=False,
-            )
+        LOGGERS[name] = BaseLogger(
+            name=name,
+            level=level,
+            log_dir=log_dir,
+            redirect=redirect,
+            overwrite=False,
+        )
 
 
 class timer:

@@ -27,12 +27,12 @@ class GenomeIntervalDataset(Dataset):
 
         df = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
         df.columns = ["chr", "start", "end", "split"]
-        self.df = df[df["split"] == dataset_type]
+        self.df = df[df["split"] == dataset_type].reset_index(drop=True)
 
         self.preload_data = preload_data
 
         if preload_data:
-            self.label = torch.load(f"{storage_path}/data/{dataset_type}.pt")["label"][df.index]
+            self.label = torch.load(f"{storage_path}/data/{dataset_type}.pt")["label"][self.df.index]
 
         self.tokenizer = FastaInterval(
             fasta_file=refer_genom,
@@ -47,7 +47,7 @@ class GenomeIntervalDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, ind):
-        interval = self.df.row(ind)
+        interval = self.df.iloc[ind]
         chrom, start, end, _ = interval
         if self.preload_data:
             label = self.label[ind]

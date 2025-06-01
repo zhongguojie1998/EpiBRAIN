@@ -12,8 +12,8 @@ warnings.filterwarnings("ignore")
 import click
 import torch
 import torch.multiprocessing as mpt
-from omegaconf import OmegaConf
 from data.preprocess import preprocess
+from omegaconf import OmegaConf
 from utils.config import load_config
 from utils.logging import LOGGER_PREFIX, BaseLogger, setup_logging
 from utils.multi_gpu import find_free_port
@@ -39,13 +39,21 @@ def main(config_dir, override_config):
     # read in config file and setup logging
     myconfig = load_config(config_dir, override_config)
 
+    ## set up logging
     log_level = myconfig.logging.get("log_level", "INFO")
+    myconfig.logging.log_level = eval(f"logging.{log_level}") if isinstance(log_level, str) else log_level
     logger = BaseLogger(
         name=f"{LOGGER_PREFIX}-Main",
-        level=eval(f"logging.{log_level}"),
+        level=myconfig.logging.log_level,
         log_dir=myconfig.logging.log_dir,
-        redirect=myconfig.logging.get("write_log_to_file", False),
-        overwrite=myconfig.logging.get("overwrite_log_file", False),
+        redirect=myconfig.logging.write_log_to_file,
+        overwrite=myconfig.logging.overwrite_log_file,
+    )
+    ## set up overall loggings
+    setup_logging(
+        level=myconfig.logging.log_level,
+        log_dir=myconfig.logging.log_dir,
+        redirect=myconfig.logging.write_log_to_file,
     )
 
     ## set up working directory
@@ -69,16 +77,6 @@ def main(config_dir, override_config):
         logger.info(f"Using {gpu_id} for training")
     myconfig.training.world_size = world_size
     myconfig.training.gpu_id = gpu_id
-
-    ## set up overall loggings
-    setup_logging(
-        level=eval(f"logging.{log_level}"),
-        log_dir=myconfig.logging.log_dir,
-        redirect=myconfig.logging.get("write_log_to_file", False),
-        use_tensorboard=myconfig.logging.get("use_tensorboard", False),
-        world_size=world_size,
-        gpu_id=gpu_id,
-    )
 
     ## save the configs
     logger.debug(myconfig)
