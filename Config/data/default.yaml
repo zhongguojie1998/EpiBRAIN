@@ -1,12 +1,12 @@
-shared: &shared_parameter
-  storage_path: ./Data/enformer_style_split # where to store the data embedding, now only support precomputed version
-  refer_genom: ./Data/source/hg38/hg38.fa # path to the reference genome
-  context_length: 196_608  # The length of the DNA serving as one sample. For enformer, the number is 196,608
-  preload_data: True  # whether to preload the data into memory, if True, will load the data into memory, if False, will load the data from disk when needed
+storage_path: ./Data/enformer_style_split_mean # where to store the data embedding, now only support precomputed version
+refer_genom: ./Data/source/hg38/hg38.fa # path to the reference genome
+context_length: 196_608  # The length of the DNA serving as one sample. For enformer, the number is 196,608
+preload_data: True  # whether to preload the data into memory, if True, will load the data into memory, if False, will load the data from disk when needed
 
 preprocess:
-  <<: *shared_parameter
-  trial_path: ./data_summary.csv # path to the trials (label), only support bigwig files
+  storage_path: ${data.storage_path}
+  refer_genom: ${data.refer_genom}
+  trial_summary_path: ./Data/data_config/data_summary_mean.csv # path to the trials (label), only support bigwig files
   gap_bed: ./Data/source/hg38_unmap_macro.bed # if provided, delete all the reads from gap regions so that they are not included in the datasets
 
   unmap_bed: null # if provided, delete reads with too many unmap regions so that they are not included in the datasets
@@ -20,6 +20,7 @@ preprocess:
   stride_train: 98_367 # the stride to get the next context, can be given in relative percentage of the context_length (1.0 means no overlap, 0.5 means half overlap, etc.), or in absolute number of base pairs (e.g., 196,608 etc.). Here, the stride is 196,608 / 2 (50% overlap) + 63, to slightly shift the window boundary
   stride_test: 98_367 
   snap: 1 # align the sampling init point of each contig, e.g., 1000 means the sampling will start from the closest multiple of 1000th base pair of each contig, this is to ensure the same sampling point for each contig, so that the training and testing data are aligned
+  context_length: ${data.context_length}
   window_size: 128  # The window size is restricted by the model architecture (the final bp resolution). For enformer, the number is 128
   n_window: 896 # The central bin number to keep and calculate the label. For enformer, the number is 896 (196,608 / 128 (bins) - 320 (bins per side) * 2)
 
@@ -30,12 +31,16 @@ preprocess:
 
   seed: 42 # random seed for reproducibility
   num_worker: 24 # number of workers to use for the preprocessing
+  preload_data: ${data.preload_data}
 
   force_restart: False # whether to restart the preprocessing, if True, will delete the existing processed data and start from scratch
 
 dataset:
-  <<: *shared_parameter
-  return_seq_indices: False # if True, return single number encoded sequence, if False, return one hot encoding
-  shift_augs: null  # skip seq shift augumentation, if provided, will randomly shift the sequence by a random bases
-  rc_aug: False # skip reverse strand augumentation, if provided, will randomly reverse the sequence
-  return_augs: False # whether to return augumentation records 
+  storage_path: ${data.storage_path}
+  refer_genom: ${data.refer_genom}
+  context_length: ${data.context_length}
+  preload_data: ${data.preload_data}
+  shift_augs:  # data augumentation, if provided, will randomly shift the sequence by a random bases
+    - -3 # minimum shift 
+    - 3 # maximum shift
+  rc_aug: True # data augumentation, if provided, will randomly reverse the sequence

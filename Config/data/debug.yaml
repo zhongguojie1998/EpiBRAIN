@@ -1,0 +1,8 @@
+defaults:
+  - default
+
+storage_path: ./Data/debug
+
+preprocess:
+  # to save time while debugging, we have a small sample size
+  sample_pct: 0.001

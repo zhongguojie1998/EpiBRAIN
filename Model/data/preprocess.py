@@ -99,7 +99,7 @@ def get_trail_value_mp(
 def preprocess(
     storage_path,
     refer_genom,
-    trial_path,
+    trial_summary_path,
     gap_bed=None,
     unmap_bed=None,
     unmap_threshold=0.5,
@@ -295,7 +295,7 @@ def preprocess(
 
         # read in the trail bigwig summary files
         try:
-            trial_files = pd.read_csv(trial_path)
+            trial_files = pd.read_csv(trial_summary_path)
             assert "file" in trial_files.columns
             assert "exp" in trial_files.columns
             assert "sum_stat" in trial_files.columns

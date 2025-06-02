@@ -16,10 +16,9 @@ class GenomeIntervalDataset(Dataset):
         refer_genom,
         context_length=196_608,
         preload_data=True,
-        return_seq_indices=False,
         shift_augs=None,
         rc_aug=False,
-        return_augs=False,
+        return_augs=True,
     ):
         super().__init__()
 
@@ -37,7 +36,7 @@ class GenomeIntervalDataset(Dataset):
         self.tokenizer = FastaInterval(
             fasta_file=refer_genom,
             context_length=context_length,
-            return_seq_indices=return_seq_indices,
+            return_seq_indices=False,
             shift_augs=shift_augs,
             rc_aug=rc_aug,
         )
@@ -47,14 +46,20 @@ class GenomeIntervalDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, ind):
-        interval = self.df.iloc[ind]
-        chrom, start, end, _ = interval
+        interval = self.df.iloc[ind, [0, 1, 2]]
+        chrom, start, end = interval
         if self.preload_data:
             label = self.label[ind]
         else:
             label = torch.load(f"{self.storage_path}/data/{chrom}_{start}_{end}.pt")["label"]
 
-        return self.tokenizer(chrom, start, end, return_augs=self.return_augs), label
+        one_hot, shift, reverse = self.tokenizer(chrom, start, end, return_augs=self.return_augs)
+        if self.return_augs:
+            # here, if reverse, the sequence is still 5'->3', which means the corresponding label should be reversed
+            if reverse:
+                label = torch.flip(label, dims=[0])
+
+        return one_hot, label
 
 
 class DumySampler:

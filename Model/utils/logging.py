@@ -13,7 +13,6 @@ LOGGING_MODULE = [
         "Config",
         "Data Preprocess",
         "Model",
-        "Trainer",
         "MultiGPU Setup",
     ]
 ]
@@ -165,11 +164,14 @@ class TrainingLogger(BaseLogger):
 
     # show training information
     @check_rank
-    def metric(self, k: str, v: float, step: int, log_also=True):
+    def metric(self, k: str, v: float, step: int, log_also=True, write_hist=False):
         if log_also:
             self.info(f"[Metric] [Step {step}] {k} = {v:.6f}")
         if hasattr(self, "writer"):
-            self.writer.add_scalar(k, v, step or 0)
+            if not write_hist:
+                self.writer.add_scalar(k, v, step or 0)
+            else:
+                self.writer.add_histogram(k, v, step or 0)
 
 
 class LazyLogger:
@@ -209,9 +211,9 @@ def setup_logging(
     redirect: bool = False,
 ):
     global LOGGING_MODULE
-
     global LOGGERS
     LOGGERS = {}
+
     for name in LOGGING_MODULE:
         LOGGERS[name] = BaseLogger(
             name=name,
@@ -247,3 +249,25 @@ class timer:
         msg = f"{self.name} elapsed time: {interval:4f} seconds"
 
         self._write(msg)
+
+
+def save_tensorboard_run_script(log_dir, port=8890, save_dir="."):
+    script = f"""#! /bin/bash
+set -Eeuo pipefail
+
+# activate conda environment
+__conda_setup="$('conda' 'shell.bash' 'hook' 2> /dev/null)"
+eval "$__conda_setup"
+unset __conda_setup
+
+conda activate bican
+
+echo "Visualize on local machine use:"
+echo "ssh -L {port}:localhost:{port} $USER@$HOSTNAME"
+echo ""
+
+tensorboard --logdir {os.path.abspath(log_dir)} --port {port}
+    """
+
+    with open(f"{save_dir}/tensorboard.sh", "w") as f:
+        f.write(script)

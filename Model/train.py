@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import sys
 import warnings
 from pathlib import Path
@@ -10,13 +11,14 @@ sys.path.append(ROOT)
 warnings.filterwarnings("ignore")
 
 import click
+import numpy as np
 import torch
 import torch.multiprocessing as mpt
 from data.preprocess import preprocess
 from omegaconf import OmegaConf
 from utils.config import load_config
-from utils.logging import LOGGER_PREFIX, BaseLogger, setup_logging
-from utils.multi_gpu import find_free_port
+from utils.logging import LOGGER_PREFIX, BaseLogger, save_tensorboard_run_script, setup_logging
+from utils.multi_gpu import find_free_port, cleanup
 from utils.trainer import mp_main
 
 
@@ -42,6 +44,14 @@ def main(config_dir, override_config):
     ## set up logging
     log_level = myconfig.logging.get("log_level", "INFO")
     myconfig.logging.log_level = eval(f"logging.{log_level}") if isinstance(log_level, str) else log_level
+
+    ## set up working directory
+    os.makedirs(myconfig.logging.log_dir, exist_ok=True)
+    os.makedirs(myconfig.logging.checkpoint_dir, exist_ok=True)
+    os.makedirs(myconfig.logging.res_dir, exist_ok=True)
+    os.makedirs(myconfig.data.preprocess.storage_path, exist_ok=True)
+
+    ## set up overall loggings
     logger = BaseLogger(
         name=f"{LOGGER_PREFIX}-Main",
         level=myconfig.logging.log_level,
@@ -49,18 +59,11 @@ def main(config_dir, override_config):
         redirect=myconfig.logging.write_log_to_file,
         overwrite=myconfig.logging.overwrite_log_file,
     )
-    ## set up overall loggings
     setup_logging(
         level=myconfig.logging.log_level,
         log_dir=myconfig.logging.log_dir,
         redirect=myconfig.logging.write_log_to_file,
     )
-
-    ## set up working directory
-    os.makedirs(myconfig.logging.log_dir, exist_ok=True)
-    os.makedirs(myconfig.logging.checkpoint_dir, exist_ok=True)
-    os.makedirs(myconfig.logging.res_dir, exist_ok=True)
-    os.makedirs(myconfig.data.preprocess.storage_path, exist_ok=True)
 
     ## set up training devices (predefine the loggers for each deivce)
     world_size = myconfig.training.get("world_size", 1)
@@ -78,10 +81,23 @@ def main(config_dir, override_config):
     myconfig.training.world_size = world_size
     myconfig.training.gpu_id = gpu_id
 
+    ## set up random seeds
+    myconfig.training.seed = myconfig.training.get("seed", 42)
+    random.seed(myconfig.training.seed)
+    np.random.seed(myconfig.training.seed)
+    torch.manual_seed(myconfig.training.seed)
+    torch.cuda.manual_seed_all(myconfig.training.seed)
+
     ## save the configs
     logger.debug(myconfig)
     with open(f"{myconfig.logging.log_dir}/overall_setting.yaml", "w") as f:
         OmegaConf.save(myconfig, f)
+
+    ## write a tensorboard booting bash script
+    if myconfig.logging.use_tensorboard:
+        save_tensorboard_run_script(
+            log_dir=f"{myconfig.logging.log_dir}/tb", save_dir=f"{myconfig.logging.log_dir}"
+        )
 
     # get data split and labels
     try:

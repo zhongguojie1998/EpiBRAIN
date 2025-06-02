@@ -5,4 +5,9 @@ defaults:
 exp_name: debug  # experiment name, used to create the log directory and checkpoint directory
 log_level: DEBUG
 
-save_every: 1
+overwrite_log_file: True
+
+# training logging
+save_every: 2
+report_every: 1
+log_more: True

@@ -1,4 +1,10 @@
 defaults:
   - default
 
-total_epoch: 2
+world_size: 1
+gpu_id: 2
+
+batch_size: 4
+lr_warmup_step: 15
+
+total_epoch: 3
