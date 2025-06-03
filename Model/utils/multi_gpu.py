@@ -35,8 +35,12 @@ def setup(rank, world_size=1, MASTER_ADDR="localhost", MASTER_PORT=12320):
         dist.init_process_group("nccl", rank=rank, world_size=world_size)
 
 
+def torchrun_setup():
+    dist.init_process_group("nccl")
+
+
 def cleanup(world_size=1):
-    if world_size > 1:
+    if world_size > 1 and dist.is_initialized():
         dist.destroy_process_group()
 
 def blocking_sync_wait(world_size=1):
