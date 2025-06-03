@@ -8,6 +8,6 @@ log_level: DEBUG
 overwrite_log_file: True
 
 # training logging
-save_every: 2
+save_every: 1
 report_every: 1
 log_more: True

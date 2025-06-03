@@ -2,12 +2,14 @@ import copy
 import glob
 import json
 import os
+import time
 
 import torch
 import torch.optim as optim
 import torchmetrics as tm
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
@@ -17,7 +19,34 @@ from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSa
 from model.pytorch_borzoi_model import Borzoi
 from utils.logging import LOGGER_PREFIX, TrainingLogger, timer
 from utils.loss import LOSS_DICT
-from utils.multi_gpu import blocking_sync_wait, cleanup, global_aggregate, setup
+from utils.multi_gpu import blocking_sync_wait, cleanup, global_aggregate, setup, torchrun_setup
+
+
+def aggregate_test_res(trainer):
+    # aggregate the results and clear per rank file
+    pattern = f"{trainer.logging_config.res_dir}/preds_rank_*_epoch_{trainer.current_epoch}.pt"
+
+    file_list = glob.glob(pattern)
+    if not file_list:
+        trainer.logger.warning("Test res aggregation failed (cannot find any pred file), skip")
+    else:
+        all_labels = []
+        all_preds = []
+        for file_path in file_list:
+            data = torch.load(file_path, map_location="cpu")
+            all_labels.append(data["label"])
+            all_preds.append(data["pred"])
+
+        all_labels = torch.cat(all_labels, dim=0)
+        all_preds = torch.cat(all_preds, dim=0)
+
+        torch.save(
+            {"label": all_labels, "pred": all_preds},
+            f"{trainer.logging_config.res_dir}/preds_epoch_{trainer.current_epoch}.pt",
+        )
+
+        for file_path in file_list:
+            os.remove(file_path)
 
 
 def get_metric_collection(prefix: str = "Validation/", num_outputs=1):
@@ -33,7 +62,8 @@ def get_metric_collection(prefix: str = "Validation/", num_outputs=1):
 
 
 class DNASeqModelTrainer:
-    def __init__(self, config, rank, world_size, logger):
+
+    def __init__(self, config, rank, world_size, logger, local_rank=None):
 
         # set up the configuration
         self.config = config
@@ -45,6 +75,11 @@ class DNASeqModelTrainer:
         self.logger = logger
         # get the hardware setting
         self.rank = rank
+        ## with local rank, we can distribute on different machines
+        if local_rank is not None:
+            self.local_rank = local_rank
+        else:
+            self.local_rank = rank
         self.world_size = world_size
         self.should_log = (self.world_size > 1 and self.rank == 0) or self.world_size == 1
 
@@ -131,7 +166,12 @@ class DNASeqModelTrainer:
             dataset = self.data_func[split]["dataset"]
 
             # get data sampler for each card
-            sampler_cls = StrictDistributedSampler if dataset is not None else DumySampler
+            if self.training_config.test_only:
+                # in testing mode, we force strict, though it may cause dead lock
+                sampler_cls = StrictDistributedSampler if dataset is not None else DumySampler
+            else:
+                # in training mode, we allow resampling
+                sampler_cls = DistributedSampler if dataset is not None else DumySampler
 
             sampler = sampler_cls(
                 dataset=dataset,
@@ -163,10 +203,12 @@ class DNASeqModelTrainer:
             self.logger.error(f"Model {self.model_config.model_name} is not implemented yet.")
             exit(1)
 
-        self.model = self.model.to(self.rank, non_blocking=True)
+        self.model = self.model.to(self.local_rank, non_blocking=True)
         if self.world_size > 1:
             # Add DDP wrapper
-            self.model = DDP(self.model, device_ids=[self.rank], static_graph=True, find_unused_parameters=True)
+            self.model = DDP(
+                self.model, device_ids=[self.local_rank], static_graph=True, find_unused_parameters=True
+            )
 
         self.logger.info(f"Model {self.model_config.model_name} loaded successfully.")
 
@@ -200,7 +242,7 @@ class DNASeqModelTrainer:
 
     def load_checkpoint(self):
         self.logger.info(f"Loading checkpoint from {self.training_config.load_checkpoint}")
-        checkpoint = torch.load(self.training_config.load_checkpoint, map_location=torch.device(self.rank))
+        checkpoint = torch.load(self.training_config.load_checkpoint, map_location=torch.device(self.local_rank))
         self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -248,16 +290,19 @@ class DNASeqModelTrainer:
     def train_step(self):
         self.model.train()
 
-        running_loss = torch.tensor(0.0, device=self.rank)
-        tm_metrics = get_metric_collection(prefix="Train/", num_outputs=self.trial_num).to(self.rank)
+        running_loss = torch.tensor(0.0, device=self.local_rank)
+        tm_metrics = get_metric_collection(prefix="Train/", num_outputs=self.trial_num).to(self.local_rank)
         tm_metrics.reset()
 
         dataloader = self.data_func["train"]["data_loader"]
 
+        # timer
+        start_time = time.perf_counter()
+
         for i, (seq_embedding, label) in enumerate(dataloader):
             # seq_embedding shape [batch, L, 4]
             # label shape [batch, num_central_bin (896), num_trail (93)]
-            seq_embedding, label = seq_embedding.to(self.rank), label.to(self.rank)
+            seq_embedding, label = seq_embedding.to(self.local_rank), label.to(self.local_rank)
             # pred_embedding shape [batch, num_trail (93), num_central_bin (896)]
             pred = self.model(
                 seq_embedding.permute(0, 2, 1),
@@ -291,9 +336,17 @@ class DNASeqModelTrainer:
             # log training status
             if self.current_step % self.logging_config.report_every == 0:
                 report_loss = running_loss.item() * self.training_config.accum_step / (i + 1)
+
+                # running time for batch
+                end_time = time.perf_counter()
+                elapsed_time = end_time - start_time
+
                 if self.logging_config.use_tensorboard:
                     self.logger.metric("Train/loss", report_loss, step=self.current_step, log_also=False)
                     self.logger.metric("Train/lr", self.current_lr, step=self.current_step, log_also=False)
+                    self.logger.metric("Train/time", elapsed_time, step=self.current_step, log_also=False)
+
+                    # we can only log these info in tensorboard
                     if self.logging_config.log_more:
                         for tag, value in self.model.named_parameters():
                             tag = tag.replace(".", "/")
@@ -320,8 +373,9 @@ class DNASeqModelTrainer:
                                 )
                 else:
                     self.logger.info(
-                        f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
+                        f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Time: {elapsed_time:4f} sec | Loss: {report_loss:.6f} | lr: {self.current_lr}"
                     )
+                start_time = time.perf_counter()
 
             # here we reset the gradient in the final stage as we may need to log the gradient value
             if should_update:
@@ -332,18 +386,20 @@ class DNASeqModelTrainer:
         # get and write the metric logs
         ## in the training loop, we only look at the local loss (but for other metrics, we still look at overall performance)
         self.metrics.update(tm_metrics.compute())
-        self.metrics.update({"Train/loss": running_loss * self.training_config.accum_step / len(dataloader)})
+
+        if self.should_log:
+            self.metrics.update({"Train/loss": running_loss * self.training_config.accum_step / len(dataloader)})
 
     def infer_step(self, log_loss=False, save_pred=False, log_prefix="Valid"):
         self.model.eval()
 
         if log_loss:
-            running_loss_local = torch.tensor(0.0, device=self.rank)
+            running_loss_local = torch.tensor(0.0, device=self.local_rank)
         if save_pred:
             preds = []
             labels = []
 
-        tm_metrics = get_metric_collection(prefix=f"{log_prefix}/", num_outputs=self.trial_num).to(self.rank)
+        tm_metrics = get_metric_collection(prefix=f"{log_prefix}/", num_outputs=self.trial_num).to(self.local_rank)
         tm_metrics.reset()
 
         dataloader = self.data_func[log_prefix.lower()]["data_loader"]
@@ -352,7 +408,7 @@ class DNASeqModelTrainer:
             for i, (seq_embedding, label) in enumerate(dataloader):
                 # seq_embedding shape [batch, L, 4]
                 # label shape [batch, num_central_bin (896), num_trail (93)]
-                seq_embedding, label = seq_embedding.to(self.rank), label.to(self.rank)
+                seq_embedding, label = seq_embedding.to(self.local_rank), label.to(self.local_rank)
                 # pred_embedding shape [batch, num_trail (93), num_central_bin (896)]
                 pred = self.model(
                     seq_embedding.permute(0, 2, 1),
@@ -390,7 +446,7 @@ class DNASeqModelTrainer:
 
 
 # this function also support single GPU training
-def mp_main(rank, world_size, myconfig):
+def mp_main(rank, world_size, myconfig, local_rank=None):
     # special train loggers which can also log to tensorboard
     logger = TrainingLogger(
         name=f"{LOGGER_PREFIX}-Trainer",
@@ -405,10 +461,19 @@ def mp_main(rank, world_size, myconfig):
 
     try:
         # if we have multiple GPUs, we need to set up DDP
-        setup(rank, world_size, myconfig.training.MASTER_ADDR, myconfig.training.MASTER_PORT)
+        if myconfig.training.torch_run:
+            torchrun_setup()
+        else:
+            setup(rank, world_size, myconfig.training.MASTER_ADDR, myconfig.training.MASTER_PORT)
 
         # Set up the trainer
-        trainer = DNASeqModelTrainer(myconfig, rank, world_size, logger)
+        trainer = DNASeqModelTrainer(
+            config=myconfig,
+            rank=rank,
+            world_size=world_size,
+            logger=logger,
+            local_rank=local_rank,
+        )
         blocking_sync_wait(world_size)
 
         if not myconfig.training.test_only:
@@ -450,11 +515,16 @@ def mp_main(rank, world_size, myconfig):
                         trainer.save_checkpoint()
                     # save_test_res = True
 
-                if trainer.data_func["test"]["data_loader"] is not None:
-                    with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                        trainer.infer_step(log_loss=True, log_prefix="Test", save_pred=save_test_res)
+                # # testing the model
+                # if trainer.data_func["test"]["data_loader"] is not None:
+                #     with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
+                #         trainer.infer_step(log_loss=True, log_prefix="Test", save_pred=save_test_res)
 
-                    blocking_sync_wait(world_size)
+                #     blocking_sync_wait(world_size)
+
+                # # save the test result
+                # if save_test_res and trainer.should_log:
+                #     aggregate_test_res(trainer)
 
                 # write the metrics
                 ## if we use tensorboard, the metrics will be written into tb (initialized when creating the training logger)
@@ -475,33 +545,6 @@ def mp_main(rank, world_size, myconfig):
                             indent=4,
                         )
 
-                # save the test result
-                if save_test_res and trainer.should_log:
-                    # aggregate the results and clear per rank file
-                    pattern = f"{trainer.logging_config.res_dir}/preds_rank_*_epoch_{trainer.current_epoch}.pt"
-
-                    file_list = glob.glob(pattern)
-                    if not file_list:
-                        trainer.logger.warning("Test res aggregation failed (cannot find any pred file), skip")
-                    else:
-                        all_labels = []
-                        all_preds = []
-                        for file_path in file_list:
-                            data = torch.load(file_path, map_location="cpu")
-                            all_labels.append(data["label"])
-                            all_preds.append(data["pred"])
-
-                        all_labels = torch.cat(all_labels, dim=0)
-                        all_preds = torch.cat(all_preds, dim=0)
-
-                        torch.save(
-                            {"label": all_labels, "pred": all_preds},
-                            f"{trainer.logging_config.res_dir}/preds_epoch_{trainer.current_epoch}.pt",
-                        )
-
-                        for file_path in file_list:
-                            os.remove(file_path)
-
             # for later continue training if needed
             logger.info("Training end.")
             with timer(f"Save final checkpoint", logger, rank, world_size):
@@ -510,6 +553,9 @@ def mp_main(rank, world_size, myconfig):
         else:
             with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
                 trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=True)
+            # save the raw testing preds
+            if trainer.should_log:
+                aggregate_test_res(trainer)
 
         blocking_sync_wait(world_size)
         cleanup(world_size)
