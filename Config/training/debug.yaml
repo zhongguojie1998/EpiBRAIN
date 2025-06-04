@@ -2,6 +2,7 @@ defaults:
   - default
 
 world_size: 4
+gpu_id: 0
 
 batch_size: 1
 lr_warmup_step: 2

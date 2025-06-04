@@ -86,7 +86,7 @@ def get_trail_value_mp(
         )
     except Exception as e:
         logger.error(f"Fail to process {exp}. Manually check.")
-        if logger.getEffectiveLevel() > logging.DEBUG:
+        if logger.level > logging.DEBUG:
             logger.error(e)
         else:
             # If the logging level is DEBUG, log the full traceback

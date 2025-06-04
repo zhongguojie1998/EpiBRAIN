@@ -14,7 +14,7 @@ torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 
 
-from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSampler
+from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSampler, safe_collate_fn
 from model.pytorch_borzoi_model import Borzoi
 from utils.logging import LOGGER_PREFIX, TrainingLogger, timer
 from utils.loss import LOSS_DICT
@@ -209,6 +209,7 @@ class DNASeqModelTrainer:
                     dataset=dataset,
                     sampler=sampler,
                     shuffle=False,  # set shuffle in sampler, dataloader should be set as False
+                    collate_fn=safe_collate_fn,
                     **self.training_config.dataloader_params,
                 )
                 if dataset is not None

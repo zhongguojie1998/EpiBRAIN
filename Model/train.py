@@ -44,8 +44,13 @@ from utils.trainer import mp_main
     is_flag=True,
     help="If we are using torchrun to train the model",
 )
+@click.option(
+    "--only_data",
+    is_flag=True,
+    help="If we are only processing the data",
+)
 @record
-def main(config_dir, override_config, torch_run):
+def main(config_dir, override_config, torch_run, only_data):
 
     # read in config file and setup logging
     myconfig = load_config(config_dir, override_config)
@@ -122,6 +127,8 @@ def main(config_dir, override_config, torch_run):
         logger.error("Please check preprocess setting")
         logger.exception(e)
         exit(1)
+    if only_data:
+        exit(0)
 
     # set up multigpu training if needed
     if torch_run:

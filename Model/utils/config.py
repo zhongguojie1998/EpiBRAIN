@@ -28,7 +28,7 @@ def input_check(
         exit(1)
 
 
-def load_config(config_dir: str, overrides: tuple[str, ...]):
+def load_config(config_dir: str, overrides: tuple[str, ...] = []):
 
     with initialize_config_dir(config_dir=os.path.abspath(config_dir), version_base="1.1"):
         config = compose(
