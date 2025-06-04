@@ -242,7 +242,13 @@ class DNASeqModelTrainer:
     def load_checkpoint(self):
         self.logger.info(f"Loading checkpoint from {self.training_config.load_checkpoint}")
         checkpoint = torch.load(self.training_config.load_checkpoint, map_location=torch.device(self.local_rank))
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+
+        # if DDP, then the model is wrapped in module
+        if self.world_size > 1:
+            self.model.module.load_state_dict(checkpoint["model_state_dict"])
+        else:
+            self.model.load_state_dict(checkpoint["model_state_dict"])
+
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         self.current_epoch = checkpoint["epoch"]
@@ -274,6 +280,7 @@ class DNASeqModelTrainer:
             }
             torch.save(checkpoint, f"{self.logging_config.checkpoint_dir}/chk_epoch_{save_name}.pt")
         self.logger.info("Checkpoint saved successfully.")
+        blocking_sync_wait(self.world_size)
 
     def lr_warmup(self):
         # lr warmup, gradually change from 0 to the given lr
@@ -468,7 +475,6 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
 
         if not myconfig.training.test_only:
             for epoch in range(trainer.current_epoch, myconfig.training.total_epoch):
-                save_test_res = False
                 trainer.logger.info(f"Current Epoch: {trainer.current_epoch + 1}")
 
                 for split in trainer.data_split:
@@ -493,7 +499,6 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                             logger.info(f"New best validation loss: {valid_loss:.6f}")
                             with timer(f"Saving new best model", logger, rank, world_size):
                                 trainer.save_checkpoint(save_name="best_valid_loss")
-                            save_test_res = True
 
                     if trainer.scheduler_update_freq == "epoch":
                         trainer.scheduler.step(valid_loss)
@@ -513,10 +518,6 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
 
                 #     blocking_sync_wait(world_size)
 
-                # # save the test result
-                # if save_test_res and trainer.should_log:
-                #     aggregate_test_res(trainer)
-
                 # write the metrics
                 ## if we use tensorboard, the metrics will be written into tb (initialized when creating the training logger)
                 for k, v in trainer.metrics.items():
@@ -535,6 +536,7 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                             f,
                             indent=4,
                         )
+                blocking_sync_wait(world_size)
 
             # for later continue training if needed
             logger.info("Training end.")
@@ -544,6 +546,8 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
         else:
             with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
                 trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=True)
+                
+            blocking_sync_wait(world_size)
             # save the raw testing preds
             if trainer.should_log:
                 aggregate_test_res(trainer)

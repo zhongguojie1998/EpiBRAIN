@@ -23,11 +23,14 @@ def validate_machine(ctx, param, value):
 
 
 @click.command()
-@click.option("--exp_name", "-e", type=str, required=True, help="The exp name")
-@click.option("-m", "--machine", multiple=True, callback=validate_machine, help="The node(s) to use")
+@click.option("-e", "--exp_name", type=str, required=True, help="The exp name")
+@click.option(
+    "-m", "--machine", multiple=True, required=True, callback=validate_machine, help="The node(s) to use"
+)
+@click.option("-c", "--load_checkpoint", help="Whether to load the chk and continue training")
 @click.option("--nproc-per-node", default=4, help="GPU available per machine")
 @click.option("--master-port", default=1234, help="The master node port")
-def launch_distributed(exp_name: str, machine: List[str], nproc_per_node: int, master_port: int):
+def launch_distributed(exp_name: str, machine: List[str], load_checkpoint: str, nproc_per_node: int, master_port: int):
 
     if not machine:
         raise click.UsageError("At least need one machine")
@@ -50,7 +53,16 @@ def launch_distributed(exp_name: str, machine: List[str], nproc_per_node: int, m
             f"logging=debug",
             "-x",
             f"logging.exp_name={exp_name}",
+
         ]
+
+        if load_checkpoint is not None:
+            cmd += [
+                "-x",
+                f"training.load_checkpoint=./Chk/{exp_name}/chk_epoch_{load_checkpoint}.pt",
+                "-x",
+                f"logging.overwrite_log_file=False",
+            ]
 
         full_cmd = f"""
         cd {WORK_PATH}
