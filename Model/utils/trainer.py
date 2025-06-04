@@ -68,7 +68,7 @@ def construct_logging_metric_dict(trainer):
             # check if it's the metrics log
             if "MSE" in k or "MAE" in k or "PearsonR" in k:
                 for dim, value in enumerate(v):
-                    trial_name = trainer.label_meta.loc[dim]
+                    trial_name = trainer.label_meta.loc[dim, "trial"]
                     metric_dict[f"{k}/{trial_name}"] = value
             else:
                 metric_dict[k] = v.nanmean().item()
