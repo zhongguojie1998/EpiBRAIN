@@ -2,7 +2,6 @@ import copy
 import glob
 import json
 import os
-import time
 
 import torch
 import torch.optim as optim
@@ -49,7 +48,7 @@ def aggregate_test_res(trainer):
             os.remove(file_path)
 
 
-def get_metric_collection(prefix: str = "Validation/", num_outputs=1):
+def get_metric_collection(prefix: str = "Valid/", num_outputs=1):
     collection = tm.MetricCollection(
         {
             "MSE": tm.MeanSquaredError(num_outputs=num_outputs),
@@ -296,9 +295,6 @@ class DNASeqModelTrainer:
 
         dataloader = self.data_func["train"]["data_loader"]
 
-        # timer
-        start_time = time.perf_counter()
-
         for i, (seq_embedding, label) in enumerate(dataloader):
             # seq_embedding shape [batch, L, 4]
             # label shape [batch, num_central_bin (896), num_trail (93)]
@@ -337,14 +333,9 @@ class DNASeqModelTrainer:
             if self.current_step % self.logging_config.report_every == 0:
                 report_loss = running_loss.item() * self.training_config.accum_step / (i + 1)
 
-                # running time for batch
-                end_time = time.perf_counter()
-                elapsed_time = end_time - start_time
-
                 if self.logging_config.use_tensorboard:
                     self.logger.metric("Train/loss", report_loss, step=self.current_step, log_also=False)
                     self.logger.metric("Train/lr", self.current_lr, step=self.current_step, log_also=False)
-                    self.logger.metric("Train/time", elapsed_time, step=self.current_step, log_also=False)
 
                     # we can only log these info in tensorboard
                     if self.logging_config.log_more:
@@ -373,9 +364,8 @@ class DNASeqModelTrainer:
                                 )
                 else:
                     self.logger.info(
-                        f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Time: {elapsed_time:4f} sec | Loss: {report_loss:.6f} | lr: {self.current_lr}"
+                        f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
                     )
-                start_time = time.perf_counter()
 
             # here we reset the gradient in the final stage as we may need to log the gradient value
             if should_update:
@@ -496,13 +486,14 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
 
                     blocking_sync_wait(world_size)
 
-                    valid_loss = trainer.metrics["Valid/loss"]
-                    if valid_loss < trainer.best_valid_loss:
-                        trainer.best_valid_loss = valid_loss
-                        logger.info(f"New best validation loss: {valid_loss:.6f}")
-                        with timer(f"Saving new best model", logger, rank, world_size):
-                            trainer.save_checkpoint(save_name="best_valid_loss")
-                        save_test_res = True
+                    if trainer.should_log:
+                        valid_loss = trainer.metrics["Valid/loss"]
+                        if valid_loss < trainer.best_valid_loss:
+                            trainer.best_valid_loss = valid_loss
+                            logger.info(f"New best validation loss: {valid_loss:.6f}")
+                            with timer(f"Saving new best model", logger, rank, world_size):
+                                trainer.save_checkpoint(save_name="best_valid_loss")
+                            save_test_res = True
 
                     if trainer.scheduler_update_freq == "epoch":
                         trainer.scheduler.step(valid_loss)
