@@ -431,9 +431,10 @@ class DNASeqModelTrainer:
             total_loss = running_loss_local.clone()
             # aggregate the loss value from all devices
             global_aggregate(total_loss, aggregate="sum", world_size=self.world_size)
-            if self.should_log:
-                global_avg_loss = total_loss / (len(dataloader) * self.world_size)
-                self.metrics.update({f"{log_prefix}/loss": global_avg_loss})
+
+            global_avg_loss = total_loss / (len(dataloader) * self.world_size)
+            self.metrics.update({f"{log_prefix}/loss": global_avg_loss})
+
         if save_pred:
             # we have to pre save all the res and later aggregate them
             torch.save(
@@ -492,18 +493,15 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
 
                     blocking_sync_wait(world_size)
 
-                    if trainer.should_log:
-                        valid_loss = trainer.metrics["Valid/loss"]
-                        if valid_loss < trainer.best_valid_loss:
-                            trainer.best_valid_loss = valid_loss
-                            logger.info(f"New best validation loss: {valid_loss:.6f}")
-                            with timer(f"Saving new best model", logger, rank, world_size):
-                                trainer.save_checkpoint(save_name="best_valid_loss")
+                    valid_loss = trainer.metrics["Valid/loss"]
+                    if valid_loss < trainer.best_valid_loss:
+                        trainer.best_valid_loss = valid_loss
+                        logger.info(f"New best validation loss: {valid_loss:.6f}")
+                        with timer(f"Saving new best model", logger, rank, world_size):
+                            trainer.save_checkpoint(save_name="best_valid_loss")
 
                     if trainer.scheduler_update_freq == "epoch":
                         trainer.scheduler.step(valid_loss)
-
-                    blocking_sync_wait(world_size)
 
                 # write the model
                 if trainer.current_epoch % myconfig.logging.save_every == 0:
@@ -546,7 +544,7 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
         else:
             with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
                 trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=True)
-                
+
             blocking_sync_wait(world_size)
             # save the raw testing preds
             if trainer.should_log:
