@@ -433,7 +433,7 @@ class DNASeqModelTrainer:
             global_aggregate(total_loss, aggregate="sum", world_size=self.world_size)
 
             global_avg_loss = total_loss / (len(dataloader) * self.world_size)
-            self.metrics.update({f"{log_prefix}/loss": global_avg_loss})
+            self.metrics.update({f"{log_prefix}/loss": global_avg_loss.cpu().item()})
 
         if save_pred:
             # we have to pre save all the res and later aggregate them
