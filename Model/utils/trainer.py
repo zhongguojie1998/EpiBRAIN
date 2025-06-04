@@ -60,6 +60,23 @@ def get_metric_collection(prefix: str = "Valid/", num_outputs=1):
     return collection
 
 
+def construct_logging_metric_dict(trainer):
+    metric_dict = {}
+    for k, v in trainer.metrics.items():
+        if isinstance(v, torch.Tensor):
+            v = v.cpu()
+            # check if it's the metrics log
+            if "MSE" in k or "MAE" in k or "PearsonR" in k:
+                for dim, value in enumerate(v):
+                    trial_name = trainer.label_meta.loc[dim]
+                    metric_dict[f"{k}/{trial_name}"] = value
+            else:
+                metric_dict[k] = v.nanmean().item()
+        else:
+            metric_dict[k] = v
+    return metric_dict
+
+
 class DNASeqModelTrainer:
 
     def __init__(self, config, rank, world_size, logger, local_rank=None):
@@ -88,6 +105,7 @@ class DNASeqModelTrainer:
         self.current_lr = self.training_config.lr
         self.best_valid_loss = torch.inf
         self.metrics = {}
+
         self.trial_num = self.model_config.output_heads[self.model_config.use_head]
 
         # set up data
@@ -147,6 +165,11 @@ class DNASeqModelTrainer:
                         exit(1)
                     else:
                         self.logger.warning(f"No {split} dataset found.")
+
+        # check if model trial setting is the same as the label construction
+        for split in self.data_split:
+            assert self.trial_num == self.data_func[split]["dataset"].label_meta.shape[0]
+            self.label_meta = self.data_func[split]["dataset"].label_meta
 
         self.logger.info(
             f"{'/'.join([k for k,v in self.data_func.items() if v["dataset"] is not None])} datasets loaded successfully."
@@ -289,16 +312,18 @@ class DNASeqModelTrainer:
                 1.0,
                 float(self.current_step + 1) / float(self.training_config.lr_warmup_step),
             )
-            self.current_lr = lr_scale * float(self.training_config.lr)
             for pg in self.optimizer.param_groups:
-                pg["lr"] = self.current_lr
+                pg["lr"] = lr_scale * float(self.training_config.lr)
 
     def train_step(self):
         self.model.train()
 
-        running_loss = torch.tensor(0.0, device=self.local_rank)
-        tm_metrics = get_metric_collection(prefix="Train/", num_outputs=self.trial_num).to(self.local_rank)
-        tm_metrics.reset()
+        # for loss log
+        batch_loss = 0
+        batch_count = 0
+        # for other metric log
+        # tm_metrics = get_metric_collection(prefix="Train/", num_outputs=self.trial_num).to(self.local_rank)
+        # tm_metrics.reset()
 
         dataloader = self.data_func["train"]["data_loader"]
 
@@ -315,10 +340,11 @@ class DNASeqModelTrainer:
 
             # loss
             loss = self.criterion(pred, label) / self.training_config.accum_step
-            running_loss += loss.detach()
+            batch_loss += loss.detach().cpu().item() * self.training_config.accum_step
+            batch_count += 1
 
             # metrics
-            tm_metrics.update(pred.reshape(-1, self.trial_num), label.reshape(-1, self.trial_num))
+            # tm_metrics.update(pred.reshape(-1, self.trial_num), label.reshape(-1, self.trial_num))
 
             # whether to do the loss aggregation
             should_update = ((i + 1) % self.training_config.accum_step == 0) or (i + 1 == len(dataloader))
@@ -332,13 +358,16 @@ class DNASeqModelTrainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.2)
                 self.lr_warmup()
                 self.optimizer.step()
+                self.current_lr = self.optimizer.param_groups[0]["lr"]
                 if self.scheduler_update_freq == "batch":
                     self.scheduler.step()
                 self.current_step += 1
 
             # log training status
+            ## in the training loop, we only look at the local loss
             if self.current_step % self.logging_config.report_every == 0:
-                report_loss = running_loss.item() * self.training_config.accum_step / (i + 1)
+                # report_loss = batch_loss / (i + 1)
+                report_loss = batch_loss / batch_count
 
                 if self.logging_config.use_tensorboard:
                     self.logger.metric("Train/loss", report_loss, step=self.current_step, log_also=False)
@@ -374,6 +403,9 @@ class DNASeqModelTrainer:
                         f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
                     )
 
+                batch_loss = 0
+                batch_count = 0
+
             # here we reset the gradient in the final stage as we may need to log the gradient value
             if should_update:
                 self.optimizer.zero_grad()
@@ -381,11 +413,7 @@ class DNASeqModelTrainer:
         self.current_epoch += 1
 
         # get and write the metric logs
-        ## in the training loop, we only look at the local loss (but for other metrics, we still look at overall performance)
-        self.metrics.update(tm_metrics.compute())
-
-        if self.should_log:
-            self.metrics.update({"Train/loss": running_loss * self.training_config.accum_step / len(dataloader)})
+        # self.metrics.update(tm_metrics.compute())
 
     def infer_step(self, log_loss=False, save_pred=False, log_prefix="Valid"):
         self.model.eval()
@@ -518,22 +546,16 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
 
                 # write the metrics
                 ## if we use tensorboard, the metrics will be written into tb (initialized when creating the training logger)
-                for k, v in trainer.metrics.items():
-                    trainer.logger.metric(
-                        k,
-                        v.nanmean().cpu().item() if isinstance(v, torch.Tensor) else v,
-                        step=trainer.current_step,
-                    )
-                if not myconfig.logging.use_tensorboard and trainer.should_log:
-                    with open(f"{myconfig.logging.log_dir}/metrics/epoch_{trainer.current_epoch}.json", "w") as f:
-                        json.dump(
-                            {
-                                k: v.nanmean().cpu().item() if isinstance(v, torch.Tensor) else v
-                                for k, v in trainer.metrics.items()
-                            },
-                            f,
-                            indent=4,
-                        )
+                if trainer.should_log:
+                    metric_dict = construct_logging_metric_dict(trainer)
+                    if myconfig.logging.use_tensorboard:
+                        for k, v in metric_dict.items():
+                            trainer.logger.metric(k, v, step=trainer.current_step)
+                    else:
+                        with open(
+                            f"{myconfig.logging.log_dir}/metrics/epoch_{trainer.current_epoch}.json", "w"
+                        ) as f:
+                            json.dump(metric_dict, f, indent=4)
                 blocking_sync_wait(world_size)
 
             # for later continue training if needed

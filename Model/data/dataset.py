@@ -27,6 +27,7 @@ class GenomeIntervalDataset(Dataset):
         df = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
         df.columns = ["chr", "start", "end", "split"]
         self.df = df[df["split"] == dataset_type].reset_index(drop=True)
+        self.label_meta = pd.read_csv(f"{storage_path}/label_meta.csv", index_col=0)
 
         self.preload_data = preload_data
 

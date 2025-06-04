@@ -1,10 +1,9 @@
 defaults:
   - default
 
-world_size: 1
-gpu_id: 2
+world_size: 4
 
-batch_size: 4
+batch_size: 1
 lr_warmup_step: 15
 
-total_epoch: 3
+total_epoch: 1
