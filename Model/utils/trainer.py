@@ -550,8 +550,10 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                     metric_dict = construct_logging_metric_dict(trainer)
                     if myconfig.logging.use_tensorboard:
                         for k, v in metric_dict.items():
-                            trainer.logger.metric(k, v, step=trainer.current_step)
+                            trainer.logger.metric(k, v, step=trainer.current_step, log_also=False)
                     else:
+                        for k, v in metric_dict.items():
+                            trainer.logger.metric(k, v, step=trainer.current_step)
                         with open(
                             f"{myconfig.logging.log_dir}/metrics/epoch_{trainer.current_epoch}.json", "w"
                         ) as f:
