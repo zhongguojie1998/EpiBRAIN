@@ -91,9 +91,11 @@ class BaseLogger:
         self.level = level
 
     # basic logging methods
+    @check_rank
     def info(self, msg: str):
         self.logger.info(msg)
 
+    @check_rank
     def debug(self, msg: str):
         self.logger.debug(msg)
 
