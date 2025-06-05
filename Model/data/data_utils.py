@@ -589,10 +589,6 @@ def get_labels(
     targets = np.array(targets, dtype="float32")
     if not clip_pct is None:
         extreme_clip = np.quantile(targets, clip_pct, method="lower")
-
-        extreme_mask = np.abs(targets) > extreme_clip
-        extreme_seqs = model_seqs[extreme_mask]
-        logger.debug(extreme_seqs)
         targets = np.clip(targets, -extreme_clip, extreme_clip)
 
     # clip float16 min/max

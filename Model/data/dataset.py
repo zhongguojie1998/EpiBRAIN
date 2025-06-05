@@ -14,6 +14,7 @@ class GenomeIntervalDataset(Dataset):
         dataset_type,  # train, valid, test
         storage_path,
         refer_genom,
+        logger,
         context_length=196_608,
         preload_data=True,
         shift_augs=None,
@@ -23,17 +24,21 @@ class GenomeIntervalDataset(Dataset):
         super().__init__()
 
         self.storage_path = storage_path
+        self.logger = logger
+        self.context_length = context_length
 
+        # load meta data
         df = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
         df.columns = ["chr", "start", "end", "split"]
         self.df = df[df["split"] == dataset_type].reset_index(drop=True)
         self.label_meta = pd.read_csv(f"{storage_path}/label_meta.csv", index_col=0)
 
+        # load label
         self.preload_data = preload_data
-
         if preload_data:
             self.label = torch.load(f"{storage_path}/data/{dataset_type}.pt")["label"][self.df.index]
 
+        # get tokenizer
         self.tokenizer = FastaInterval(
             fasta_file=refer_genom,
             context_length=context_length,
@@ -59,6 +64,11 @@ class GenomeIntervalDataset(Dataset):
             # here, if reverse, the sequence is still 5'->3', which means the corresponding label should be reversed
             if reverse:
                 label = torch.flip(label, dims=[0])
+
+        if one_hot.shape[0] != self.context_length:
+            self.logger.error("Context length not match")
+            self.logger.debug(*interval, shift, reverse, one_hot.shape[0])
+            exit(1)
 
         return one_hot, label
 

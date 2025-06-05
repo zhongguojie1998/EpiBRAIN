@@ -36,3 +36,4 @@ dataloader_params:  # dataloader parameters, should be accepted by torch.utils.d
   batch_size: ${training.batch_size}
   pin_memory: True
   num_workers: 12
+  persistent_workers: True

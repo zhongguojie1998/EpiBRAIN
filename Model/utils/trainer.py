@@ -14,7 +14,7 @@ torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 
 
-from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSampler, safe_collate_fn
+from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSampler
 from model.pytorch_borzoi_model import Borzoi
 from utils.logging import LOGGER_PREFIX, TrainingLogger, timer
 from utils.loss import LOSS_DICT
@@ -143,7 +143,7 @@ class DNASeqModelTrainer:
             try:
                 config = copy.deepcopy(self.dataset_config)
                 config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
-                self.data_func["test"]["dataset"] = GenomeIntervalDataset("test", **config)
+                self.data_func["test"]["dataset"] = GenomeIntervalDataset("test", logger=self.logger, **config)
             except Exception as e:
                 self.logger.error(
                     "Failed to load testing dataset in `test_only` mode. Please check the preprocess setting."
@@ -157,7 +157,7 @@ class DNASeqModelTrainer:
                     if split != "train":
                         # for valid and test, we disable the data augumentation
                         config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
-                    self.data_func[split]["dataset"] = GenomeIntervalDataset(split, **config)
+                    self.data_func[split]["dataset"] = GenomeIntervalDataset(split, logger=self.logger, **config)
                 except Exception as e:
                     if split == "train":
                         self.logger.error("Failed to load training dataset. Please check the preprocess setting.")
@@ -209,7 +209,6 @@ class DNASeqModelTrainer:
                     dataset=dataset,
                     sampler=sampler,
                     shuffle=False,  # set shuffle in sampler, dataloader should be set as False
-                    collate_fn=safe_collate_fn,
                     **self.training_config.dataloader_params,
                 )
                 if dataset is not None
@@ -331,7 +330,9 @@ class DNASeqModelTrainer:
         for i, (seq_embedding, label) in enumerate(dataloader):
             # seq_embedding shape [batch, L, 4]
             # label shape [batch, num_central_bin (896), num_trail (93)]
-            seq_embedding, label = seq_embedding.to(self.local_rank), label.to(self.local_rank)
+            seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
+                self.local_rank, non_blocking=True
+            )
             # pred_embedding shape [batch, num_trail (93), num_central_bin (896)]
             pred = self.model(
                 seq_embedding.permute(0, 2, 1),
@@ -434,7 +435,9 @@ class DNASeqModelTrainer:
             for i, (seq_embedding, label) in enumerate(dataloader):
                 # seq_embedding shape [batch, L, 4]
                 # label shape [batch, num_central_bin (896), num_trail (93)]
-                seq_embedding, label = seq_embedding.to(self.local_rank), label.to(self.local_rank)
+                seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
+                    self.local_rank, non_blocking=True
+                )
                 # pred_embedding shape [batch, num_trail (93), num_central_bin (896)]
                 pred = self.model(
                     seq_embedding.permute(0, 2, 1),
