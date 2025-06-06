@@ -28,11 +28,11 @@ def input_check(
         exit(1)
 
 
-def load_config(config_dir: str, overrides: tuple[str, ...] = []):
+def load_config(config_dir: str, config_name="default", overrides: tuple[str, ...] = []):
 
     with initialize_config_dir(config_dir=os.path.abspath(config_dir), version_base="1.1"):
         config = compose(
-            config_name="config",
+            config_name=config_name,
             overrides=list(overrides),
         )
         config = OmegaConf.to_container(config, resolve=True)
@@ -56,9 +56,16 @@ def load_config(config_dir: str, overrides: tuple[str, ...] = []):
         )
     if config.training.test_only:
         input_check(
-            config.training.load_checkpoint,
+            config.training.get("load_checkpoint", None),
             None,
             "When testing, you must load a checkpoint by specifying in `training.load_checkpoint`",
+            check="exclude",
+        )
+    if config.training.finetune:
+        input_check(
+            config.model.get("finetune_method", None),
+            None,
+            "When finetuning, you must specify the finetune method",
             check="exclude",
         )
 

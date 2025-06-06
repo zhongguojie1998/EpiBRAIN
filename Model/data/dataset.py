@@ -66,8 +66,7 @@ class GenomeIntervalDataset(Dataset):
                 label = torch.flip(label, dims=[0])
 
         if one_hot.shape[0] != self.context_length:
-            self.logger.error("Context length not match")
-            self.logger.debug(*interval, shift, reverse, one_hot.shape[0])
+            self.logger.error(f"Context length not match (expecting {self.context_length}, {one_hot.shape[0]} observed). Chr {chrom}, start {start}, end {end}, aug shift {shift}")
             exit(1)
 
         return one_hot, label

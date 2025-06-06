@@ -1,11 +1,13 @@
 import copy
 import glob
 import json
+import logging
 import os
 
 import torch
 import torch.optim as optim
 import torchmetrics as tm
+from peft import LoraConfig, get_peft_model
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -16,6 +18,7 @@ torch.backends.cudnn.deterministic = True
 
 from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSampler
 from model.pytorch_borzoi_model import Borzoi
+from model.pytorch_borzoi_utils import safe_state_dict_loader
 from utils.logging import LOGGER_PREFIX, TrainingLogger, timer
 from utils.loss import LOSS_DICT
 from utils.multi_gpu import blocking_sync_wait, cleanup, global_aggregate, setup, torchrun_setup
@@ -77,6 +80,24 @@ def construct_logging_metric_dict(trainer):
     return metric_dict
 
 
+def count_grad_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def count_all_parameters(model):
+    return sum(p.numel() for p in model.parameters())
+
+
+def set_param_grad(model, trainable_params=[]):
+
+    for name, param in model.named_parameters():
+        param.requires_grad = False
+        if name in trainable_params:
+            param.requires_grad = True
+
+    return model
+
+
 class DNASeqModelTrainer:
 
     def __init__(self, config, rank, world_size, logger, local_rank=None):
@@ -121,10 +142,9 @@ class DNASeqModelTrainer:
         self.get_optimizer()
         # get the loss function
         self.get_loss()
-        # load the parameter if necessary
+
+        # some helper information
         if self.training_config.load_checkpoint is not None:
-            with timer(f"Loading checkpoint", self.logger, self.rank, self.world_size):
-                self.load_checkpoint()
             if self.training_config.test_only:
                 self.logger.info("Only Testing")
             else:
@@ -132,8 +152,10 @@ class DNASeqModelTrainer:
                 if self.current_epoch >= self.training_config.total_epoch:
                     self.logger.warning("The loaded checkpoint has exceeded the total epoch number. Dry run.")
         else:
-            self.initialize()
-            self.logger.info("Start Training")
+            if not self.training_config.finetune:
+                self.logger.info("Start Training")
+            else:
+                self.logger.info("Start Fine-tuning")
 
     def get_dataset(self):
 
@@ -219,12 +241,61 @@ class DNASeqModelTrainer:
 
         self.logger.info("Loading model...")
 
-        if self.model_config.model_name == "borzoi":
-            self.model = Borzoi.from_hparams(**self.model_config)
+        # get our baseline model
+        if "borzoi" in self.model_config.model_name:
+            model_cls = Borzoi
         else:
             self.logger.error(f"Model {self.model_config.model_name} is not implemented yet.")
             exit(1)
 
+        self.model = model_cls.from_hparams(**self.model_config)
+
+        # if finetune, load the pretrained model
+        if self.training_config.finetune:
+            # load the pretrained state dict
+            pretrained_model = model_cls.from_pretrained(self.model_config.model_name)
+            org_model_state_dict = self.model.state_dict()
+            updated_model_state_dict = safe_state_dict_loader(
+                org_model_state_dict=org_model_state_dict,
+                load_model_state_dict=pretrained_model.state_dict(),
+                logger=self.logger,
+            )
+            org_model_state_dict.update(updated_model_state_dict)
+            self.model.load_state_dict(org_model_state_dict)
+
+            # initialize the finetune model
+            if self.model_config.finetune_method == "lora":
+                self.logger.info("LORA Finetune")
+                finetune_config = LoraConfig(**self.model_config.finetune_param)
+                self.model = get_peft_model(self.model, finetune_config)
+            elif self.model_config.finetune_method == "finetune_layers":
+                self.logger.info("Finetune the given layers")
+                self.model = set_param_grad(self.model, **self.model_config.finetune_param)
+            else:
+                self.logger.error(f"Finetune method {self.model_config.finetune_method} is not implemented yet.")
+                exit(1)
+
+        # get all the trainable parameters
+        self.trainable_params = [n for n, m in self.model.named_parameters() if m.requires_grad]
+        for n in self.trainable_params:
+            self.logger.debug(f"Trainable module name: {n}")
+
+        # if necessary, load the checkpoint
+        if self.training_config.load_checkpoint is not None:
+            with timer(f"Loading checkpoint", self.logger, self.rank, self.world_size):
+                self.load_checkpoint()
+        else:
+            self.initialize(self.trainable_params)
+
+        # set the gradient again (in case we load from the checkpoint)
+        self.model = set_param_grad(self.model, self.trainable_params)
+        trainable_para_num = count_grad_parameters(self.model)
+        total_para_num = count_all_parameters(self.model)
+        self.logger.info(
+            f"Trainable params: {trainable_para_num} || All params: {total_para_num} || Trainable%: {trainable_para_num / total_para_num:.4f}"
+        )
+
+        # send the model to training device
         self.model = self.model.to(self.local_rank, non_blocking=True)
         if self.world_size > 1:
             # Add DDP wrapper
@@ -258,20 +329,16 @@ class DNASeqModelTrainer:
             self.logger.error(f"Loss {self.training_config.loss} is not implemented yet.")
             exit(1)
 
-    def initialize(self):
+    def initialize(self, trainable_params):
         # TODO: initialize the model parameter if we are going to use special initialization method
+        # only re-initialize trainable parameters
         pass
 
     def load_checkpoint(self):
         self.logger.info(f"Loading checkpoint from {self.training_config.load_checkpoint}")
         checkpoint = torch.load(self.training_config.load_checkpoint, map_location=torch.device(self.local_rank))
 
-        # if DDP, then the model is wrapped in module
-        if self.world_size > 1:
-            self.model.module.load_state_dict(checkpoint["model_state_dict"])
-        else:
-            self.model.load_state_dict(checkpoint["model_state_dict"])
-
+        self.model.load_state_dict(checkpoint["model_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
         self.current_epoch = checkpoint["epoch"]
@@ -294,9 +361,7 @@ class DNASeqModelTrainer:
                 "epoch": self.current_epoch,
                 "step": self.current_step,
                 "lr": self.current_lr,
-                "model_state_dict": {
-                    k: v.cpu() for k, v in model_to_save.state_dict().items() if isinstance(v, torch.Tensor)
-                },
+                "model_state_dict": {k: v.cpu() for k, v in model_to_save.state_dict().items()},
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "scheduler_state_dict": self.scheduler.state_dict(),
                 "best_valid_loss": self.best_valid_loss,

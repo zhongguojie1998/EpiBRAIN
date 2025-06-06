@@ -14,7 +14,7 @@ class BorzoiConfig(PretrainedConfig):
         attn_dropout=0.05,
         pos_dropout=0.01,
         dropout_rate=0.2,
-        upsample_layer_num=0,
+        upsample_layer_num=2,
         return_center_bins_only=True,
         bins_to_return=6144,
         output_heads=dict(human=5313, mouse=1643),

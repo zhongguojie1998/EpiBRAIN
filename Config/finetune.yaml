@@ -1,0 +1,5 @@
+defaults:
+  - data: default
+  - model: finetune
+  - training: finetune
+  - logging: default

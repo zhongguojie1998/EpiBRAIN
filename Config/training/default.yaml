@@ -9,6 +9,7 @@ MASTER_PORT: 12320 # master port for DDP training
 ## training stage setting
 load_checkpoint: null # path to the checkpoint to load, if not given, will start from scratch, else, will resume training from the given checkpoint
 test_only: False # whether to only run the test stage, if True, load_checkpoint must be given
+finetune: False # whether to just finetune the model
 
 ## training hyperparameter
 lr: 1e-3 # learning rate

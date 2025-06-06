@@ -1,7 +1,0 @@
-# full precision Model Setup, no flashatten and autocast
-defaults:
-  - default
-
-## technical setup
-flashed: False  # whether to use FlashAttention
-use_autocast: False  # whether to use autocast, if using FlashAttention, always set to True, else, default as False

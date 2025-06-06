@@ -1,0 +1,24 @@
+# full precision Model Setup, no flashatten and autocast
+defaults:
+  - default
+
+model_name: johahi/borzoi-replicate-0 # 'johahi/borzoi-replicate-[0-3]'
+
+## technical setup
+flashed: False  # whether to use FlashAttention, in finetune setting, we should disable this
+use_autocast: False  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
+
+## fine tune setting
+finetune_method: lora # choose from `lora`, `finetune_layers`
+finetune_param:
+    target_modules: # add lora layer
+      - to_q
+      - to_v
+    modules_to_save:  # other layers requiring optimization
+      - prediction_head.human
+    r: 8  # lora rank
+
+# finetune_method: finetune_layers # choose from `lora`, `finetune_layers`
+# finetune_param:
+#     trainable_params: 
+#       - prediction_head.human
