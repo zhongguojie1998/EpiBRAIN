@@ -69,9 +69,10 @@ def main(config_setting, config_dir, override_config, torch_run, only_data):
 
     ## set up working directory
     os.makedirs(myconfig.logging.log_dir, exist_ok=True)
-    os.makedirs(myconfig.logging.checkpoint_dir, exist_ok=True)
-    os.makedirs(myconfig.logging.res_dir, exist_ok=True)
     os.makedirs(myconfig.data.preprocess.storage_path, exist_ok=True)
+    if not only_data:
+        os.makedirs(myconfig.logging.checkpoint_dir, exist_ok=True)
+        os.makedirs(myconfig.logging.res_dir, exist_ok=True)
 
     ## set up training devices (and logging)
     myconfig.training.torch_run = torch_run

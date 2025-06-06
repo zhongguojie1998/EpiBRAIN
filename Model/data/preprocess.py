@@ -36,7 +36,6 @@ PARA_CHECK = [
     "unmap_bed",
     "unmap_threshold",
     "blacklist_bed",
-    "baseline_pct",
     "break_threshold",
     "stride_train",
     "stride_test",
@@ -53,17 +52,22 @@ PARA_CHECK = [
 
 
 def get_trail_value_mp(
-    trial, storage_path, mseqs, blacklist_bed, baseline_pct, window_size, n_window, restart=False
+    trial, storage_path, mseqs, blacklist_bed, window_size, n_window, restart=False
 ):
 
     exp = trial["exp"]
     genome_cov_file = trial["file"]
     seqs_cov_file = f"{storage_path}/labels/{exp}.h5"
-    sum_stat = trial["sum_stat"]
 
-    clip_ti = trial.get("clip", None)
-    clipsoft_ti = trial.get("clip_soft", None)
-    scale_ti = trial.get("scale", 1)
+    # for data transformation
+    sum_stat = trial.get("sum_stat", "sum")
+    baseline_pct = trial.get("baseline_pct", 0.25)
+    scale = trial.get("scale", 1)
+    anchor_target = trial.get("anchor_target", None)
+    anchor_pct = trial.get("anchor_pct", 0.999)
+    clip = trial.get("clip", None)
+    clipsoft = trial.get("clip_soft", None)
+    extreme_clip_pct = trial.get("extreme_clip_pct", None)
 
     if os.path.exists(seqs_cov_file) and not restart:
         logger.info("Skipping existing %s" % seqs_cov_file)
@@ -73,16 +77,19 @@ def get_trail_value_mp(
         get_labels(
             model_seqs=mseqs,
             blacklist_bed=blacklist_bed,
-            baseline_pct=baseline_pct,
             pool_width=window_size,
             kept_num_after_crop=n_window,
-            scale=scale_ti,
-            clip=clip_ti,
-            clip_soft=clipsoft_ti,
-            sum_stat=sum_stat,
             seqs_cov_file=seqs_cov_file,
             genome_cov_file=genome_cov_file,
-            clip_pct=0.9999999,
+            # the rest for data scale transformation
+            sum_stat=sum_stat,
+            baseline_pct=baseline_pct,
+            scale=scale,
+            anchor_target=anchor_target,
+            anchor_pct=anchor_pct,
+            clip=clip,
+            clip_soft=clipsoft,
+            extreme_clip_pct=extreme_clip_pct,
         )
     except Exception as e:
         logger.error(f"Fail to process {exp}. Manually check.")
@@ -104,7 +111,6 @@ def preprocess(
     unmap_bed=None,
     unmap_threshold=0.5,
     blacklist_bed=None,
-    baseline_pct=0.25,
     break_threshold=1_179_648,
     stride_train=1.0,
     stride_test=1.0,
@@ -314,7 +320,6 @@ def preprocess(
             storage_path=storage_path,
             mseqs=mseqs,
             blacklist_bed=blacklist_bed,
-            baseline_pct=baseline_pct,
             window_size=window_size,
             n_window=n_window,
             restart=force_restart,

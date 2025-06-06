@@ -483,18 +483,25 @@ def read_blacklist(blacklist_bed, black_buffer=20):
 def get_labels(
     model_seqs,
     blacklist_bed,
-    baseline_pct,
     pool_width,
     kept_num_after_crop,
-    scale,
-    clip,
-    clip_soft,
-    sum_stat,
     seqs_cov_file,
     genome_cov_file,
-    clip_pct=None,
+    sum_stat="sum",
+    baseline_pct=0.25,
+    scale=1,
+    anchor_target=None,
+    anchor_pct=0.999,
+    clip=None,
+    clip_soft=None,
+    extreme_clip_pct=None,
 ):
     """Get coverage labels for model sequences."""
+
+    logger.debug(
+        f"""Setting for {seqs_cov_file.split('/')[-1].split('.')[0]}:
+        sum_stat {sum_stat}, baseline_pct {baseline_pct}, scale {scale}, extreme_clip_pct {extreme_clip_pct}, anchor_target {anchor_target}, anchor_pct {anchor_pct}, clip_threshold {clip}, softclip_threshold {clip_soft}"""
+    )
 
     # read blacklist regions
     black_chr_trees = read_blacklist(blacklist_bed)
@@ -575,30 +582,38 @@ def get_labels(
             logger.error('ERROR: Unrecognized summary statistic "%s".' % sum_stat)
             exit(1)
 
-        # clip
-        if clip_soft is not None:
-            clip_mask = seq_cov > clip_soft
-            seq_cov[clip_mask] = clip_soft - 1 + np.sqrt(seq_cov[clip_mask] - clip_soft + 1)
-        if clip is not None:
-            seq_cov = np.clip(seq_cov, -clip, clip)
-
         # save
         targets.append(seq_cov)
 
-    # clip extreme values
     targets = np.array(targets, dtype="float32")
-    if not clip_pct is None:
-        extreme_clip = np.quantile(targets, clip_pct, method="lower")
+
+    # clip extreme values
+    if extreme_clip_pct is not None:
+        extreme_clip = np.quantile(targets, extreme_clip_pct, method="lower")
         targets = np.clip(targets, -extreme_clip, extreme_clip)
 
+    # scale the quantile value to an anchor value
+    if anchor_target is not None:
+        org_quantile_value = np.quantile(targets, anchor_pct, method="lower")
+        anchor_scale = anchor_target / org_quantile_value
+
+        targets = targets * anchor_scale
+
+    # soft/hard clip values to the wanted scale
+    if clip_soft is not None:
+        clip_mask = targets > clip_soft
+        targets[clip_mask] = clip_soft - 1 + np.sqrt(targets[clip_mask] - clip_soft + 1)
+    if clip is not None:
+        targets = np.clip(targets, -clip, clip)
+
     # clip float16 min/max
-    targets = np.clip(targets, np.finfo(np.float16).min, np.finfo(np.float16).max).astype("float16")
+    # targets = np.clip(targets, np.finfo(np.float16).min, np.finfo(np.float16).max).astype("float16")
 
     if not np.isfinite(targets).all():
         raise ValueError("Non-finite values (NaN or Inf) found in targets.")
 
     # write all
-    seqs_cov_open.create_dataset("targets", data=targets, dtype="float16", compression="gzip")
+    seqs_cov_open.create_dataset("targets", data=targets, dtype="float32", compression="gzip")
 
     # close genome coverage file
     genome_cov_open.close()
@@ -706,7 +721,7 @@ def aggregate_data(storage_path, preload_data, task=None):
     label_meta.to_csv(f"{storage_path}/label_meta.csv", index=True)
 
     label_data = np.stack(label_data, axis=-1)
-    label_data = torch.tensor(label_data, dtype=torch.float16)
+    label_data = torch.tensor(label_data)
 
     # TODO: add data tokenization into the precompute pipeline
 

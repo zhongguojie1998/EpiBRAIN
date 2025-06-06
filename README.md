@@ -25,7 +25,46 @@ pip install hydra-core  # better config
 pip install tensorboard  # better logging
 ```
 
+# Data Pipeline
+
+Write all the transformation configuration into one csv file and update the csv file in `data.preprocess.trial_summary_path` field
+
+The configuration can have the following fields:
+
+- `exp` (required): the name of the trial
+- `file` (required): the path to the raw bigwig file
+- `sum_stat` (optional, default: sum): in each bin, how to aggregate the raw reads into a summary
+- `baseline_pct` (optional, default: 0.25): set the nan/blacklist region value to this quantile of all values 
+- `scale` (optional, default: 1): scale the raw reads
+- `anchor_target` (optional, default: None): after aggregating the data, anchor the given quantile of the value to this target. If not provided, skip.
+- `anchor_pct` (optional, default: 0.999): the given quantile for anchoring
+- `clip_soft` (optional, default: None): soft clip the aggregated value ($t_c - 1 + \sqrt{x - t_c + 1}$ for all $x > t_c$) to the given threshold. If not provided, skip.
+- `clip` (optional, default: None): hard clip the aggregated value to the given threshold. If not provided, skip.
+- `extreme_clip_pct`(optional, default: None): final hard clip all values above this quantile to the corresponding value. If not provided, skip.
+
+The data preprocess pipeline would be: 
+
+1. impute nan / reset value in the blacklist region to the `baseline_pct` of the whole context length (eg. 196608)
+2. scale the data based on `scale`
+3. aggregate the data for given pool width into bins with the given `sum_stat`
+4. hard clip extreme value above `extreme_clip_pct` to the corresponding value (if applicable)
+5. anchor the value at the `anchor_pct` to `anchor_target` (if applicable)
+6. soft clip based on threshold `clip_soft` (if applicable)
+7. hard clip based on threshold `clip` (if applicable)
+
 # Usage
+
+## Only to generate labels
+
+```bash
+python Model/train.py -x "logging=debug" -x "logging.exp_name=data_generation" --only_data
+```
+
+The data generation will not re-process if the data have already been generated. Force start with
+
+```bash
+python Model/train.py -x "logging=debug" -x "logging.exp_name=data_generation" -x "data.preprocess.force_restart=True" --only_data
+```
 
 ## Quick start
 
@@ -81,7 +120,7 @@ python Model/train.py -c finetune -x "logging=debug" -x "logging.exp_name=250605
 ## Data Pipeline
 
 1. Org data format: bw (UCSC bigwig file). Get the data summary stats (serve as **label**) with [`pyBigWig`](https://github.com/deeptools/pyBigWig)
-2. preprocess the data and get the train/valid/test in the .bed file (essentially a tsv file, contain the chr, start, end info). Presample all the data points (across all the genomes) and Precompute all the labels in the preprocessing stage, reference the [script](https://github.com/calico/basenji/blob/master/tutorials/preprocess.ipynb), save in the torch pt files
+2. preprocess the data and get the train/valid/test in the .bed file (essentially a tsv file, contain the chr, start, end info). Presample all the data points (across all the genomes) and Precompute all the labels in the preprocessing stage, reference the [preprocess script](https://github.com/calico/basenji/blob/master/tutorials/preprocess.ipynb), save in the torch pt files
 3. [DNA Tokenizer](https://github.com/lucidrains/enformer-pytorch/blob/5a5974d2821c728f93294731c50b55f1f55fd86d/enformer_pytorch/data.py), Dataset, get the tokenized DNA (one hot, L * 4) and the label of the correponding region (cell type * modality * central bin num)
 
 Final data point: a 196,608 length DNA window, further truncated into 128 (bin width) * 896 (bin num), for each bin, calculate the label (for each cell type, each modality, we have a label value). When training, we only calculate the loss for the central bins, not for the marginal bins (marginal ones don't have enough information)
