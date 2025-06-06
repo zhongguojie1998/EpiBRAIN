@@ -98,7 +98,7 @@ def main(config_setting, config_dir, override_config, torch_run, only_data):
             level=myconfig.logging.log_level,
             log_dir=myconfig.logging.log_dir,
             redirect=myconfig.logging.write_log_to_file,
-            rank=0, # when we are not using torchrun, the main process is regarded as (fake) rank 0, which writes the log
+            rank=0,  # when we are not using torchrun, the main process is regarded as (fake) rank 0, which writes the log
             world_size=world_size,
             overwrite=myconfig.logging.overwrite_log_file,
         )
@@ -152,7 +152,8 @@ def main(config_setting, config_dir, override_config, torch_run, only_data):
             mp_main(local_rank=local_rank, rank=rank, world_size=world_size, myconfig=myconfig)
         except Exception as e:
             logger.error(f"Exception: {e}")
-            raise e
+            logger.exception(e)
+            exit(1)
     else:
         if world_size > 1:
             logger.info(f"Multi-GPU training with {world_size} GPUs")
@@ -165,11 +166,17 @@ def main(config_setting, config_dir, override_config, torch_run, only_data):
                 mpt.spawn(mp_main, args=(world_size, myconfig), nprocs=world_size, join=True)
             except Exception as e:
                 logger.error(f"Exception: {e}")
-                raise e
+                logger.exception(e)
+                exit(1)
 
         else:
             logger.info("Single GPU training")
-            mp_main(rank=gpu_id, world_size=world_size, myconfig=myconfig)
+            try:
+                mp_main(rank=gpu_id, world_size=world_size, myconfig=myconfig)
+            except Exception as e:
+                logger.error(f"Exception: {e}")
+                logger.exception(e)
+                exit(1)
 
 
 if __name__ == "__main__":

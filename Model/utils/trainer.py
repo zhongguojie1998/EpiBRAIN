@@ -165,7 +165,7 @@ class DNASeqModelTrainer:
             try:
                 config = copy.deepcopy(self.dataset_config)
                 config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
-                self.data_func["test"]["dataset"] = GenomeIntervalDataset("test", logger=self.logger, **config)
+                self.data_func["test"]["dataset"] = GenomeIntervalDataset("test", **config)
             except Exception as e:
                 self.logger.error(
                     "Failed to load testing dataset in `test_only` mode. Please check the preprocess setting."
@@ -179,7 +179,7 @@ class DNASeqModelTrainer:
                     if split != "train":
                         # for valid and test, we disable the data augumentation
                         config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
-                    self.data_func[split]["dataset"] = GenomeIntervalDataset(split, logger=self.logger, **config)
+                    self.data_func[split]["dataset"] = GenomeIntervalDataset(split, **config)
                 except Exception as e:
                     if split == "train":
                         self.logger.error("Failed to load training dataset. Please check the preprocess setting.")

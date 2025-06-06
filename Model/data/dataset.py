@@ -14,7 +14,6 @@ class GenomeIntervalDataset(Dataset):
         dataset_type,  # train, valid, test
         storage_path,
         refer_genom,
-        logger,
         context_length=196_608,
         preload_data=True,
         shift_augs=None,
@@ -24,7 +23,6 @@ class GenomeIntervalDataset(Dataset):
         super().__init__()
 
         self.storage_path = storage_path
-        self.logger = logger
         self.context_length = context_length
 
         # load meta data
@@ -66,8 +64,7 @@ class GenomeIntervalDataset(Dataset):
                 label = torch.flip(label, dims=[0])
 
         if one_hot.shape[0] != self.context_length:
-            self.logger.error(f"Context length not match (expecting {self.context_length}, {one_hot.shape[0]} observed). Chr {chrom}, start {start}, end {end}, aug shift {shift}")
-            exit(1)
+            raise ValueError(f"Context length not match (expecting {self.context_length}, {one_hot.shape[0]} observed). Chr {chrom}, start {start}, end {end}, aug shift {shift}")
 
         return one_hot, label
 
