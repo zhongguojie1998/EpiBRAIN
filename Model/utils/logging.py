@@ -156,6 +156,7 @@ class TrainingLogger(BaseLogger):
     def debug(self, msg: str):
         self.logger.debug(msg)
 
+    @check_rank
     @add_rank
     def warning(self, msg: str):
         self.logger.warning(msg)
@@ -231,7 +232,7 @@ def setup_logging(
             redirect=redirect,
             overwrite=False if name != "Main" else overwrite,
             rank=rank,
-            world_size=world_size
+            world_size=world_size,
         )
 
 
