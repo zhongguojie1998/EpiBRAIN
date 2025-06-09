@@ -24,13 +24,13 @@ from utils.loss import LOSS_DICT
 from utils.multi_gpu import blocking_sync_wait, cleanup, global_aggregate, setup, torchrun_setup
 
 
-def aggregate_test_res(trainer):
+def aggregate_test_res(trainer, prefix="Test"):
     # aggregate the results and clear per rank file
-    pattern = f"{trainer.logging_config.res_dir}/preds_rank_*_epoch_{trainer.current_epoch}.pt"
+    pattern = f"{trainer.logging_config.res_dir}/{prefix}_preds_rank_*_epoch_{trainer.current_epoch}.pt"
 
     file_list = glob.glob(pattern)
     if not file_list:
-        trainer.logger.warning("Test res aggregation failed (cannot find any pred file), skip")
+        trainer.logger.warning(f"{prefix} res aggregation failed (cannot find any pred file), skip")
     else:
         all_labels = []
         all_preds = []
@@ -44,7 +44,7 @@ def aggregate_test_res(trainer):
 
         torch.save(
             {"label": all_labels, "pred": all_preds},
-            f"{trainer.logging_config.res_dir}/preds_epoch_{trainer.current_epoch}.pt",
+            f"{trainer.logging_config.res_dir}/{prefix}_preds_epoch_{trainer.current_epoch}.pt",
         )
 
         for file_path in file_list:
@@ -136,11 +136,17 @@ class DNASeqModelTrainer:
         self.get_dataset()
         ## get the dataloader
         self.get_dataloader()
-        # get the model
+
+        # set up model
+        ## get the checkpoint if necessary
+        if self.training_config.load_checkpoint is not None:
+            with timer(f"Loading checkpoint", self.logger, self.rank, self.world_size):
+                self.load_checkpoint()
+        ## get the model
         self.get_model()
-        # get the optimizer
+        ## get the optimizer
         self.get_optimizer()
-        # get the loss function
+        ## get the loss function
         self.get_loss()
 
         # some helper information
@@ -161,37 +167,30 @@ class DNASeqModelTrainer:
 
         self.logger.info("Loading datasets...")
 
-        if self.training_config.test_only:
+        for split in self.data_split:
             try:
                 config = copy.deepcopy(self.dataset_config)
-                config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
-                self.data_func["test"]["dataset"] = GenomeIntervalDataset("test", **config)
-            except Exception as e:
-                self.logger.error(
-                    "Failed to load testing dataset in `test_only` mode. Please check the preprocess setting."
-                )
-                self.logger.exception(e)
-                exit(1)
-        else:
-            for split in self.data_split:
-                try:
-                    config = copy.deepcopy(self.dataset_config)
-                    if split != "train":
-                        # for valid and test, we disable the data augumentation
-                        config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
-                    self.data_func[split]["dataset"] = GenomeIntervalDataset(split, **config)
-                except Exception as e:
-                    if split == "train":
-                        self.logger.error("Failed to load training dataset. Please check the preprocess setting.")
-                        self.logger.exception(e)
-                        exit(1)
-                    else:
-                        self.logger.warning(f"No {split} dataset found.")
+                if split != "train":
+                    # for valid and test, we disable the data augumentation
+                    config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
+                self.data_func[split]["dataset"] = GenomeIntervalDataset(split, **config)
 
-        # check if model trial setting is the same as the label construction
-        for split in self.data_split:
-            assert self.trial_num == self.data_func[split]["dataset"].label_meta.shape[0]
-            self.label_meta = self.data_func[split]["dataset"].label_meta
+                assert self.trial_num == self.data_func[split]["dataset"].label_meta.shape[0]
+                self.label_meta = self.data_func[split]["dataset"].label_meta
+
+            except Exception as e:
+                if split == "train" and not self.training_config.test_only:
+                    self.logger.error("Failed to load training dataset. Please check the preprocess setting.")
+                    self.logger.exception(e)
+                    exit(1)
+                elif split == "test" and self.training_config.test_only:
+                    self.logger.error(
+                            "Failed to load testing dataset in `test_only` mode. Please check the preprocess setting."
+                        )
+                    self.logger.exception(e)
+                    exit(1)
+                else:
+                    self.logger.warning(f"No {split} dataset found.")
 
         self.logger.info(
             f"{'/'.join([k for k,v in self.data_func.items() if v["dataset"] is not None])} datasets loaded successfully."
@@ -282,8 +281,7 @@ class DNASeqModelTrainer:
 
         # if necessary, load the checkpoint
         if self.training_config.load_checkpoint is not None:
-            with timer(f"Loading checkpoint", self.logger, self.rank, self.world_size):
-                self.load_checkpoint()
+            self.model.load_state_dict(self.checkpoint["model_state_dict"])
         else:
             self.initialize(self.trainable_params)
 
@@ -322,6 +320,11 @@ class DNASeqModelTrainer:
         else:
             self.scheduler_update_freq = "batch"
 
+        # if necessary, load the checkpoint
+        if self.training_config.load_checkpoint is not None:
+            self.optimizer.load_state_dict(self.checkpoint["optimizer_state_dict"])
+            self.scheduler.load_state_dict(self.checkpoint["scheduler_state_dict"])
+
     def get_loss(self):
         self.criterion = LOSS_DICT.get(self.training_config.loss)
 
@@ -336,17 +339,17 @@ class DNASeqModelTrainer:
 
     def load_checkpoint(self):
         self.logger.info(f"Loading checkpoint from {self.training_config.load_checkpoint}")
-        checkpoint = torch.load(self.training_config.load_checkpoint, map_location=torch.device(self.local_rank))
+        self.checkpoint = torch.load(
+            self.training_config.load_checkpoint, map_location=torch.device(self.local_rank)
+        )
 
-        self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        self.current_epoch = checkpoint["epoch"]
-        self.current_step = checkpoint["step"]
-        self.current_lr = checkpoint["lr"]
-        self.best_valid_loss = checkpoint["best_valid_loss"]
+        # since this is first called in the model initialization pipeline, the model and optimizers loads the checkpoint in their own functions instead of here
+        self.current_epoch = self.checkpoint["epoch"]
+        self.current_step = self.checkpoint["step"]
+        self.current_lr = self.checkpoint["lr"]
+        self.best_valid_loss = self.checkpoint["best_valid_loss"]
 
-        self.logger.info("Model parameters loaded successfully.")
+        self.logger.info("Checkpoint loaded successfully.")
 
     def save_checkpoint(self, save_name=None):
         if save_name is None:
@@ -536,7 +539,7 @@ class DNASeqModelTrainer:
             # we have to pre save all the res and later aggregate them
             torch.save(
                 {"label": torch.cat(labels, dim=0), "pred": torch.cat(preds, dim=0)},
-                f"{self.logging_config.res_dir}/preds_rank_{self.rank}_epoch_{self.current_epoch}.pt",
+                f"{self.logging_config.res_dir}/{log_prefix}_preds_rank_{self.rank}_epoch_{self.current_epoch}.pt",
             )
 
 
@@ -635,13 +638,25 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                 trainer.save_checkpoint(save_name="last_epoch")
 
         else:
+            if trainer.data_func["train"]["data_loader"] is not None:
+                with timer(f"[Train/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
+                    trainer.infer_step(log_loss=False, log_prefix="Train", save_pred=True)
+                blocking_sync_wait(world_size)
+
+            if trainer.data_func["valid"]["data_loader"] is not None:
+                with timer(f"[Valid/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
+                    trainer.infer_step(log_loss=False, log_prefix="Valid", save_pred=True)
+                blocking_sync_wait(world_size)
+
             with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
                 trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=True)
 
             blocking_sync_wait(world_size)
-            # save the raw testing preds
+            # save the raw preds
             if trainer.should_log:
-                aggregate_test_res(trainer)
+                aggregate_test_res(trainer, "Train")
+                aggregate_test_res(trainer, "Valid")
+                aggregate_test_res(trainer, "Test")
 
         blocking_sync_wait(world_size)
         cleanup(world_size)
