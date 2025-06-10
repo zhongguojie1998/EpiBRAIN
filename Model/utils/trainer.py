@@ -4,6 +4,7 @@ import json
 import logging
 import os
 
+import numpy as np
 import torch
 import torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook as PowerSGD
 import torch.optim as optim
@@ -456,27 +457,37 @@ class DNASeqModelTrainer:
                     if self.logging_config.log_more:
                         for tag, value in self.model.named_parameters():
                             tag = tag.replace(".", "/")
-                            self.logger.metric(
-                                "weights/" + tag,
-                                value.data.cpu().numpy(),
-                                self.current_step,
-                                log_also=False,
-                                write_hist=True,
-                            )
-                            try:
-                                # only add gradients if they are not None
-                                if value.grad is not None:
+
+                            # add weight histogram
+                            weight = value.data.cpu().numpy()
+                            if not np.isnan(weight).any():
+                                self.logger.metric(
+                                    "weights/" + tag,
+                                    value.data.cpu().numpy(),
+                                    self.current_step,
+                                    log_also=False,
+                                    write_hist=True,
+                                )
+                            else:
+                                self.logger.warning(
+                                    f"failed to add weight histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
+                                )
+
+                            # only add gradients if they are not None
+                            if value.grad is not None:
+                                grad = value.grad.data.cpu().numpy()
+                                if not np.isnan(grad).any():
                                     self.logger.metric(
                                         "grads/" + tag,
-                                        value.data.cpu().numpy(),
+                                        value.grad.data.cpu().numpy(),
                                         self.current_step,
                                         log_also=False,
                                         write_hist=True,
                                     )
-                            except:
-                                self.logger.warning(
-                                    f"failed to add grad histogram for '{tag}' in counter: {self.current_step}"
-                                )
+                                else:
+                                    self.logger.warning(
+                                        f"failed to add grad histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
+                                    )
                 else:
                     self.logger.info(
                         f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
