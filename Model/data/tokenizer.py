@@ -106,10 +106,11 @@ class FastaInterval:
         rc_aug: data augmentation by randomly return reverse complement strand, if False, skip
         """
 
-        fasta_file = Path(fasta_file)
-        assert fasta_file.exists(), "path to fasta file must exist"
+        self.fasta_file = fasta_file
+        assert Path(fasta_file).exists(), "path to fasta file must exist"
 
-        self.seqs = Fasta(str(fasta_file))
+        # self.seqs = Fasta(str(fasta_file))
+        self.seqs = None  # Pyfaidx isn't fork-safe. Read and write can conflict in multi-process scenarios (dataloader num_workers>0)
         self.return_seq_indices = return_seq_indices
         self.context_length = context_length
         self.shift_augs = shift_augs
@@ -124,6 +125,9 @@ class FastaInterval:
         end: sample end idx
         return_augs: whether to also return the aug metadata (the exact augmentation parameter used)
         """
+        # the genome is delay initialized
+        if self.seqs is None:
+            self.seqs = Fasta(self.fasta_file)
 
         interval_length = end - start
         chromosome = self.seqs[chr_name]
@@ -139,6 +143,8 @@ class FastaInterval:
             rand_shift = randrange(min_shift, max_shift)
             start += rand_shift
             end += rand_shift
+        else:
+            rand_shift = 0
 
         left_padding = right_padding = 0
 

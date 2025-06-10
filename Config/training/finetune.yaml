@@ -1,0 +1,8 @@
+defaults:
+  - default
+
+## training stage setting
+finetune: True
+
+## training hyperparameter
+lr: 1e-4

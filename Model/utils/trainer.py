@@ -1,13 +1,18 @@
 import copy
 import glob
 import json
+import logging
 import os
 
+import numpy as np
 import torch
+import torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook as PowerSGD
 import torch.optim as optim
 import torchmetrics as tm
+from peft import LoraConfig, get_peft_model
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
@@ -15,12 +20,40 @@ torch.backends.cudnn.deterministic = True
 
 from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSampler
 from model.pytorch_borzoi_model import Borzoi
+from model.pytorch_borzoi_utils import safe_state_dict_loader
 from utils.logging import LOGGER_PREFIX, TrainingLogger, timer
 from utils.loss import LOSS_DICT
 from utils.multi_gpu import blocking_sync_wait, cleanup, global_aggregate, setup, torchrun_setup
 
 
-def get_metric_collection(prefix: str = "Validation/", num_outputs=1):
+def aggregate_test_res(trainer, prefix="Test"):
+    # aggregate the results and clear per rank file
+    pattern = f"{trainer.logging_config.res_dir}/{prefix}_preds_rank_*_epoch_{trainer.current_epoch}.pt"
+
+    file_list = glob.glob(pattern)
+    if not file_list:
+        trainer.logger.warning(f"{prefix} res aggregation failed (cannot find any pred file), skip")
+    else:
+        all_labels = []
+        all_preds = []
+        for file_path in file_list:
+            data = torch.load(file_path, map_location="cpu")
+            all_labels.append(data["label"])
+            all_preds.append(data["pred"])
+
+        all_labels = torch.cat(all_labels, dim=0)
+        all_preds = torch.cat(all_preds, dim=0)
+
+        torch.save(
+            {"label": all_labels, "pred": all_preds},
+            f"{trainer.logging_config.res_dir}/{prefix}_preds_epoch_{trainer.current_epoch}.pt",
+        )
+
+        for file_path in file_list:
+            os.remove(file_path)
+
+
+def get_metric_collection(prefix: str = "Valid/", num_outputs=1):
     collection = tm.MetricCollection(
         {
             "MSE": tm.MeanSquaredError(num_outputs=num_outputs),
@@ -32,7 +65,43 @@ def get_metric_collection(prefix: str = "Validation/", num_outputs=1):
     return collection
 
 
+def construct_logging_metric_dict(trainer):
+    metric_dict = {}
+    for k, v in trainer.metrics.items():
+        if isinstance(v, torch.Tensor):
+            v = v.cpu()
+            # check if it's the metrics log
+            if "MSE" in k or "MAE" in k or "PearsonR" in k:
+                for dim, value in enumerate(v):
+                    trial_name = trainer.label_meta.loc[dim, "trial"]
+                    metric_dict[f"{k}/{trial_name}"] = value
+            else:
+                metric_dict[k] = v.nanmean().item()
+        else:
+            metric_dict[k] = v
+    return metric_dict
+
+
+def count_grad_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def count_all_parameters(model):
+    return sum(p.numel() for p in model.parameters())
+
+
+def set_param_grad(model, trainable_params=[]):
+
+    for name, param in model.named_parameters():
+        param.requires_grad = False
+        if name in trainable_params:
+            param.requires_grad = True
+
+    return model
+
+
 class DNASeqModelTrainer:
+
     def __init__(self, config, rank, world_size, logger, local_rank=None):
 
         # set up the configuration
@@ -45,6 +114,7 @@ class DNASeqModelTrainer:
         self.logger = logger
         # get the hardware setting
         self.rank = rank
+        ## with local rank, we can distribute on different machines
         if local_rank is not None:
             self.local_rank = local_rank
         else:
@@ -58,6 +128,7 @@ class DNASeqModelTrainer:
         self.current_lr = self.training_config.lr
         self.best_valid_loss = torch.inf
         self.metrics = {}
+
         self.trial_num = self.model_config.output_heads[self.model_config.use_head]
 
         # set up data
@@ -67,16 +138,21 @@ class DNASeqModelTrainer:
         self.get_dataset()
         ## get the dataloader
         self.get_dataloader()
-        # get the model
-        self.get_model()
-        # get the optimizer
-        self.get_optimizer()
-        # get the loss function
-        self.get_loss()
-        # load the parameter if necessary
+
+        # set up model
+        ## get the checkpoint if necessary
         if self.training_config.load_checkpoint is not None:
             with timer(f"Loading checkpoint", self.logger, self.rank, self.world_size):
                 self.load_checkpoint()
+        ## get the model
+        self.get_model()
+        ## get the optimizer
+        self.get_optimizer()
+        ## get the loss function
+        self.get_loss()
+
+        # some helper information
+        if self.training_config.load_checkpoint is not None:
             if self.training_config.test_only:
                 self.logger.info("Only Testing")
             else:
@@ -84,39 +160,39 @@ class DNASeqModelTrainer:
                 if self.current_epoch >= self.training_config.total_epoch:
                     self.logger.warning("The loaded checkpoint has exceeded the total epoch number. Dry run.")
         else:
-            self.initialize()
-            self.logger.info("Start Training")
+            if not self.training_config.finetune:
+                self.logger.info("Start Training")
+            else:
+                self.logger.info("Start Fine-tuning")
 
     def get_dataset(self):
 
         self.logger.info("Loading datasets...")
 
-        if self.training_config.test_only:
+        for split in self.data_split:
             try:
                 config = copy.deepcopy(self.dataset_config)
-                config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
-                self.data_func["test"]["dataset"] = GenomeIntervalDataset("test", **config)
+                if split != "train":
+                    # for valid and test, we disable the data augumentation
+                    config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
+                self.data_func[split]["dataset"] = GenomeIntervalDataset(split, **config)
+
+                assert self.trial_num == self.data_func[split]["dataset"].label_meta.shape[0]
+                self.label_meta = self.data_func[split]["dataset"].label_meta
+
             except Exception as e:
-                self.logger.error(
-                    "Failed to load testing dataset in `test_only` mode. Please check the preprocess setting."
-                )
-                self.logger.exception(e)
-                exit(1)
-        else:
-            for split in self.data_split:
-                try:
-                    config = copy.deepcopy(self.dataset_config)
-                    if split != "train":
-                        # for valid and test, we disable the data augumentation
-                        config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
-                    self.data_func[split]["dataset"] = GenomeIntervalDataset(split, **config)
-                except Exception as e:
-                    if split == "train":
-                        self.logger.error("Failed to load training dataset. Please check the preprocess setting.")
-                        self.logger.exception(e)
-                        exit(1)
-                    else:
-                        self.logger.warning(f"No {split} dataset found.")
+                if split == "train" and not self.training_config.test_only:
+                    self.logger.error("Failed to load training dataset. Please check the preprocess setting.")
+                    self.logger.exception(e)
+                    exit(1)
+                elif split == "test" and self.training_config.test_only:
+                    self.logger.error(
+                        "Failed to load testing dataset in `test_only` mode. Please check the preprocess setting."
+                    )
+                    self.logger.exception(e)
+                    exit(1)
+                else:
+                    self.logger.warning(f"No {split} dataset found.")
 
         self.logger.info(
             f"{'/'.join([k for k,v in self.data_func.items() if v["dataset"] is not None])} datasets loaded successfully."
@@ -135,7 +211,12 @@ class DNASeqModelTrainer:
             dataset = self.data_func[split]["dataset"]
 
             # get data sampler for each card
-            sampler_cls = StrictDistributedSampler if dataset is not None else DumySampler
+            if self.training_config.test_only:
+                # in testing mode, we force strict, though it may cause dead lock
+                sampler_cls = StrictDistributedSampler if dataset is not None else DumySampler
+            else:
+                # in training mode, we allow resampling
+                sampler_cls = DistributedSampler if dataset is not None else DumySampler
 
             sampler = sampler_cls(
                 dataset=dataset,
@@ -161,16 +242,74 @@ class DNASeqModelTrainer:
 
         self.logger.info("Loading model...")
 
-        if self.model_config.model_name == "borzoi":
-            self.model = Borzoi.from_hparams(**self.model_config)
+        # get our baseline model
+        if "borzoi" in self.model_config.model_name:
+            model_cls = Borzoi
         else:
             self.logger.error(f"Model {self.model_config.model_name} is not implemented yet.")
             exit(1)
 
+        self.model = model_cls.from_hparams(**self.model_config)
+
+        # if finetune, load the pretrained model
+        if self.training_config.finetune:
+            # load the pretrained state dict
+            pretrained_model = model_cls.from_pretrained(self.model_config.model_name)
+            org_model_state_dict = self.model.state_dict()
+            updated_model_state_dict = safe_state_dict_loader(
+                org_model_state_dict=org_model_state_dict,
+                load_model_state_dict=pretrained_model.state_dict(),
+                logger=self.logger,
+            )
+            org_model_state_dict.update(updated_model_state_dict)
+            self.model.load_state_dict(org_model_state_dict)
+
+            # initialize the finetune model
+            if self.model_config.finetune_method == "lora":
+                self.logger.info("LORA Finetune")
+                finetune_config = LoraConfig(**self.model_config.finetune_param)
+                self.model = get_peft_model(self.model, finetune_config)
+            elif self.model_config.finetune_method == "finetune_layers":
+                self.logger.info("Finetune the given layers")
+                self.model = set_param_grad(self.model, **self.model_config.finetune_param)
+            else:
+                self.logger.error(f"Finetune method {self.model_config.finetune_method} is not implemented yet.")
+                exit(1)
+
+        # get all the trainable parameters
+        self.trainable_params = [n for n, m in self.model.named_parameters() if m.requires_grad]
+        for n in self.trainable_params:
+            self.logger.debug(f"Trainable module name: {n}")
+
+        # if necessary, load the checkpoint
+        if self.training_config.load_checkpoint is not None:
+            self.model.load_state_dict(self.checkpoint["model_state_dict"])
+        else:
+            self.initialize(self.trainable_params)
+
+        # set the gradient again (in case we load from the checkpoint)
+        self.model = set_param_grad(self.model, self.trainable_params)
+        trainable_para_num = count_grad_parameters(self.model)
+        total_para_num = count_all_parameters(self.model)
+        self.logger.info(
+            f"Trainable params: {trainable_para_num} || All params: {total_para_num} || Trainable%: {trainable_para_num / total_para_num:.4f}"
+        )
+
+        # send the model to training device
         self.model = self.model.to(self.local_rank, non_blocking=True)
         if self.world_size > 1:
             # Add DDP wrapper
-            self.model = DDP(self.model, device_ids=[self.local_rank], static_graph=True, find_unused_parameters=True)
+            self.model = DDP(
+                self.model, device_ids=[self.local_rank], static_graph=True, find_unused_parameters=True
+            )
+
+            # If applicable, add gradient compression hook
+            if self.training_config.use_grad_compression:
+                state = PowerSGD.PowerSGDState(
+                    process_group=None,  # we do compression on all ranks
+                    **self.training_config.get("powerSGD_params", {}),
+                )
+                self.model.register_comm_hook(state, PowerSGD.powerSGD_hook)
 
         self.logger.info(f"Model {self.model_config.model_name} loaded successfully.")
 
@@ -191,6 +330,11 @@ class DNASeqModelTrainer:
         else:
             self.scheduler_update_freq = "batch"
 
+        # if necessary, load the checkpoint
+        if self.training_config.load_checkpoint is not None:
+            self.optimizer.load_state_dict(self.checkpoint["optimizer_state_dict"])
+            self.scheduler.load_state_dict(self.checkpoint["scheduler_state_dict"])
+
     def get_loss(self):
         self.criterion = LOSS_DICT.get(self.training_config.loss)
 
@@ -198,22 +342,24 @@ class DNASeqModelTrainer:
             self.logger.error(f"Loss {self.training_config.loss} is not implemented yet.")
             exit(1)
 
-    def initialize(self):
+    def initialize(self, trainable_params):
         # TODO: initialize the model parameter if we are going to use special initialization method
+        # only re-initialize trainable parameters
         pass
 
     def load_checkpoint(self):
         self.logger.info(f"Loading checkpoint from {self.training_config.load_checkpoint}")
-        checkpoint = torch.load(self.training_config.load_checkpoint, map_location=torch.device(self.local_rank))
-        self.model.load_state_dict(checkpoint["model_state_dict"])
-        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-        self.current_epoch = checkpoint["epoch"]
-        self.current_step = checkpoint["step"]
-        self.current_lr = checkpoint["lr"]
-        self.best_valid_loss = checkpoint["best_valid_loss"]
+        self.checkpoint = torch.load(
+            self.training_config.load_checkpoint, map_location=torch.device(self.local_rank)
+        )
 
-        self.logger.info("Model parameters loaded successfully.")
+        # since this is first called in the model initialization pipeline, the model and optimizers loads the checkpoint in their own functions instead of here
+        self.current_epoch = self.checkpoint["epoch"]
+        self.current_step = self.checkpoint["step"]
+        self.current_lr = self.checkpoint["lr"]
+        self.best_valid_loss = self.checkpoint["best_valid_loss"]
+
+        self.logger.info("Checkpoint loaded successfully.")
 
     def save_checkpoint(self, save_name=None):
         if save_name is None:
@@ -228,15 +374,14 @@ class DNASeqModelTrainer:
                 "epoch": self.current_epoch,
                 "step": self.current_step,
                 "lr": self.current_lr,
-                "model_state_dict": {
-                    k: v.cpu() for k, v in model_to_save.state_dict().items() if isinstance(v, torch.Tensor)
-                },
+                "model_state_dict": {k: v.cpu() for k, v in model_to_save.state_dict().items()},
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "scheduler_state_dict": self.scheduler.state_dict(),
                 "best_valid_loss": self.best_valid_loss,
             }
             torch.save(checkpoint, f"{self.logging_config.checkpoint_dir}/chk_epoch_{save_name}.pt")
         self.logger.info("Checkpoint saved successfully.")
+        blocking_sync_wait(self.world_size)
 
     def lr_warmup(self):
         # lr warmup, gradually change from 0 to the given lr
@@ -245,23 +390,27 @@ class DNASeqModelTrainer:
                 1.0,
                 float(self.current_step + 1) / float(self.training_config.lr_warmup_step),
             )
-            self.current_lr = lr_scale * float(self.training_config.lr)
             for pg in self.optimizer.param_groups:
-                pg["lr"] = self.current_lr
+                pg["lr"] = lr_scale * float(self.training_config.lr)
 
     def train_step(self):
         self.model.train()
 
-        running_loss = torch.tensor(0.0, device=self.local_rank)
-        tm_metrics = get_metric_collection(prefix="Train/", num_outputs=self.trial_num).to(self.local_rank)
-        tm_metrics.reset()
+        # for loss log
+        batch_loss = 0
+        batch_count = 0
+        # for other metric log
+        # tm_metrics = get_metric_collection(prefix="Train/", num_outputs=self.trial_num).to(self.local_rank)
+        # tm_metrics.reset()
 
         dataloader = self.data_func["train"]["data_loader"]
 
         for i, (seq_embedding, label) in enumerate(dataloader):
             # seq_embedding shape [batch, L, 4]
             # label shape [batch, num_central_bin (896), num_trail (93)]
-            seq_embedding, label = seq_embedding.to(self.local_rank), label.to(self.local_rank)
+            seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
+                self.local_rank, non_blocking=True
+            )
             # pred_embedding shape [batch, num_trail (93), num_central_bin (896)]
             pred = self.model(
                 seq_embedding.permute(0, 2, 1),
@@ -271,10 +420,11 @@ class DNASeqModelTrainer:
 
             # loss
             loss = self.criterion(pred, label) / self.training_config.accum_step
-            running_loss += loss.detach()
+            batch_loss += loss.detach().cpu().item() * self.training_config.accum_step
+            batch_count += 1
 
             # metrics
-            tm_metrics.update(pred.reshape(-1, self.trial_num), label.reshape(-1, self.trial_num))
+            # tm_metrics.update(pred.reshape(-1, self.trial_num), label.reshape(-1, self.trial_num))
 
             # whether to do the loss aggregation
             should_update = ((i + 1) % self.training_config.accum_step == 0) or (i + 1 == len(dataloader))
@@ -288,44 +438,63 @@ class DNASeqModelTrainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.2)
                 self.lr_warmup()
                 self.optimizer.step()
+                self.current_lr = self.optimizer.param_groups[0]["lr"]
                 if self.scheduler_update_freq == "batch":
                     self.scheduler.step()
                 self.current_step += 1
 
             # log training status
+            ## in the training loop, we only look at the local loss
             if self.current_step % self.logging_config.report_every == 0:
-                report_loss = running_loss.item() * self.training_config.accum_step / (i + 1)
+                # report_loss = batch_loss / (i + 1)
+                report_loss = batch_loss / batch_count
+
                 if self.logging_config.use_tensorboard:
                     self.logger.metric("Train/loss", report_loss, step=self.current_step, log_also=False)
                     self.logger.metric("Train/lr", self.current_lr, step=self.current_step, log_also=False)
+
+                    # we can only log these info in tensorboard
                     if self.logging_config.log_more:
                         for tag, value in self.model.named_parameters():
                             tag = tag.replace(".", "/")
-                            self.logger.metric(
-                                "weights/" + tag,
-                                value.data.cpu().numpy(),
-                                self.current_step,
-                                log_also=False,
-                                write_hist=True,
-                            )
-                            try:
-                                # only add gradients if they are not None
-                                if value.grad is not None:
+
+                            # add weight histogram
+                            weight = value.data.cpu().numpy()
+                            if not np.isnan(weight).any():
+                                self.logger.metric(
+                                    "weights/" + tag,
+                                    value.data.cpu().numpy(),
+                                    self.current_step,
+                                    log_also=False,
+                                    write_hist=True,
+                                )
+                            else:
+                                self.logger.warning(
+                                    f"failed to add weight histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
+                                )
+
+                            # only add gradients if they are not None
+                            if value.grad is not None:
+                                grad = value.grad.data.cpu().numpy()
+                                if not np.isnan(grad).any():
                                     self.logger.metric(
                                         "grads/" + tag,
-                                        value.data.cpu().numpy(),
+                                        value.grad.data.cpu().numpy(),
                                         self.current_step,
                                         log_also=False,
                                         write_hist=True,
                                     )
-                            except:
-                                self.logger.warning(
-                                    f"failed to add grad histogram for '{tag}' in counter: {self.current_step}"
-                                )
+                                else:
+                                    self.logger.warning(
+                                        f"failed to add grad histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
+                                    )
                 else:
                     self.logger.info(
                         f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
                     )
+
+                batch_loss = 0
+                batch_count = 0
 
             # here we reset the gradient in the final stage as we may need to log the gradient value
             if should_update:
@@ -334,9 +503,7 @@ class DNASeqModelTrainer:
         self.current_epoch += 1
 
         # get and write the metric logs
-        ## in the training loop, we only look at the local loss (but for other metrics, we still look at overall performance)
-        self.metrics.update(tm_metrics.compute())
-        self.metrics.update({"Train/loss": running_loss * self.training_config.accum_step / len(dataloader)})
+        # self.metrics.update(tm_metrics.compute())
 
     def infer_step(self, log_loss=False, save_pred=False, log_prefix="Valid"):
         self.model.eval()
@@ -356,7 +523,9 @@ class DNASeqModelTrainer:
             for i, (seq_embedding, label) in enumerate(dataloader):
                 # seq_embedding shape [batch, L, 4]
                 # label shape [batch, num_central_bin (896), num_trail (93)]
-                seq_embedding, label = seq_embedding.to(self.local_rank), label.to(self.local_rank)
+                seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
+                    self.local_rank, non_blocking=True
+                )
                 # pred_embedding shape [batch, num_trail (93), num_central_bin (896)]
                 pred = self.model(
                     seq_embedding.permute(0, 2, 1),
@@ -382,14 +551,15 @@ class DNASeqModelTrainer:
             total_loss = running_loss_local.clone()
             # aggregate the loss value from all devices
             global_aggregate(total_loss, aggregate="sum", world_size=self.world_size)
-            if self.should_log:
-                global_avg_loss = total_loss / (len(dataloader) * self.world_size)
-                self.metrics.update({f"{log_prefix}/loss": global_avg_loss})
+
+            global_avg_loss = total_loss / (len(dataloader) * self.world_size)
+            self.metrics.update({f"{log_prefix}/loss": global_avg_loss.cpu().item()})
+
         if save_pred:
             # we have to pre save all the res and later aggregate them
             torch.save(
                 {"label": torch.cat(labels, dim=0), "pred": torch.cat(preds, dim=0)},
-                f"{self.logging_config.res_dir}/preds_rank_{self.rank}_epoch_{self.current_epoch}.pt",
+                f"{self.logging_config.res_dir}/{log_prefix}_preds_rank_{self.rank}_epoch_{self.current_epoch}.pt",
             )
 
 
@@ -409,15 +579,23 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
 
     try:
         # if we have multiple GPUs, we need to set up DDP
-        setup(rank, world_size, myconfig.training.MASTER_ADDR, myconfig.training.MASTER_PORT)
+        if myconfig.training.torch_run:
+            torchrun_setup()
+        else:
+            setup(rank, world_size, myconfig.training.MASTER_ADDR, myconfig.training.MASTER_PORT)
 
         # Set up the trainer
-        trainer = DNASeqModelTrainer(myconfig, rank, world_size, logger)
+        trainer = DNASeqModelTrainer(
+            config=myconfig,
+            rank=rank,
+            world_size=world_size,
+            logger=logger,
+            local_rank=local_rank,
+        )
         blocking_sync_wait(world_size)
 
         if not myconfig.training.test_only:
             for epoch in range(trainer.current_epoch, myconfig.training.total_epoch):
-                save_test_res = False
                 trainer.logger.info(f"Current Epoch: {trainer.current_epoch + 1}")
 
                 for split in trainer.data_split:
@@ -441,12 +619,9 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                         logger.info(f"New best validation loss: {valid_loss:.6f}")
                         with timer(f"Saving new best model", logger, rank, world_size):
                             trainer.save_checkpoint(save_name="best_valid_loss")
-                        save_test_res = True
 
                     if trainer.scheduler_update_freq == "epoch":
                         trainer.scheduler.step(valid_loss)
-
-                    blocking_sync_wait(world_size)
 
                 # write the model
                 if trainer.current_epoch % myconfig.logging.save_every == 0:
@@ -454,57 +629,28 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                         trainer.save_checkpoint()
                     # save_test_res = True
 
-                if trainer.data_func["test"]["data_loader"] is not None:
-                    with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                        trainer.infer_step(log_loss=True, log_prefix="Test", save_pred=save_test_res)
+                # # testing the model
+                # if trainer.data_func["test"]["data_loader"] is not None:
+                #     with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
+                #         trainer.infer_step(log_loss=True, log_prefix="Test", save_pred=save_test_res)
 
-                    blocking_sync_wait(world_size)
+                #     blocking_sync_wait(world_size)
 
                 # write the metrics
                 ## if we use tensorboard, the metrics will be written into tb (initialized when creating the training logger)
-                for k, v in trainer.metrics.items():
-                    trainer.logger.metric(
-                        k,
-                        v.nanmean().cpu().item() if isinstance(v, torch.Tensor) else v,
-                        step=trainer.current_step,
-                    )
-                if not myconfig.logging.use_tensorboard and trainer.should_log:
-                    with open(f"{myconfig.logging.log_dir}/metrics/epoch_{trainer.current_epoch}.json", "w") as f:
-                        json.dump(
-                            {
-                                k: v.nanmean().cpu().item() if isinstance(v, torch.Tensor) else v
-                                for k, v in trainer.metrics.items()
-                            },
-                            f,
-                            indent=4,
-                        )
-
-                # save the test result
-                if save_test_res and trainer.should_log:
-                    # aggregate the results and clear per rank file
-                    pattern = f"{trainer.logging_config.res_dir}/preds_rank_*_epoch_{trainer.current_epoch}.pt"
-
-                    file_list = glob.glob(pattern)
-                    if not file_list:
-                        trainer.logger.warning("Test res aggregation failed (cannot find any pred file), skip")
+                if trainer.should_log:
+                    metric_dict = construct_logging_metric_dict(trainer)
+                    if myconfig.logging.use_tensorboard:
+                        for k, v in metric_dict.items():
+                            trainer.logger.metric(k, v, step=trainer.current_step, log_also=False)
                     else:
-                        all_labels = []
-                        all_preds = []
-                        for file_path in file_list:
-                            data = torch.load(file_path, map_location="cpu")
-                            all_labels.append(data["label"])
-                            all_preds.append(data["pred"])
-
-                        all_labels = torch.cat(all_labels, dim=0)
-                        all_preds = torch.cat(all_preds, dim=0)
-
-                        torch.save(
-                            {"label": all_labels, "pred": all_preds},
-                            f"{trainer.logging_config.res_dir}/preds_epoch_{trainer.current_epoch}.pt",
-                        )
-
-                        for file_path in file_list:
-                            os.remove(file_path)
+                        for k, v in metric_dict.items():
+                            trainer.logger.metric(k, v, step=trainer.current_step)
+                        with open(
+                            f"{myconfig.logging.log_dir}/metrics/epoch_{trainer.current_epoch}.json", "w"
+                        ) as f:
+                            json.dump(metric_dict, f, indent=4)
+                blocking_sync_wait(world_size)
 
             # for later continue training if needed
             logger.info("Training end.")
@@ -512,8 +658,25 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                 trainer.save_checkpoint(save_name="last_epoch")
 
         else:
+            if trainer.data_func["train"]["data_loader"] is not None:
+                with timer(f"[Train/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
+                    trainer.infer_step(log_loss=False, log_prefix="Train", save_pred=True)
+                blocking_sync_wait(world_size)
+
+            if trainer.data_func["valid"]["data_loader"] is not None:
+                with timer(f"[Valid/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
+                    trainer.infer_step(log_loss=False, log_prefix="Valid", save_pred=True)
+                blocking_sync_wait(world_size)
+
             with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
                 trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=True)
+
+            blocking_sync_wait(world_size)
+            # save the raw preds
+            if trainer.should_log:
+                aggregate_test_res(trainer, "Train")
+                aggregate_test_res(trainer, "Valid")
+                aggregate_test_res(trainer, "Test")
 
         blocking_sync_wait(world_size)
         cleanup(world_size)
@@ -549,7 +712,6 @@ def torchrun_main(local_rank, rank, world_size, myconfig):
 
         if not myconfig.training.test_only:
             for epoch in range(trainer.current_epoch, myconfig.training.total_epoch):
-                save_test_res = False
                 trainer.logger.info(f"Current Epoch: {trainer.current_epoch + 1}")
 
                 for split in trainer.data_split:
@@ -573,12 +735,9 @@ def torchrun_main(local_rank, rank, world_size, myconfig):
                         logger.info(f"New best validation loss: {valid_loss:.6f}")
                         with timer(f"Saving new best model", logger, rank, world_size):
                             trainer.save_checkpoint(save_name="best_valid_loss")
-                        save_test_res = True
 
                     if trainer.scheduler_update_freq == "epoch":
                         trainer.scheduler.step(valid_loss)
-
-                    blocking_sync_wait(world_size)
 
                 # write the model
                 if trainer.current_epoch % myconfig.logging.save_every == 0:
@@ -586,57 +745,28 @@ def torchrun_main(local_rank, rank, world_size, myconfig):
                         trainer.save_checkpoint()
                     # save_test_res = True
 
-                if trainer.data_func["test"]["data_loader"] is not None:
-                    with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                        trainer.infer_step(log_loss=True, log_prefix="Test", save_pred=save_test_res)
+                # # testing the model
+                # if trainer.data_func["test"]["data_loader"] is not None:
+                #     with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
+                #         trainer.infer_step(log_loss=True, log_prefix="Test", save_pred=save_test_res)
 
-                    blocking_sync_wait(world_size)
+                #     blocking_sync_wait(world_size)
 
                 # write the metrics
                 ## if we use tensorboard, the metrics will be written into tb (initialized when creating the training logger)
-                for k, v in trainer.metrics.items():
-                    trainer.logger.metric(
-                        k,
-                        v.nanmean().cpu().item() if isinstance(v, torch.Tensor) else v,
-                        step=trainer.current_step,
-                    )
-                if not myconfig.logging.use_tensorboard and trainer.should_log:
-                    with open(f"{myconfig.logging.log_dir}/metrics/epoch_{trainer.current_epoch}.json", "w") as f:
-                        json.dump(
-                            {
-                                k: v.nanmean().cpu().item() if isinstance(v, torch.Tensor) else v
-                                for k, v in trainer.metrics.items()
-                            },
-                            f,
-                            indent=4,
-                        )
-
-                # save the test result
-                if save_test_res and trainer.should_log:
-                    # aggregate the results and clear per rank file
-                    pattern = f"{trainer.logging_config.res_dir}/preds_rank_*_epoch_{trainer.current_epoch}.pt"
-
-                    file_list = glob.glob(pattern)
-                    if not file_list:
-                        trainer.logger.warning("Test res aggregation failed (cannot find any pred file), skip")
+                if trainer.should_log:
+                    metric_dict = construct_logging_metric_dict(trainer)
+                    if myconfig.logging.use_tensorboard:
+                        for k, v in metric_dict.items():
+                            trainer.logger.metric(k, v, step=trainer.current_step, log_also=False)
                     else:
-                        all_labels = []
-                        all_preds = []
-                        for file_path in file_list:
-                            data = torch.load(file_path, map_location="cpu")
-                            all_labels.append(data["label"])
-                            all_preds.append(data["pred"])
-
-                        all_labels = torch.cat(all_labels, dim=0)
-                        all_preds = torch.cat(all_preds, dim=0)
-
-                        torch.save(
-                            {"label": all_labels, "pred": all_preds},
-                            f"{trainer.logging_config.res_dir}/preds_epoch_{trainer.current_epoch}.pt",
-                        )
-
-                        for file_path in file_list:
-                            os.remove(file_path)
+                        for k, v in metric_dict.items():
+                            trainer.logger.metric(k, v, step=trainer.current_step)
+                        with open(
+                            f"{myconfig.logging.log_dir}/metrics/epoch_{trainer.current_epoch}.json", "w"
+                        ) as f:
+                            json.dump(metric_dict, f, indent=4)
+                blocking_sync_wait(world_size)
 
             # for later continue training if needed
             logger.info("Training end.")
@@ -644,8 +774,25 @@ def torchrun_main(local_rank, rank, world_size, myconfig):
                 trainer.save_checkpoint(save_name="last_epoch")
 
         else:
+            if trainer.data_func["train"]["data_loader"] is not None:
+                with timer(f"[Train/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
+                    trainer.infer_step(log_loss=False, log_prefix="Train", save_pred=True)
+                blocking_sync_wait(world_size)
+
+            if trainer.data_func["valid"]["data_loader"] is not None:
+                with timer(f"[Valid/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
+                    trainer.infer_step(log_loss=False, log_prefix="Valid", save_pred=True)
+                blocking_sync_wait(world_size)
+
             with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
                 trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=True)
+
+            blocking_sync_wait(world_size)
+            # save the raw preds
+            if trainer.should_log:
+                aggregate_test_res(trainer, "Train")
+                aggregate_test_res(trainer, "Valid")
+                aggregate_test_res(trainer, "Test")
 
         blocking_sync_wait(world_size)
         cleanup(world_size)

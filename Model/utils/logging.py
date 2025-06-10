@@ -10,6 +10,7 @@ LOGGER_PREFIX = "BICAN"
 LOGGING_MODULE = [
     f"{LOGGER_PREFIX}-{i}"
     for i in [
+        "Main",
         "Config",
         "Data Preprocess",
         "Model",
@@ -45,6 +46,8 @@ class BaseLogger:
         log_dir: str = "./logs",
         redirect: bool = False,
         overwrite: bool = False,
+        rank=0,
+        world_size=1,
     ):
 
         self.level_ = level
@@ -62,6 +65,9 @@ class BaseLogger:
         self.logger.addHandler(handler)
 
         self._format(self.logger)
+
+        self.rank = rank
+        self.world_size = world_size
 
     # for setting the format of the logger
     def _format(
@@ -91,9 +97,11 @@ class BaseLogger:
         self.level = level
 
     # basic logging methods
+    @check_rank
     def info(self, msg: str):
         self.logger.info(msg)
 
+    @check_rank
     def debug(self, msg: str):
         self.logger.debug(msg)
 
@@ -121,10 +129,7 @@ class TrainingLogger(BaseLogger):
         world_size=1,
         use_tensorboard=False,
     ):
-        super().__init__(name, level, log_dir, redirect, overwrite)
-
-        self.rank = rank
-        self.world_size = world_size
+        super().__init__(name, level, log_dir, redirect, overwrite, rank, world_size)
 
         if use_tensorboard and (self.world_size == 1 or self.rank == 0):
             self.add_tb()
@@ -146,10 +151,12 @@ class TrainingLogger(BaseLogger):
     def info(self, msg: str):
         self.logger.info(msg)
 
+    @check_rank
     @add_rank
     def debug(self, msg: str):
         self.logger.debug(msg)
 
+    @check_rank
     @add_rank
     def warning(self, msg: str):
         self.logger.warning(msg)
@@ -209,6 +216,9 @@ def setup_logging(
     level: int = logging.INFO,
     log_dir: str = "./logs",
     redirect: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
+    overwrite: bool = False,
 ):
     global LOGGING_MODULE
     global LOGGERS
@@ -220,7 +230,9 @@ def setup_logging(
             level=level,
             log_dir=log_dir,
             redirect=redirect,
-            overwrite=False,
+            overwrite=False if name != "Main" else overwrite,
+            rank=rank,
+            world_size=world_size,
         )
 
 

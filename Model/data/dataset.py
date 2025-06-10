@@ -23,16 +23,20 @@ class GenomeIntervalDataset(Dataset):
         super().__init__()
 
         self.storage_path = storage_path
+        self.context_length = context_length
 
+        # load meta data
         df = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
         df.columns = ["chr", "start", "end", "split"]
         self.df = df[df["split"] == dataset_type].reset_index(drop=True)
+        self.label_meta = pd.read_csv(f"{storage_path}/label_meta.csv", index_col=0)
 
+        # load label
         self.preload_data = preload_data
-
         if preload_data:
             self.label = torch.load(f"{storage_path}/data/{dataset_type}.pt")["label"][self.df.index]
 
+        # get tokenizer
         self.tokenizer = FastaInterval(
             fasta_file=refer_genom,
             context_length=context_length,
@@ -59,7 +63,17 @@ class GenomeIntervalDataset(Dataset):
             if reverse:
                 label = torch.flip(label, dims=[0])
 
+        if one_hot.shape[0] != self.context_length:
+            raise ValueError(f"Context length not match (expecting {self.context_length}, {one_hot.shape[0]} observed). Chr {chrom}, start {start}, end {end}, aug shift {shift}")
+
         return one_hot, label
+
+
+def safe_collate_fn(batch):
+    one_hots, labels = zip(*batch)
+    one_hots = torch.stack([x.clone() for x in one_hots])
+    labels = torch.stack([x.clone() for x in labels])
+    return one_hots, labels
 
 
 class DumySampler:

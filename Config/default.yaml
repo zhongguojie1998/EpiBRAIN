@@ -2,4 +2,4 @@ defaults:
   - data: default
   - model: default
   - training: default
-  - logging: guojie
+  - logging: default

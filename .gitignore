@@ -1,7 +1,16 @@
+**/.vscode
 **/__pycache__
 **/.ipynb_checkpoint
 
-# Other
+# directories
 test/
 logs/
-.vscode/
+Chk/
+Data/
+Res/
+
+# symbolic links
+logs
+Chk
+Data
+Res
