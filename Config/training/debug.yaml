@@ -8,3 +8,7 @@ batch_size: 1
 lr_warmup_step: 2
 
 total_epoch: 1
+
+powerSGD_params:
+  matrix_approximation_rank: 1 
+  start_powerSGD_iter: 2

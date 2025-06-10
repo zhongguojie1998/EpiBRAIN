@@ -5,6 +5,7 @@ import logging
 import os
 
 import torch
+import torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook as PowerSGD
 import torch.optim as optim
 import torchmetrics as tm
 from peft import LoraConfig, get_peft_model
@@ -185,8 +186,8 @@ class DNASeqModelTrainer:
                     exit(1)
                 elif split == "test" and self.training_config.test_only:
                     self.logger.error(
-                            "Failed to load testing dataset in `test_only` mode. Please check the preprocess setting."
-                        )
+                        "Failed to load testing dataset in `test_only` mode. Please check the preprocess setting."
+                    )
                     self.logger.exception(e)
                     exit(1)
                 else:
@@ -300,6 +301,14 @@ class DNASeqModelTrainer:
             self.model = DDP(
                 self.model, device_ids=[self.local_rank], static_graph=True, find_unused_parameters=True
             )
+
+            # If applicable, add gradient compression hook
+            if self.training_config.use_grad_compression:
+                state = PowerSGD.PowerSGDState(
+                    process_group=None,  # we do compression on all ranks
+                    **self.training_config.get("powerSGD_params", {}),
+                )
+                self.model.register_comm_hook(state, PowerSGD.powerSGD_hook)
 
         self.logger.info(f"Model {self.model_config.model_name} loaded successfully.")
 

@@ -38,6 +38,7 @@ def load_config(config_dir: str, config_name="default", overrides: tuple[str, ..
         config = OmegaConf.to_container(config, resolve=True)
         config = OmegaConf.create(config)
 
+    # some input check
     input_check(
         config.model.bins_to_return,
         config.data.preprocess.n_window,
