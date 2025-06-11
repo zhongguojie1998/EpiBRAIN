@@ -1,9 +1,9 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
+import deepspeed
 import os
 import socket
 import torch.distributed as dist
-
 from utils.logging import LOGGER_PREFIX, LazyLogger
 
 logger = LazyLogger(f"{LOGGER_PREFIX}-MultiGPU Setup")
@@ -38,6 +38,8 @@ def setup(rank, world_size=1, MASTER_ADDR="localhost", MASTER_PORT=12320):
 def torchrun_setup():
     dist.init_process_group("nccl")
 
+def deepspeed_setup():
+    deepspeed.init_distributed()
 
 def cleanup(world_size=1):
     if world_size > 1 and dist.is_initialized():
