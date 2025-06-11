@@ -6,7 +6,7 @@ import warnings
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-sys.path.append(ROOT)
+sys.path.append(str(ROOT))
 
 warnings.filterwarnings("ignore")
 
@@ -53,12 +53,23 @@ logger = LazyLogger(f"{LOGGER_PREFIX}-Main")
     help="If we are using torchrun to train the model",
 )
 @click.option(
+    "--deep_speed",
+    "-d",
+    is_flag=True,
+    help="If we are using deepspeed to train the model",
+)
+@click.option(
+    "--local_rank",
+    default=None,
+    help="Local rank that will be passed by deepspeed",
+)
+@click.option(
     "--only_data",
     is_flag=True,
     help="If we are only processing the data",
 )
 @record
-def main(config_setting, config_dir, override_config, torch_run, only_data):
+def main(config_setting, config_dir, override_config, torch_run, deep_speed, local_rank, only_data):
 
     # read in config file and setup logging
     myconfig = load_config(config_dir, config_setting, override_config)
@@ -76,10 +87,10 @@ def main(config_setting, config_dir, override_config, torch_run, only_data):
 
     ## set up training devices (and logging)
     myconfig.training.torch_run = torch_run
-    if torch_run:
+    if torch_run or deep_speed:
         ### get world size, gpu id and rank from torchrun
         world_size = int(os.environ.get("WORLD_SIZE", 1))
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        local_rank = int(os.environ.get("LOCAL_RANK", 0)) if local_rank is None else local_rank
         rank = int(os.environ.get("RANK", 0))
 
         setup_logging(
@@ -145,8 +156,8 @@ def main(config_setting, config_dir, override_config, torch_run, only_data):
         exit(0)
 
     # set up multigpu training if needed
-    if torch_run:
-        logger.info(f"Torchrun with {world_size} GPUs")
+    if torch_run or deep_speed:
+        logger.info(f"Torchrun with {world_size} GPUs") if torch_run else logger.info(f"Deepspeed with {world_size} GPUs")
 
         mpt.freeze_support()
         try:
