@@ -57,7 +57,7 @@ def torch_fromstring(seq_strs):
     batched = not isinstance(seq_strs, str)
     seq_strs = cast_list(seq_strs)
     # transform str to integer (ASCII), align with the predefined encoding matrix
-    np_seq_chrs = list(map(lambda t: np.fromstring(t, dtype=np.uint8), seq_strs))
+    np_seq_chrs = list(map(lambda t: np.frombuffer(t.encode("utf-8"), dtype=np.uint8), seq_strs))
     seq_chrs = list(map(torch.from_numpy, np_seq_chrs))
     return torch.stack(seq_chrs) if batched else seq_chrs[0]
 
