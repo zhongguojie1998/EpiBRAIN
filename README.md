@@ -1,7 +1,7 @@
 # Installation
 
 ```bash
-conda create -n bican python=3.12 ipykernel
+conda create -n bican python=3.12
 conda activate bican
 
 # data processing
@@ -23,6 +23,14 @@ pip install flash-attn --no-build-isolation  # flash attention
 pip install click # command line tool
 pip install hydra-core  # better config
 pip install tensorboard  # better logging
+```
+
+## Optional packages
+
+```bash
+pip install matplotlib seaborn scikit-learn ipykernel 
+pip install captum   # for model interpretation
+pip install modisco  # for visualization
 ```
 
 # Data Pipeline

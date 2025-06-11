@@ -7,10 +7,7 @@ MASTER_ADDR: localhost # master address for DDP training
 MASTER_PORT: 12320 # master port for DDP training
 
 ## model training optimizing
-use_grad_compression: True  # whether to use gradient compression (PowerSGD) to reduce GPU communication time. Need to make sure that this is the main training bottle neck
-powerSGD_params:
-  matrix_approximation_rank: 1 # determines the compression rate — the lower the rank, the stronger the compression but it is also more likely that accuracy could suffer. To tune this hyperparameter, we suggest starting from 1 and increasing by factors of 2 (like an exponential grid search, 1, 2, 4, …)
-  start_powerSGD_iter: 2100 # defers compression until this step and vanilla allreduce runs prior to the compression. we suggest to start with 10% of total training steps and increase it until a satisfactory accuracy is reached. If there is a warm-up stage in the training, start_powerSGD_iter typically should be no less than the number of warm-up steps.
+use_grad_compression: False  # whether to use gradient compression (PowerSGD) to reduce GPU communication time. Need to make sure that this is the main training bottle neck
 
 ## training stage setting
 load_checkpoint: null # path to the checkpoint to load, if not given, will start from scratch, else, will resume training from the given checkpoint

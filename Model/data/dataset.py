@@ -57,14 +57,18 @@ class GenomeIntervalDataset(Dataset):
         else:
             label = torch.load(f"{self.storage_path}/data/{chrom}_{start}_{end}.pt")["label"]
 
-        one_hot, shift, reverse = self.tokenizer(chrom, start, end, return_augs=self.return_augs)
+        token_dict = self.tokenizer(chrom, start, end, return_augs=self.return_augs)
+        one_hot = token_dict["one_hot"]
+
         if self.return_augs:
             # here, if reverse, the sequence is still 5'->3', which means the corresponding label should be reversed
-            if reverse:
+            if token_dict["rand_reverse"]:
                 label = torch.flip(label, dims=[0])
 
         if one_hot.shape[0] != self.context_length:
-            raise ValueError(f"Context length not match (expecting {self.context_length}, {one_hot.shape[0]} observed). Chr {chrom}, start {start}, end {end}, aug shift {shift}")
+            raise ValueError(
+                f"Context length not match (expecting {self.context_length}, {one_hot.shape[0]} observed). Chr {chrom}, start {start}, end {end}, aug shift {token_dict.get('rand_shift')}"
+            )
 
         return one_hot, label
 

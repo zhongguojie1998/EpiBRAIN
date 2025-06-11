@@ -91,17 +91,17 @@ class Borzoi(PreTrainedModel):
         self._max_pool = nn.MaxPool1d(kernel_size=2, padding=0)
         self.res_tower = nn.Sequential(
             ConvBlock(in_channels=512, out_channels=608, kernel_size=5),
-            self._max_pool,
+            nn.MaxPool1d(kernel_size=2, padding=0),
             ConvBlock(in_channels=608, out_channels=736, kernel_size=5),
-            self._max_pool,
+            nn.MaxPool1d(kernel_size=2, padding=0),
             ConvBlock(in_channels=736, out_channels=896, kernel_size=5),
-            self._max_pool,
+            nn.MaxPool1d(kernel_size=2, padding=0),
             ConvBlock(in_channels=896, out_channels=1056, kernel_size=5),
-            self._max_pool,
+            nn.MaxPool1d(kernel_size=2, padding=0),
             ConvBlock(in_channels=1056, out_channels=1280, kernel_size=5),
         )
         self.unet1 = nn.Sequential(
-            self._max_pool,
+            nn.MaxPool1d(kernel_size=2, padding=0),
             ConvBlock(in_channels=1280, out_channels=config.dim, kernel_size=5),
         )
         self.horizontal_conv0, self.horizontal_conv1 = ConvBlock(
@@ -154,10 +154,9 @@ class Borzoi(PreTrainedModel):
         # upsample convolutional layers
         self.upsample_layer_num = config.upsample_layer_num
         if config.upsample_layer_num >= 1:
-            self.upsample = torch.nn.Upsample(scale_factor=2)
             self.upsampling_unet1 = nn.Sequential(
                 ConvBlock(in_channels=config.dim, out_channels=config.dim, kernel_size=1),
-                self.upsample,
+                torch.nn.Upsample(scale_factor=2),
             )
             self.separable1 = ConvBlock(
                 in_channels=config.dim, out_channels=config.dim, kernel_size=3, conv_type="separable"
@@ -165,7 +164,7 @@ class Borzoi(PreTrainedModel):
         if config.upsample_layer_num >= 2:
             self.upsampling_unet0 = nn.Sequential(
                 ConvBlock(in_channels=config.dim, out_channels=config.dim, kernel_size=1),
-                self.upsample,
+                torch.nn.Upsample(scale_factor=2),
             )
             self.separable0 = ConvBlock(
                 in_channels=config.dim, out_channels=config.dim, kernel_size=3, conv_type="separable"

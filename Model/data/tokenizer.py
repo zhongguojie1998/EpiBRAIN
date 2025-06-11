@@ -116,7 +116,7 @@ class FastaInterval:
         self.shift_augs = shift_augs
         self.rc_aug = rc_aug
 
-    def __call__(self, chr_name, start, end, return_augs=False):
+    def __call__(self, chr_name, start, end, return_augs=False, return_rela_idx=False):
         """
         Encode DNA sequence. Do seq shift and strand flip data augumentation. Extend the sequence to reach the context length if necessary. Padding if out of range.
 
@@ -124,10 +124,17 @@ class FastaInterval:
         start: sample start idx
         end: sample end idx
         return_augs: whether to also return the aug metadata (the exact augmentation parameter used)
+        return_rela_idx: whether to return the relative index of the org seq in the final returned padded data. This is useful in the interpreting stage
         """
+
+        return_dict = {}
+
         # the genome is delay initialized
         if self.seqs is None:
             self.seqs = Fasta(self.fasta_file)
+
+        orig_start = start
+        orig_end = end
 
         interval_length = end - start
         chromosome = self.seqs[chr_name]
@@ -145,6 +152,9 @@ class FastaInterval:
             end += rand_shift
         else:
             rand_shift = 0
+
+        orig_start += rand_shift
+        orig_end += rand_shift
 
         left_padding = right_padding = 0
 
@@ -166,6 +176,9 @@ class FastaInterval:
             right_padding = end - chromosome_length
             end = chromosome_length
 
+        s_idx = left_padding + (orig_start - start)
+        e_idx = left_padding + (orig_end - start)
+
         seq = ("." * left_padding) + str(chromosome[start:end]) + ("." * right_padding)
 
         should_rc_aug = self.rc_aug and coin_flip()
@@ -176,20 +189,25 @@ class FastaInterval:
             if should_rc_aug:
                 seq = seq_indices_reverse_complement(seq)
 
-            return seq
+            return_dict["seq_indices"] = seq
 
         one_hot = str_to_one_hot(seq)
 
         if should_rc_aug:
             one_hot = one_hot_reverse_complement(one_hot)
 
-        if not return_augs:
-            return one_hot, None, None
+        return_dict["one_hot"] = one_hot
 
-        # returns the shift integer as well as the bool (for whether reverse complement was activated)
-        # for this particular genomic sequence
+        if return_augs:
+            # returns the shift integer as well as the bool (for whether reverse complement was activated)
+            # for this particular genomic sequence
+            rand_shift_tensor = torch.tensor([rand_shift])
+            rand_aug_bool_tensor = torch.tensor([should_rc_aug])
 
-        rand_shift_tensor = torch.tensor([rand_shift])
-        rand_aug_bool_tensor = torch.tensor([should_rc_aug])
+            return_dict["rand_shift"] = rand_shift_tensor
+            return_dict["rand_reverse"] = rand_aug_bool_tensor
 
-        return one_hot, rand_shift_tensor, rand_aug_bool_tensor
+        if return_rela_idx:
+            return_dict["rela_idx"] = (s_idx, e_idx)
+
+        return return_dict
