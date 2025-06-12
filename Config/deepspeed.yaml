@@ -1,5 +1,5 @@
 defaults:
-  - data: guojie
-  - model: deepspeed
+  - data: default
+  - model: default
   - training: deepspeed
   - logging: default

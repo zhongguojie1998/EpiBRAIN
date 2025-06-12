@@ -19,6 +19,9 @@ pip install ninja # for fast compile
 conda install -c "nvidia/label/cuda-12.1.0" cuda-toolkit # for cuda toolkit, need nvcc
 pip install flash-attn --no-build-isolation  # flash attention
 
+## install deepspeed, make sure you've already installed cuda-toolkit in the former step
+pip install deepspeed
+
 # util packages
 pip install click # command line tool
 pip install hydra-core  # better config

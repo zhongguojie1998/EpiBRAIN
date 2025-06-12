@@ -1,0 +1,5 @@
+defaults:
+  - data: debug
+  - model: default
+  - training: debug
+  - logging: debug

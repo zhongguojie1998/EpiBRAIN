@@ -8,9 +8,10 @@ MASTER_PORT: 12320 # master port for DDP training
 
 ## model training optimizing
 use_grad_compression: False  # whether to use gradient compression (PowerSGD) to reduce GPU communication time. Need to make sure that this is the main training bottle neck
+deepspeed: False  # whether to use deepspeed
 
 ## training stage setting
-load_checkpoint: null # path to the checkpoint to load, if not given, will start from scratch, else, will resume training from the given checkpoint
+load_checkpoint: null # path to the checkpoint to load (if using deepspeed, then the checkpoint tag), if not given, will start from scratch, else, will resume training from the given checkpoint
 test_only: False # whether to only run the test stage, if True, load_checkpoint must be given
 finetune: False # whether to finetune the model
 

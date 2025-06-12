@@ -1,8 +1,9 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
-import deepspeed
 import os
 import socket
+
+import deepspeed
 import torch.distributed as dist
 from utils.logging import LOGGER_PREFIX, LazyLogger
 
@@ -38,16 +39,20 @@ def setup(rank, world_size=1, MASTER_ADDR="localhost", MASTER_PORT=12320):
 def torchrun_setup():
     dist.init_process_group("nccl")
 
+
 def deepspeed_setup():
     deepspeed.init_distributed()
+
 
 def cleanup(world_size=1):
     if world_size > 1 and dist.is_initialized():
         dist.destroy_process_group()
 
+
 def blocking_sync_wait(world_size=1):
     if world_size > 1:
         dist.barrier()
+
 
 def global_aggregate(metric, aggregate="sum", world_size=1):
     if world_size > 1:

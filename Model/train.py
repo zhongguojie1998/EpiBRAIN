@@ -17,7 +17,7 @@ import torch.multiprocessing as mpt
 from data.preprocess import preprocess
 from omegaconf import OmegaConf
 from torch.distributed.elastic.multiprocessing.errors import record
-from utils.config import load_config
+from utils.config import load_config, write_deepspeed_config
 from utils.logging import LOGGER_PREFIX, LazyLogger, save_tensorboard_run_script, setup_logging
 from utils.multi_gpu import find_free_port
 from utils.trainer import mp_main
@@ -25,7 +25,7 @@ from utils.trainer import mp_main
 logger = LazyLogger(f"{LOGGER_PREFIX}-Main")
 
 
-@click.command()
+@click.command(context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 @click.option(
     "--config_setting",
     "-c",
@@ -47,21 +47,16 @@ logger = LazyLogger(f"{LOGGER_PREFIX}-Main")
     help="Hydra override string(s), e.g. 'model=no_flashatten' (change whole config profile), or '-x training=single_gpu -x training.gpu_id=3' (change profile, then change specific parameter)",
 )
 @click.option(
-    "--torch_run",
+    "--torchrun",
     "-t",
     is_flag=True,
     help="If we are using torchrun to train the model",
 )
 @click.option(
-    "--deep_speed",
+    "--deepspeed",
     "-d",
     is_flag=True,
     help="If we are using deepspeed to train the model",
-)
-@click.option(
-    "--local_rank",
-    default=None,
-    help="Local rank that will be passed by deepspeed",
 )
 @click.option(
     "--only_data",
@@ -69,7 +64,10 @@ logger = LazyLogger(f"{LOGGER_PREFIX}-Main")
     help="If we are only processing the data",
 )
 @record
-def main(config_setting, config_dir, override_config, torch_run, deep_speed, local_rank, only_data):
+def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_data):
+
+    if torchrun and deepspeed:
+        raise ValueError("Cannot both enbale torchrun and deepspeed")
 
     # read in config file and setup logging
     myconfig = load_config(config_dir, config_setting, override_config)
@@ -86,11 +84,12 @@ def main(config_setting, config_dir, override_config, torch_run, deep_speed, loc
         os.makedirs(myconfig.logging.res_dir, exist_ok=True)
 
     ## set up training devices (and logging)
-    myconfig.training.torch_run = torch_run
-    if torch_run or deep_speed:
-        ### get world size, gpu id and rank from torchrun
+    myconfig.training.torchrun = torchrun
+    myconfig.training.deepspeed = deepspeed
+    if torchrun or deepspeed:
+        ### get world size, gpu id and rank from torchrun (from environment) or deepspeed (from input parameter)
         world_size = int(os.environ.get("WORLD_SIZE", 1))
-        local_rank = int(os.environ.get("LOCAL_RANK", 0)) if local_rank is None else local_rank
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
         rank = int(os.environ.get("RANK", 0))
 
         setup_logging(
@@ -138,6 +137,9 @@ def main(config_setting, config_dir, override_config, torch_run, deep_speed, loc
     logger.debug(myconfig)
     with open(f"{myconfig.logging.log_dir}/overall_setting.yaml", "w") as f:
         OmegaConf.save(myconfig, f)
+    if deepspeed:
+        myconfig.training.deepspeed_config = f"{myconfig.logging.log_dir}/deepspeed_setup.json"
+        write_deepspeed_config(myconfig, f"{myconfig.logging.log_dir}/deepspeed_setup.json")
 
     ## write a tensorboard booting bash script
     if myconfig.logging.use_tensorboard:
@@ -156,8 +158,8 @@ def main(config_setting, config_dir, override_config, torch_run, deep_speed, loc
         exit(0)
 
     # set up multigpu training if needed
-    if torch_run or deep_speed:
-        logger.info(f"Torchrun with {world_size} GPUs") if torch_run else logger.info(f"Deepspeed with {world_size} GPUs")
+    if torchrun or deepspeed:
+        logger.info(f"Torchrun with {world_size} GPUs") if torchrun else logger.info(f"Deepspeed with {world_size} GPUs")
 
         mpt.freeze_support()
         try:

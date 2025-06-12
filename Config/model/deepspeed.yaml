@@ -1,6 +1,0 @@
-defaults:
-  - default
-
-# use deep speed
-use_deepspeed: False
-deepspeed_config: ./Config/deepspeed.json
