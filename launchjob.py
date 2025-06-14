@@ -110,7 +110,7 @@ def launch_distributed(
         if load_checkpoint is not None:
             cmd += [
                 "-x",
-                f"training.load_checkpoint=./Chk/{exp_name}/chk_epoch_{load_checkpoint}.pt",
+                f"training.load_checkpoint={load_checkpoint}",
                 "-x",
                 f"logging.overwrite_log_file=False",
             ]

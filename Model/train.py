@@ -75,6 +75,7 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
     ## set up logging
     log_level = myconfig.logging.get("log_level", "INFO")
     myconfig.logging.log_level = eval(f"logging.{log_level}") if isinstance(log_level, str) else log_level
+    myconfig.logging.diagnose = myconfig.logging.get("diagnose", False)
 
     ## set up working directory
     os.makedirs(myconfig.logging.log_dir, exist_ok=True)

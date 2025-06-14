@@ -70,7 +70,7 @@ class GenomeIntervalDataset(Dataset):
                 f"Context length not match (expecting {self.context_length}, {one_hot.shape[0]} observed). Chr {chrom}, start {start}, end {end}, aug shift {token_dict.get('rand_shift')}"
             )
 
-        return one_hot, label
+        return one_hot, label, ind
 
 
 def safe_collate_fn(batch):

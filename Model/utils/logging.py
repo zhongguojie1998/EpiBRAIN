@@ -21,7 +21,9 @@ LOGGING_MODULE = [
 
 def check_rank(f):
     def wrapper(*args, **kwargs):
-        if args[0].world_size == 1 or args[0].rank == 0:
+        # for model diagnose, will allow more logs
+        force_diagnose = kwargs.get("diagnose", False)
+        if args[0].world_size == 1 or args[0].rank == 0 or force_diagnose:
             return f(*args, **kwargs)
 
     return wrapper
@@ -131,16 +133,15 @@ class TrainingLogger(BaseLogger):
     ):
         super().__init__(name, level, log_dir, redirect, overwrite, rank, world_size)
 
-        if use_tensorboard and (self.world_size == 1 or self.rank == 0):
+        if use_tensorboard:
             self.add_tb()
-        if not use_tensorboard:
+        else:
             os.makedirs(f"{self.log_dir}/metrics", exist_ok=True)
 
     def set_rank(self, rank: int):
         self.rank = rank
 
-    # add tensorboard writer, check rank for only writing info on rank 0 in DDP mod
-    @check_rank
+    # add tensorboard writer
     def add_tb(self):
         os.makedirs(f"{self.log_dir}/tb", exist_ok=True)
         self.writer = SummaryWriter(log_dir=f"{self.log_dir}/tb")
@@ -148,17 +149,17 @@ class TrainingLogger(BaseLogger):
     # for infos, only log on rank 0 in DDP mode
     @check_rank
     @add_rank
-    def info(self, msg: str):
+    def info(self, msg: str, diagnose=False):
         self.logger.info(msg)
 
     @check_rank
     @add_rank
-    def debug(self, msg: str):
+    def debug(self, msg: str, diagnose=False):
         self.logger.debug(msg)
 
     @check_rank
     @add_rank
-    def warning(self, msg: str):
+    def warning(self, msg: str, diagnose=False):
         self.logger.warning(msg)
 
     @add_rank
@@ -171,7 +172,7 @@ class TrainingLogger(BaseLogger):
 
     # show training information
     @check_rank
-    def metric(self, k: str, v: float, step: int, log_also=True, write_hist=False):
+    def metric(self, k: str, v: float, step: int, log_also=True, write_hist=False, diagnose=False):
         if log_also:
             self.info(f"[Metric] [Step {step}] {k} = {v:.6f}")
         if hasattr(self, "writer"):

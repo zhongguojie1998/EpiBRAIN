@@ -11,3 +11,7 @@ overwrite_log_file: False
 save_every: 1
 report_every: 1
 log_more: True
+
+# use this to enable even more logs, each card will out put somelogs
+diagnose: True
+diagnose_save_step: 10

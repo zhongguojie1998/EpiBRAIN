@@ -3,7 +3,6 @@
 import os
 import socket
 
-import deepspeed
 import torch.distributed as dist
 from utils.logging import LOGGER_PREFIX, LazyLogger
 
@@ -41,6 +40,8 @@ def torchrun_setup():
 
 
 def deepspeed_setup():
+    import deepspeed
+
     deepspeed.init_distributed()
 
 

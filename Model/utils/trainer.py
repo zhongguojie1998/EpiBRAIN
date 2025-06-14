@@ -4,7 +4,6 @@ import json
 import logging
 import os
 
-import deepspeed
 import numpy as np
 import torch
 import torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook as PowerSGD
@@ -408,7 +407,8 @@ class DNASeqModelTrainer:
 
         dataloader = self.data_func["train"]["data_loader"]
 
-        for i, (seq_embedding, label) in enumerate(dataloader):
+        for i, (seq_embedding, label, ind) in enumerate(dataloader):
+
             # seq_embedding shape [batch, L, 4]
             # label shape [batch, num_central_bin (896), num_trail (93)]
             seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
@@ -447,13 +447,24 @@ class DNASeqModelTrainer:
                 self.current_step += 1
 
             # log training status
+            ## output the sample index
+            self.logger.debug(
+                f"batch id for step {self.current_step} is {','.join([str(int(i)) for i in ind])}",
+                diagnose=self.logging_config.diagnose,
+            )
             ## in the training loop, we only look at the local loss
             if self.current_step % self.logging_config.report_every == 0:
                 # report_loss = batch_loss / (i + 1)
                 report_loss = batch_loss / batch_count
 
                 if self.logging_config.use_tensorboard:
-                    self.logger.metric("Train/loss", report_loss, step=self.current_step, log_also=False)
+                    self.logger.metric(
+                        f"Train/rank[{self.rank}]_loss",
+                        report_loss,
+                        step=self.current_step,
+                        log_also=False,
+                        diagnose=self.logging_config.diagnose,
+                    )
                     self.logger.metric("Train/lr", self.current_lr, step=self.current_step, log_also=False)
 
                     # we can only log these info in tensorboard
@@ -502,6 +513,10 @@ class DNASeqModelTrainer:
             # here we reset the gradient in the final stage as we may need to log the gradient value
             if should_update:
                 self.optimizer.zero_grad()
+            
+            if self.logging_config.diagnose:
+                if self.current_step % self.logging_config.get("diagnose_save_step", 1) == 0:
+                    self.save_checkpoint(f"diag_step_{self.current_step}")
 
         self.current_epoch += 1
 
@@ -523,7 +538,7 @@ class DNASeqModelTrainer:
         dataloader = self.data_func[log_prefix.lower()]["data_loader"]
 
         with torch.no_grad():
-            for i, (seq_embedding, label) in enumerate(dataloader):
+            for i, (seq_embedding, label, ind) in enumerate(dataloader):
                 # seq_embedding shape [batch, L, 4]
                 # label shape [batch, num_central_bin (896), num_trail (93)]
                 seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
@@ -630,6 +645,8 @@ class DeepspeedTrainer(DNASeqModelTrainer):
                 self.logger.info("Start Fine-tuning")
 
     def get_deepspeed(self):
+        import deepspeed
+
 
         self.logger.info("Loading model...")
 
@@ -749,7 +766,8 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         dataloader = self.data_func["train"]["data_loader"]
 
-        for i, (seq_embedding, label) in enumerate(dataloader):
+        for i, (seq_embedding, label, ind) in enumerate(dataloader):
+
             # seq_embedding shape [batch, L, 4]
             # label shape [batch, num_central_bin (896), num_trail (93)]
             seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
@@ -770,6 +788,11 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             self.model_engine.backward(loss)
 
             # log training status
+            ## output the sample index
+            self.logger.debug(
+                f"batch id for step {self.current_step} is {','.join([str(int(i)) for i in ind])}",
+                diagnose=self.logging_config.diagnose,
+            )
             ## in the training loop, we only look at the local loss
             self.current_step = self.model_engine.global_steps
             self.current_lr = self.optimizer.param_groups[0]["lr"]
@@ -778,7 +801,13 @@ class DeepspeedTrainer(DNASeqModelTrainer):
                 report_loss = batch_loss / batch_count
 
                 if self.logging_config.use_tensorboard:
-                    self.logger.metric("Train/loss", report_loss, step=self.current_step, log_also=False)
+                    self.logger.metric(
+                        f"Train/rank[{self.rank}]_loss",
+                        report_loss,
+                        step=self.current_step,
+                        log_also=False,
+                        diagnose=self.logging_config.diagnose,
+                    )
                     self.logger.metric("Train/lr", self.current_lr, step=self.current_step, log_also=False)
 
                     # we can only log these info in tensorboard
@@ -826,6 +855,10 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
             self.model_engine.step()
 
+            if self.logging_config.diagnose:
+                if self.current_step % self.logging_config.get("diagnose_save_step", 1) == 0:
+                    self.save_checkpoint(f"diag_step_{self.current_step}")
+
         self.current_epoch += 1
 
     def infer_step(self, log_loss=False, save_pred=False, log_prefix="Valid"):
@@ -845,7 +878,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
         dataloader = self.data_func[log_prefix.lower()]["data_loader"]
 
         with torch.no_grad():
-            for i, (seq_embedding, label) in enumerate(dataloader):
+            for i, (seq_embedding, label, ind) in enumerate(dataloader):
                 # seq_embedding shape [batch, L, 4]
                 # label shape [batch, num_central_bin (896), num_trail (93)]
                 seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
