@@ -46,6 +46,12 @@ def validate_launch_method(ctx, param, value):
     help="The multinode lauch method",
 )
 @click.option("--load_checkpoint", help="Whether to load the chk and continue training")
+@click.option(
+    "--override_config",
+    "-x",
+    multiple=True,
+    help="Hydra override string(s), e.g. 'model=no_flashatten' (change whole config profile), or '-x training=single_gpu -x training.gpu_id=3' (change profile, then change specific parameter)",
+)
 @click.option("--nproc-per-node", default=4, help="GPU available per machine")
 @click.option("--master-port", default=1234, help="The master node port")
 def launch_distributed(
@@ -54,6 +60,7 @@ def launch_distributed(
     machines: List[str],
     launch_method: str,
     load_checkpoint: str,
+    override_config: list,
     nproc_per_node: int,
     master_port: int,
 ):
@@ -114,6 +121,10 @@ def launch_distributed(
                 "-x",
                 f"logging.overwrite_log_file=False",
             ]
+        
+        if override_config:
+            for change in override_config:
+                cmd = cmd + ["-x"] + [change]
 
         full_cmd = f"""
         cd {WORK_PATH}

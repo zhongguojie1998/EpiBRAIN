@@ -130,11 +130,12 @@ class TrainingLogger(BaseLogger):
         rank=0,
         world_size=1,
         use_tensorboard=False,
+        diagnose=False,
     ):
         super().__init__(name, level, log_dir, redirect, overwrite, rank, world_size)
 
         if use_tensorboard:
-            self.add_tb()
+            self.add_tb(diagnose)
         else:
             os.makedirs(f"{self.log_dir}/metrics", exist_ok=True)
 
@@ -142,7 +143,8 @@ class TrainingLogger(BaseLogger):
         self.rank = rank
 
     # add tensorboard writer
-    def add_tb(self):
+    @check_rank
+    def add_tb(self, diagnose=False):
         os.makedirs(f"{self.log_dir}/tb", exist_ok=True)
         self.writer = SummaryWriter(log_dir=f"{self.log_dir}/tb")
 

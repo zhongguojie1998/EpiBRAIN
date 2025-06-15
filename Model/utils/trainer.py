@@ -222,7 +222,7 @@ class DNASeqModelTrainer:
                 dataset=dataset,
                 num_replicas=self.world_size,
                 rank=sampler_rank,
-                shuffle=False if split != "train" else True,
+                shuffle=split == "train",
             )
             self.data_func[split]["data_sampler"] = sampler
 
@@ -232,6 +232,7 @@ class DNASeqModelTrainer:
                     dataset=dataset,
                     sampler=sampler,
                     shuffle=False,  # set shuffle in sampler, dataloader should be set as False
+                    drop_last=split == "train",
                     **self.training_config.dataloader_params,
                 )
                 if dataset is not None
@@ -447,11 +448,6 @@ class DNASeqModelTrainer:
                 self.current_step += 1
 
             # log training status
-            ## output the sample index
-            self.logger.debug(
-                f"batch id for step {self.current_step} is {','.join([str(int(i)) for i in ind])}",
-                diagnose=self.logging_config.diagnose,
-            )
             ## in the training loop, we only look at the local loss
             if self.current_step % self.logging_config.report_every == 0:
                 # report_loss = batch_loss / (i + 1)
@@ -513,8 +509,13 @@ class DNASeqModelTrainer:
             # here we reset the gradient in the final stage as we may need to log the gradient value
             if should_update:
                 self.optimizer.zero_grad()
-            
+
             if self.logging_config.diagnose:
+                ## output the sample index
+                self.logger.debug(
+                    f"batch id for step {self.current_step} is {','.join([str(int(i)) for i in ind])}",
+                    diagnose=self.logging_config.diagnose,
+                )
                 if self.current_step % self.logging_config.get("diagnose_save_step", 1) == 0:
                     self.save_checkpoint(f"diag_step_{self.current_step}")
 
@@ -646,7 +647,6 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
     def get_deepspeed(self):
         import deepspeed
-
 
         self.logger.info("Loading model...")
 
@@ -788,11 +788,6 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             self.model_engine.backward(loss)
 
             # log training status
-            ## output the sample index
-            self.logger.debug(
-                f"batch id for step {self.current_step} is {','.join([str(int(i)) for i in ind])}",
-                diagnose=self.logging_config.diagnose,
-            )
             ## in the training loop, we only look at the local loss
             self.current_step = self.model_engine.global_steps
             self.current_lr = self.optimizer.param_groups[0]["lr"]
@@ -856,6 +851,11 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             self.model_engine.step()
 
             if self.logging_config.diagnose:
+                ## output the sample index
+                self.logger.debug(
+                    f"batch id for step {self.current_step} is {','.join([str(int(i)) for i in ind])}",
+                    diagnose=self.logging_config.diagnose,
+                )
                 if self.current_step % self.logging_config.get("diagnose_save_step", 1) == 0:
                     self.save_checkpoint(f"diag_step_{self.current_step}")
 
@@ -933,6 +933,7 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
         rank=rank,
         world_size=world_size,
         use_tensorboard=myconfig.logging.use_tensorboard,
+        diagnose=myconfig.logging.diagnose,
     )
 
     try:
