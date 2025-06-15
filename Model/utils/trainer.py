@@ -447,67 +447,66 @@ class DNASeqModelTrainer:
                     self.scheduler.step()
                 self.current_step += 1
 
-            # log training status
-            ## in the training loop, we only look at the local loss
-            if self.current_step % self.logging_config.report_every == 0:
-                # report_loss = batch_loss / (i + 1)
-                report_loss = batch_loss / batch_count
+                # log training status
+                ## in the training loop, we only look at the local loss
+                if self.current_step % self.logging_config.report_every == 0:
+                    # report_loss = batch_loss / (i + 1)
+                    report_loss = batch_loss / batch_count
 
-                if self.logging_config.use_tensorboard:
-                    self.logger.metric(
-                        f"Train/rank[{self.rank}]_loss",
-                        report_loss,
-                        step=self.current_step,
-                        log_also=False,
-                        diagnose=self.logging_config.diagnose,
-                    )
-                    self.logger.metric("Train/lr", self.current_lr, step=self.current_step, log_also=False)
+                    if self.logging_config.use_tensorboard:
+                        self.logger.metric(
+                            f"Train/rank[{self.rank}]_loss",
+                            report_loss,
+                            step=self.current_step,
+                            log_also=False,
+                            diagnose=self.logging_config.diagnose,
+                        )
+                        self.logger.metric("Train/lr", self.current_lr, step=self.current_step, log_also=False)
 
-                    # we can only log these info in tensorboard
-                    if self.logging_config.log_more:
-                        for tag, value in self.model.named_parameters():
-                            tag = tag.replace(".", "/")
+                        # we can only log these info in tensorboard
+                        if self.logging_config.log_more:
+                            for tag, value in self.model.named_parameters():
+                                tag = tag.replace(".", "/")
 
-                            # add weight histogram
-                            weight = value.data.detach().cpu().numpy()
-                            if not np.isnan(weight).any():
-                                self.logger.metric(
-                                    "weights/" + tag,
-                                    weight,
-                                    self.current_step,
-                                    log_also=False,
-                                    write_hist=True,
-                                )
-                            else:
-                                self.logger.warning(
-                                    f"failed to add weight histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
-                                )
-
-                            # only add gradients if they are not None
-                            if value.grad is not None:
-                                grad = value.grad.data.detach().cpu().numpy()
-                                if not np.isnan(grad).any():
+                                # add weight histogram
+                                weight = value.data.detach().cpu().numpy()
+                                if not np.isnan(weight).any():
                                     self.logger.metric(
-                                        "grads/" + tag,
-                                        grad,
+                                        "weights/" + tag,
+                                        weight,
                                         self.current_step,
                                         log_also=False,
                                         write_hist=True,
                                     )
                                 else:
                                     self.logger.warning(
-                                        f"failed to add grad histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
+                                        f"failed to add weight histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
                                     )
-                else:
-                    self.logger.info(
-                        f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
-                    )
 
-                batch_loss = 0
-                batch_count = 0
+                                # only add gradients if they are not None
+                                if value.grad is not None:
+                                    grad = value.grad.data.detach().cpu().numpy()
+                                    if not np.isnan(grad).any():
+                                        self.logger.metric(
+                                            "grads/" + tag,
+                                            grad,
+                                            self.current_step,
+                                            log_also=False,
+                                            write_hist=True,
+                                        )
+                                    else:
+                                        self.logger.warning(
+                                            f"failed to add grad histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
+                                        )
+                    else:
+                        self.logger.info(
+                            f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
+                        )
 
-            # here we reset the gradient in the final stage as we may need to log the gradient value
-            if should_update:
+                    batch_loss = 0
+                    batch_count = 0
+
+                # here we reset the gradient in the final stage as we may need to log the gradient value
                 self.optimizer.zero_grad()
 
             if self.logging_config.diagnose:
