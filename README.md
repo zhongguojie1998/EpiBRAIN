@@ -77,6 +77,12 @@ The data generation will not re-process if the data have already been generated.
 python Model/train.py -x "logging=debug" -x "logging.exp_name=data_generation" -x "data.preprocess.force_restart=True" --only_data
 ```
 
+## Only testing
+
+```bash
+python Model/train.py -c default -x "logging=debug" -x "logging.exp_name=test" -x "training.test_only=True" -x "training.load_checkpoint=path_to_your_chk"
+```
+
 ## Quick start
 
 - For training from scratch

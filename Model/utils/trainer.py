@@ -306,11 +306,14 @@ class DNASeqModelTrainer:
 
             # If applicable, add gradient compression hook
             if self.training_config.use_grad_compression:
-                state = PowerSGD.PowerSGDState(
+                self.hook_state = PowerSGD.PowerSGDState(
                     process_group=None,  # we do compression on all ranks
                     **self.training_config.get("powerSGD_params", {}),
                 )
-                self.model.register_comm_hook(state, PowerSGD.powerSGD_hook)
+                if self.checkpoint.get("hook_state", {}):
+                    self.hook_state.__setstate__(self.checkpoint["hook_state"])
+
+                self.model.register_comm_hook(self.hook_state, PowerSGD.powerSGD_hook)
 
         self.logger.info(f"Model {self.model_config.model_name} loaded successfully.")
 
@@ -382,6 +385,10 @@ class DNASeqModelTrainer:
                 "scheduler_state_dict": self.scheduler.state_dict(),
                 "best_valid_loss": self.best_valid_loss,
             }
+            if self.training_config.use_grad_compression:
+                # assume `state` is in scope or saved as self.powerSGD_state
+                checkpoint["hook_state"] = self.hook_state.__getstate__()
+
             torch.save(checkpoint, f"{self.logging_config.checkpoint_dir}/chk_epoch_{save_name}.pt")
         self.logger.info("Checkpoint saved successfully.")
         blocking_sync_wait(self.world_size)
@@ -790,7 +797,9 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             ## in the training loop, we only look at the local loss
             self.current_step = self.model_engine.global_steps
             self.current_lr = self.optimizer.param_groups[0]["lr"]
-            if self.current_step % self.logging_config.report_every == 0:
+            should_update = ((i + 1) % self.training_config.accum_step == 0) or (i + 1 == len(dataloader))
+
+            if self.current_step % self.logging_config.report_every == 0 and should_update:
                 # report_loss = batch_loss / (i + 1)
                 report_loss = batch_loss / batch_count
 
