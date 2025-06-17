@@ -435,7 +435,7 @@ class DNASeqModelTrainer:
             batch_count += 1
 
             # metrics
-            # tm_metrics.update(pred.reshape(-1, self.trial_num), label.reshape(-1, self.trial_num))
+            # tm_metrics.update(pred.reshape(-1, self.trial_num).double(), label.reshape(-1, self.trial_num).double())
 
             # whether to do the loss aggregation
             should_update = ((i + 1) % self.training_config.accum_step == 0) or (i + 1 == len(dataloader))
@@ -567,7 +567,9 @@ class DNASeqModelTrainer:
                     preds.append(pred.detach().cpu())
                     labels.append(label.detach().cpu())
                 # metrics
-                tm_metrics.update(pred.reshape(-1, self.trial_num), label.reshape(-1, self.trial_num))
+                tm_metrics.update(
+                    pred.reshape(-1, self.trial_num).double(), label.reshape(-1, self.trial_num).double()
+                )
 
         # get and write the metric logs
         self.metrics.update(tm_metrics.compute())
@@ -908,7 +910,9 @@ class DeepspeedTrainer(DNASeqModelTrainer):
                     preds.append(pred.detach().cpu())
                     labels.append(label.detach().cpu())
                 # metrics
-                tm_metrics.update(pred.reshape(-1, self.trial_num), label.reshape(-1, self.trial_num))
+                tm_metrics.update(
+                    pred.reshape(-1, self.trial_num).double(), label.reshape(-1, self.trial_num).double()
+                )
 
         # get and write the metric logs
         self.metrics.update(tm_metrics.compute())
