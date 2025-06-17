@@ -1,5 +1,5 @@
-import os
 import json
+import os
 from typing import Literal
 
 from hydra import compose, initialize_config_dir
@@ -63,6 +63,19 @@ def load_config(config_dir: str, config_name="default", overrides: tuple[str, ..
             "When testing, you must load a checkpoint by specifying in `training.load_checkpoint`",
             check="exclude",
         )
+        input_check(
+            "test",
+            config.data.get("used_dataset", []),
+            "When testing, you must use test dataset",
+            check="within",
+        )
+    else:
+        input_check(
+            "train",
+            config.data.get("used_dataset", []),
+            "When training, you must use train dataset",
+            check="within",
+        )
     if config.training.finetune:
         input_check(
             config.model.get("finetune_method", None),
@@ -73,12 +86,19 @@ def load_config(config_dir: str, config_name="default", overrides: tuple[str, ..
 
     return config
 
+
 def write_deepspeed_config(config, save_file):
     training_config = config.training
     deepspeed_setup = {}
 
-    deepspeed_setup["optimizer"] = {"type": training_config.optimizer, "params": dict(training_config.optimizer_params)}
-    deepspeed_setup["scheduler"] = {"type": training_config.scheduler, "params": dict(training_config.scheduler_params)}
+    deepspeed_setup["optimizer"] = {
+        "type": training_config.optimizer,
+        "params": dict(training_config.optimizer_params),
+    }
+    deepspeed_setup["scheduler"] = {
+        "type": training_config.scheduler,
+        "params": dict(training_config.scheduler_params),
+    }
     deepspeed_setup["train_micro_batch_size_per_gpu"] = training_config.batch_size
     deepspeed_setup["gradient_accumulation_steps"] = training_config.accum_step
 

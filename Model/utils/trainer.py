@@ -132,8 +132,8 @@ class DNASeqModelTrainer:
         self.trial_num = self.model_config.output_heads[self.model_config.use_head]
 
         # set up data
-        self.data_split = ["train", "valid", "test"]
-        self.data_func = {k: {"dataset": None, "data_sampler": None, "data_loader": None} for k in self.data_split}
+        self.data_split = self.config.data.used_dataset
+        self.data_func = {k: {"dataset": None, "data_sampler": None, "data_loader": None} for k in ["train", "valid", "test"]}
         ## get the dataset
         self.get_dataset()
         ## get the dataloader
@@ -998,18 +998,17 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                     if trainer.scheduler_update_freq == "epoch":
                         trainer.scheduler.step(valid_loss)
 
+                # testing the model and get the metrics during the run time
+                if trainer.data_func["test"]["data_loader"] is not None:
+                    with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
+                        trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=False)
+
+                    blocking_sync_wait(world_size)
+
                 # write the model
                 if trainer.current_epoch % myconfig.logging.save_every == 0:
                     with timer(f"Regular saving checkpoint", logger, rank, world_size):
                         trainer.save_checkpoint()
-                    # save_test_res = True
-
-                # # testing the model
-                # if trainer.data_func["test"]["data_loader"] is not None:
-                #     with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                #         trainer.infer_step(log_loss=True, log_prefix="Test", save_pred=save_test_res)
-
-                #     blocking_sync_wait(world_size)
 
                 # write the metrics
                 ## if we use tensorboard, the metrics will be written into tb (initialized when creating the training logger)
@@ -1043,15 +1042,28 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                     trainer.infer_step(log_loss=False, log_prefix="Valid", save_pred=True)
                 blocking_sync_wait(world_size)
 
-            with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=True)
-            blocking_sync_wait(world_size)
+            if trainer.data_func["test"]["data_loader"] is not None:
+                with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
+                    trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=True)
+                blocking_sync_wait(world_size)
 
-            # save the raw preds
+            # save the raw preds and write the metrics
             if trainer.should_log:
                 aggregate_test_res(trainer, "Train")
                 aggregate_test_res(trainer, "Valid")
                 aggregate_test_res(trainer, "Test")
+
+                metric_dict = construct_logging_metric_dict(trainer)
+                if myconfig.logging.use_tensorboard:
+                    for k, v in metric_dict.items():
+                        trainer.logger.metric(k, v, step=trainer.current_step, log_also=False)
+                else:
+                    for k, v in metric_dict.items():
+                        trainer.logger.metric(k, v, step=trainer.current_step)
+                    with open(
+                        f"{myconfig.logging.log_dir}/metrics/epoch_{trainer.current_epoch}.json", "w"
+                    ) as f:
+                        json.dump(metric_dict, f, indent=4)
 
         blocking_sync_wait(world_size)
 

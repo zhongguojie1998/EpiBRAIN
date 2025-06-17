@@ -19,6 +19,7 @@ class GenomeIntervalDataset(Dataset):
         shift_augs=None,
         rc_aug=False,
         return_augs=True,
+        **kwargs
     ):
         super().__init__()
 
