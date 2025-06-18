@@ -12,6 +12,6 @@ use_tensorboard: True  # whether to use tensorboard to log the training process,
 ## training logging setup
 checkpoint_dir: ./Chk/${logging.exp_name}  # directory to save the checkpoints
 res_dir: ./Res/${logging.exp_name}
-save_every: 5 # save checkpoint for every x epochs
-report_every: 10  # report basic training log (loss, model parameter (optional), etc.) for every x optimization steps (i.e. x effective batches)
+save_every: 1 # save checkpoint for every x epochs
+report_every: 1  # report basic training log (loss, model parameter (optional), etc.) for every x optimization steps (i.e. x effective batches)
 log_more: False # log more metrics during training, including model gradient and model parameter histogram. Only effective when using tensorboard
