@@ -1,3 +1,25 @@
+- [Installation](#installation)
+  - [Optional packages](#optional-packages)
+- [Data Pipeline](#data-pipeline)
+- [Usage](#usage)
+  - [Only to generate labels](#only-to-generate-labels)
+  - [Only testing](#only-testing)
+  - [Quick start](#quick-start)
+  - [Multi-GPU training](#multi-gpu-training)
+  - [For developer](#for-developer)
+- [Analysis](#analysis)
+- [Developer notes](#developer-notes)
+  - [Exp Notes](#exp-notes)
+    - [Data](#data)
+    - [Training](#training)
+      - [Current Hyperparameter Setting](#current-hyperparameter-setting)
+      - [Milestones](#milestones)
+  - [Data Preprocessing](#data-preprocessing)
+  - [Data Pipeline](#data-pipeline-1)
+  - [Model Setting](#model-setting)
+  - [Q \& A](#q--a)
+
+
 # Installation
 
 ```bash
@@ -125,7 +147,43 @@ Always use logging=debug for more information about the training
 python Model/train.py -c finetune -x "logging=debug" -x "logging.exp_name=250605_finetune"
 ```
 
+# Analysis
+
+- [Plot data distribution](./Analysis/00_visualize_data.py)
+- [Analyze model performance based on pearson correlation](./Analysis/01_test_correlation.py)
+- [Important motif identification](./Analysis/02_motif_interpretation.py)
+
+
 # Developer notes
+
+## Exp Notes
+
+### Data
+
+1. Data v1: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
+2. Data v2: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, offset `out_peak_non_zero_median`, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
+
+### Training
+
+Details see the config generated in the corresponding folder
+
+#### Current Hyperparameter Setting
+
+- batch size: 196 (12 (btz) * 8 (gpu) * 2 (accum step))
+  - per epoch, 202 step (btz 96), 101 step (btz 196)
+- lr: 1e-4 (both for scratch / finetune)
+
+#### Milestones
+
+1. `250606_finetune_new_data`
+   - Data: v1
+   - Model: Finetune (Lora)
+   - Training (no trick)
+2. `250614_scratch_gc`
+   - Data: v1
+   - Model: Full
+   - Training (with gradient compression)
+
 
 ## Data Preprocessing
 
@@ -163,32 +221,3 @@ Final data point: a 196,608 length DNA window, further truncated into 128 (bin w
 
 1. model, set_track_subset? Annotated version?
    - used to add prompt to the enformer, leave it now
-
-
-## Exp Notes
-
-### Data
-
-1. Data v1: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
-2. Data v2: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, offset `out_peak_non_zero_median`, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
-
-### Training
-
-Details see the config generated in the corresponding folder
-
-#### Current Hyperparameter Setting
-
-- batch size: 196 (12 (btz) * 8 (gpu) * 2 (accum step))
-  - per epoch, 202 step (btz 96), 101 step (btz 196)
-- lr: 1e-4 (both for scratch / finetune)
-
-#### Milestones
-
-1. `250606_finetune_new_data`
-   - Data: v1
-   - Model: Finetune (Lora)
-   - Training (no trick)
-2. `250614_scratch_gc`
-   - Data: v1
-   - Model: Full
-   - Training (with gradient compression)
