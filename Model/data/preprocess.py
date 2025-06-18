@@ -51,9 +51,7 @@ PARA_CHECK = [
 ]
 
 
-def get_trail_value_mp(
-    trial, storage_path, mseqs, blacklist_bed, window_size, n_window, restart=False
-):
+def get_trail_value_mp(trial, storage_path, mseqs, blacklist_bed, window_size, n_window, restart=False):
 
     exp = trial["exp"]
     genome_cov_file = trial["file"]
@@ -63,11 +61,12 @@ def get_trail_value_mp(
     sum_stat = trial.get("sum_stat", "sum")
     baseline_pct = trial.get("baseline_pct", 0.25)
     scale = trial.get("scale", 1)
+    extreme_clip_pct = trial.get("extreme_clip_pct", None)
+    offset = trial.get("offset", None)
     anchor_target = trial.get("anchor_target", None)
     anchor_pct = trial.get("anchor_pct", 0.999)
     clip = trial.get("clip", None)
     clipsoft = trial.get("clip_soft", None)
-    extreme_clip_pct = trial.get("extreme_clip_pct", None)
 
     if os.path.exists(seqs_cov_file) and not restart:
         logger.info("Skipping existing %s" % seqs_cov_file)
@@ -85,11 +84,12 @@ def get_trail_value_mp(
             sum_stat=sum_stat,
             baseline_pct=baseline_pct,
             scale=scale,
+            extreme_clip_pct=extreme_clip_pct,
+            offset=offset,
             anchor_target=anchor_target,
             anchor_pct=anchor_pct,
             clip=clip,
             clip_soft=clipsoft,
-            extreme_clip_pct=extreme_clip_pct,
         )
     except Exception as e:
         logger.error(f"Fail to process {exp}. Manually check.")

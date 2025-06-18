@@ -47,11 +47,12 @@ The configuration can have the following fields:
 - `sum_stat` (optional, default: sum): in each bin, how to aggregate the raw reads into a summary
 - `baseline_pct` (optional, default: 0.25): set the nan/blacklist region value to this quantile of all values 
 - `scale` (optional, default: 1): scale the raw reads
+- `extreme_clip_pct`(optional, default: None): final hard clip all values above this quantile to the corresponding value. If not provided, skip.
+- `offset` (optional, default: None): shift the value by a given value (org_read - offset), which can be used to reduce some noise. If not provided, skip.
 - `anchor_target` (optional, default: None): after aggregating the data, anchor the given quantile of the value to this target. If not provided, skip.
 - `anchor_pct` (optional, default: 0.999): the given quantile for anchoring
 - `clip_soft` (optional, default: None): soft clip the aggregated value ($t_c - 1 + \sqrt{x - t_c + 1}$ for all $x > t_c$) to the given threshold. If not provided, skip.
 - `clip` (optional, default: None): hard clip the aggregated value to the given threshold. If not provided, skip.
-- `extreme_clip_pct`(optional, default: None): final hard clip all values above this quantile to the corresponding value. If not provided, skip.
 
 The data preprocess pipeline would be: 
 
@@ -59,9 +60,10 @@ The data preprocess pipeline would be:
 2. scale the data based on `scale`
 3. aggregate the data for given pool width into bins with the given `sum_stat`
 4. hard clip extreme value above `extreme_clip_pct` to the corresponding value (if applicable)
-5. anchor the value at the `anchor_pct` to `anchor_target` (if applicable)
-6. soft clip based on threshold `clip_soft` (if applicable)
-7. hard clip based on threshold `clip` (if applicable)
+5. Subtract the original value by `offset` (if applicable)
+6. anchor the value at the `anchor_pct` to `anchor_target` (if applicable)
+7. soft clip based on threshold `clip_soft` (if applicable)
+8. hard clip based on threshold `clip` (if applicable)
 
 # Usage
 
@@ -161,3 +163,32 @@ Final data point: a 196,608 length DNA window, further truncated into 128 (bin w
 
 1. model, set_track_subset? Annotated version?
    - used to add prompt to the enformer, leave it now
+
+
+## Exp Notes
+
+### Data
+
+1. Data v1: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
+2. Data v2: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, offset `out_peak_non_zero_median`, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
+
+### Training
+
+Details see the config generated in the corresponding folder
+
+#### Current Hyperparameter Setting
+
+- batch size: 196 (12 (btz) * 8 (gpu) * 2 (accum step))
+  - per epoch, 202 step (btz 96), 101 step (btz 196)
+- lr: 1e-4 (both for scratch / finetune)
+
+#### Milestones
+
+1. `250606_finetune_new_data`
+   - Data: v1
+   - Model: Finetune (Lora)
+   - Training (no trick)
+2. `250614_scratch_gc`
+   - Data: v1
+   - Model: Full
+   - Training (with gradient compression)

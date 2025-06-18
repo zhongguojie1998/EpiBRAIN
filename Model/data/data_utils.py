@@ -490,17 +490,18 @@ def get_labels(
     sum_stat="sum",
     baseline_pct=0.25,
     scale=1,
+    extreme_clip_pct=None,
+    offset=None, 
     anchor_target=None,
     anchor_pct=0.999,
     clip=None,
     clip_soft=None,
-    extreme_clip_pct=None,
 ):
     """Get coverage labels for model sequences."""
 
     logger.debug(
         f"""Setting for {seqs_cov_file.split('/')[-1].split('.')[0]}:
-        sum_stat {sum_stat}, baseline_pct {baseline_pct}, scale {scale}, extreme_clip_pct {extreme_clip_pct}, anchor_target {anchor_target}, anchor_pct {anchor_pct}, clip_threshold {clip}, softclip_threshold {clip_soft}"""
+        sum_stat {sum_stat}, baseline_pct {baseline_pct}, scale {scale}, extreme_clip_pct {extreme_clip_pct}, offset {offset}, anchor_target {anchor_target}, anchor_pct {anchor_pct}, clip_threshold {clip}, softclip_threshold {clip_soft}"""
     )
 
     # read blacklist regions
@@ -591,6 +592,10 @@ def get_labels(
     if extreme_clip_pct is not None:
         extreme_clip = np.quantile(targets, extreme_clip_pct, method="lower")
         targets = np.clip(targets, -extreme_clip, extreme_clip)
+
+    # substract the offset
+    if offset is not None:
+        targets = np.maximum(targets - offset, 0)
 
     # scale the quantile value to an anchor value
     if anchor_target is not None:
