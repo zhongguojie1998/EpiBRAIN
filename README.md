@@ -162,6 +162,7 @@ python Model/train.py -c finetune -x "logging=debug" -x "logging.exp_name=250605
 
 1. Data v1: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
 2. Data v2: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, offset `out_peak_non_zero_median`, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
+3. Data v3: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, offset `out_peak_mean`, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
 
 ### Training
 

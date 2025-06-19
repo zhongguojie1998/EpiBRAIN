@@ -23,6 +23,8 @@
 
 import torch.nn as nn
 
+
+
 class Residual(nn.Module):
     def __init__(self, fn):
         super().__init__()
@@ -30,6 +32,7 @@ class Residual(nn.Module):
 
     def forward(self, x, **kwargs):
         return self.fn(x, **kwargs) + x
+
 
 class TargetLengthCrop(nn.Module):
     def __init__(self, target_length):
@@ -43,7 +46,7 @@ class TargetLengthCrop(nn.Module):
             return x
 
         if seq_len < target_len:
-            raise ValueError(f'sequence length {seq_len} is less than target length {target_len}')
+            raise ValueError(f"sequence length {seq_len} is less than target length {target_len}")
 
         trim = (target_len - seq_len) // 2
 
@@ -53,7 +56,7 @@ class TargetLengthCrop(nn.Module):
         return x[:, -trim:trim]
 
 
-def undo_squashed_scale(x, clip_soft=384, track_transform=3 / 4, track_scale = 0.01, old_transform = True):
+def undo_squashed_scale(x, clip_soft=384, track_transform=3 / 4, track_scale=0.01, old_transform=True):
     """
     Reverses the squashed scaling transformation applied to the output profiles.
 
@@ -67,27 +70,15 @@ def undo_squashed_scale(x, clip_soft=384, track_transform=3 / 4, track_scale = 0
         torch.Tensor: The unsquashed tensor.
     """
     x = x.clone()  # IMPORTANT BECAUSE OF IMPLACE OPERATIONS TO FOLLOW?
-    
+
     if old_transform:
         x = x / track_scale
         unclip_mask = x > clip_soft
         x[unclip_mask] = (x[unclip_mask] - clip_soft) ** 2 + clip_soft
-        x = x ** (1./track_transform)
+        x = x ** (1.0 / track_transform)
     else:
         unclip_mask = x > clip_soft
-        x[unclip_mask] = (x[unclip_mask] - clip_soft+1) ** 2 + clip_soft -1
+        x[unclip_mask] = (x[unclip_mask] - clip_soft + 1) ** 2 + clip_soft - 1
         x = (x + 1) ** (1.0 / track_transform) - 1
         x = x / track_scale
     return x
-
-
-def safe_state_dict_loader(org_model_state_dict, load_model_state_dict, logger):
-    filtered_dict = {}
-
-    for k, v in load_model_state_dict.items():
-        if k in org_model_state_dict and v.size() == org_model_state_dict[k].size():
-            filtered_dict[k] = v
-        else:
-            logger.warning(f"Parameter not loaded: {k}. This is expected if you have modified the model but not expected if you want to get the exact same model.")
-
-    return filtered_dict

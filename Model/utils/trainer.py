@@ -9,7 +9,6 @@ import torch
 import torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook as PowerSGD
 import torch.optim as optim
 import torchmetrics as tm
-from peft import LoraConfig, get_peft_model
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -19,8 +18,7 @@ torch.backends.cudnn.deterministic = True
 
 
 from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSampler
-from model.pytorch_borzoi_model import Borzoi
-from model.pytorch_borzoi_utils import safe_state_dict_loader
+from model.model_utils import setup_model
 from utils.logging import LOGGER_PREFIX, TrainingLogger, timer
 from utils.loss import LOSS_DICT
 from utils.multi_gpu import blocking_sync_wait, cleanup, deepspeed_setup, global_aggregate, setup, torchrun_setup
@@ -82,24 +80,6 @@ def construct_logging_metric_dict(trainer):
     return metric_dict
 
 
-def count_grad_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-def count_all_parameters(model):
-    return sum(p.numel() for p in model.parameters())
-
-
-def set_param_grad(model, trainable_params=[]):
-
-    for name, param in model.named_parameters():
-        param.requires_grad = False
-        if name in trainable_params:
-            param.requires_grad = True
-
-    return model
-
-
 class DNASeqModelTrainer:
 
     def __init__(self, config, rank, world_size, logger, local_rank=None):
@@ -133,7 +113,9 @@ class DNASeqModelTrainer:
 
         # set up data
         self.data_split = self.config.data.used_dataset
-        self.data_func = {k: {"dataset": None, "data_sampler": None, "data_loader": None} for k in ["train", "valid", "test"]}
+        self.data_func = {
+            k: {"dataset": None, "data_sampler": None, "data_loader": None} for k in ["train", "valid", "test"]
+        }
         ## get the dataset
         self.get_dataset()
         ## get the dataloader
@@ -243,58 +225,12 @@ class DNASeqModelTrainer:
 
         self.logger.info("Loading model...")
 
-        # get our baseline model
-        if "borzoi" in self.model_config.model_name:
-            model_cls = Borzoi
-        else:
-            self.logger.error(f"Model {self.model_config.model_name} is not implemented yet.")
-            exit(1)
-
-        self.model = model_cls.from_hparams(**self.model_config)
-
-        # if finetune, load the pretrained model
-        if self.training_config.finetune:
-            # load the pretrained state dict
-            pretrained_model = model_cls.from_pretrained(self.model_config.model_name)
-            org_model_state_dict = self.model.state_dict()
-            updated_model_state_dict = safe_state_dict_loader(
-                org_model_state_dict=org_model_state_dict,
-                load_model_state_dict=pretrained_model.state_dict(),
-                logger=self.logger,
-            )
-            org_model_state_dict.update(updated_model_state_dict)
-            self.model.load_state_dict(org_model_state_dict)
-
-            # initialize the finetune model
-            if self.model_config.finetune_method == "lora":
-                self.logger.info("LORA Finetune")
-                finetune_config = LoraConfig(**self.model_config.finetune_param)
-                self.model = get_peft_model(self.model, finetune_config)
-            elif self.model_config.finetune_method == "finetune_layers":
-                self.logger.info("Finetune the given layers")
-                self.model = set_param_grad(self.model, **self.model_config.finetune_param)
-            else:
-                self.logger.error(f"Finetune method {self.model_config.finetune_method} is not implemented yet.")
-                exit(1)
-
-        # get all the trainable parameters
-        self.trainable_params = [n for n, m in self.model.named_parameters() if m.requires_grad]
-        for n in self.trainable_params:
-            self.logger.debug(f"Trainable module name: {n}")
+        self.model = setup_model(self.config, self.logger)
 
         # if necessary, load the checkpoint
+        ## load the full model before we wrap the model into DDP
         if self.training_config.load_checkpoint is not None:
             self.model.load_state_dict(self.checkpoint["model_state_dict"])
-        else:
-            self.initialize(self.trainable_params)
-
-        # set the gradient again (in case we load from the checkpoint)
-        self.model = set_param_grad(self.model, self.trainable_params)
-        trainable_para_num = count_grad_parameters(self.model)
-        total_para_num = count_all_parameters(self.model)
-        self.logger.info(
-            f"Trainable params: {trainable_para_num} || All params: {total_para_num} || Trainable%: {trainable_para_num / total_para_num:.4f}"
-        )
 
         # send the model to training device
         self.model = self.model.to(self.local_rank, non_blocking=True)
@@ -345,11 +281,6 @@ class DNASeqModelTrainer:
         if self.criterion is None:
             self.logger.error(f"Loss {self.training_config.loss} is not implemented yet.")
             exit(1)
-
-    def initialize(self, trainable_params):
-        # TODO: initialize the model parameter if we are going to use special initialization method
-        # only re-initialize trainable parameters
-        pass
 
     def load_checkpoint(self):
 
@@ -633,8 +564,10 @@ class DeepspeedTrainer(DNASeqModelTrainer):
         ## get the model, optimizer and scheduler from deepspeed
         self.get_deepspeed()
         ## if necessary, laod the checkpoint
+        ## for deepspeed, we load the chk after we setup all the model, optim, schedu
         if self.training_config.load_checkpoint is not None:
-            self.load_checkpoint()
+            with timer(f"Loading checkpoint", self.logger, self.rank, self.world_size):
+                self.load_checkpoint()
 
         ## get the loss function
         self.get_loss()
@@ -658,54 +591,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         self.logger.info("Loading model...")
 
-        # get our baseline model
-        if "borzoi" in self.model_config.model_name:
-            model_cls = Borzoi
-        else:
-            self.logger.error(f"Model {self.model_config.model_name} is not implemented yet.")
-            exit(1)
-
-        self.model = model_cls.from_hparams(**self.model_config)
-
-        # if finetune, load the pretrained model
-        if self.training_config.finetune:
-            # load the pretrained state dict
-            pretrained_model = model_cls.from_pretrained(self.model_config.model_name)
-            org_model_state_dict = self.model.state_dict()
-            updated_model_state_dict = safe_state_dict_loader(
-                org_model_state_dict=org_model_state_dict,
-                load_model_state_dict=pretrained_model.state_dict(),
-                logger=self.logger,
-            )
-            org_model_state_dict.update(updated_model_state_dict)
-            self.model.load_state_dict(org_model_state_dict)
-
-            # initialize the finetune model
-            if self.model_config.finetune_method == "lora":
-                self.logger.info("LORA Finetune")
-                finetune_config = LoraConfig(**self.model_config.finetune_param)
-                self.model = get_peft_model(self.model, finetune_config)
-            elif self.model_config.finetune_method == "finetune_layers":
-                self.logger.info("Finetune the given layers")
-                self.model = set_param_grad(self.model, **self.model_config.finetune_param)
-            else:
-                self.logger.error(f"Finetune method {self.model_config.finetune_method} is not implemented yet.")
-                exit(1)
-
-        # get all the trainable parameters
-        # initialize the trainable model parameters if we didn't load from checkpoint
-        self.trainable_params = [n for n, m in self.model.named_parameters() if m.requires_grad]
-
-        if self.training_config.load_checkpoint is None:
-            self.initialize(self.trainable_params)
-
-        for n in self.trainable_params:
-            self.logger.debug(f"Trainable module name: {n}")
-        trainable_para_num = count_grad_parameters(self.model)
-        total_para_num = count_all_parameters(self.model)
-        self.logger.info(
-            f"Trainable params: {trainable_para_num} || All params: {total_para_num} || Trainable%: {trainable_para_num / total_para_num:.4f}"
-        )
+        self.model = setup_model(self.config, self.logger)
 
         # set up deepspeed
         self.model_engine, self.optimizer, _, self.scheduler = deepspeed.initialize(
@@ -1060,9 +946,7 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                 else:
                     for k, v in metric_dict.items():
                         trainer.logger.metric(k, v, step=trainer.current_step)
-                    with open(
-                        f"{myconfig.logging.log_dir}/metrics/epoch_{trainer.current_epoch}.json", "w"
-                    ) as f:
+                    with open(f"{myconfig.logging.log_dir}/metrics/epoch_{trainer.current_epoch}.json", "w") as f:
                         json.dump(metric_dict, f, indent=4)
 
         blocking_sync_wait(world_size)

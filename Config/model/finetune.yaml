@@ -9,7 +9,12 @@ flashed: False  # whether to use FlashAttention, in finetune setting, we should 
 use_autocast: False  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
 
 ## fine tune setting
-finetune_method: lora # choose from `lora`, `finetune_layers`
+
+## Available finetune_method
+### `lora`: low rank approximation, adding some trainable layers to the model and fix the rest (using peft LoraConfig)
+### `finetune_layers`: provide some trainable layers and only train these layers
+### `cont_from_pretrain`: just load the parameters from the pretrained model and continue training 
+finetune_method: lora 
 finetune_param:
     target_modules: # add lora layer
       - to_q
@@ -18,7 +23,15 @@ finetune_param:
       - prediction_head.human
     r: 8  # lora rank
 
-# finetune_method: finetune_layers # choose from `lora`, `finetune_layers`
+# finetune_method: finetune_layers 
 # finetune_param:
 #     trainable_params: 
 #       - prediction_head.human
+
+
+partial_load: null  # only load the given part of the pretrained model. If not provided/null, default load all the pretrained parameters
+# partial_load:
+#   - conv_dna
+#   - res_tower
+#   - unet1
+#   - horizontal_conv
