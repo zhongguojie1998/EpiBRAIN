@@ -195,7 +195,7 @@ class DNASeqModelTrainer:
                     self.logger.warning(f"No {split} dataset found.")
 
         self.logger.info(
-            f"{'/'.join([k for k,v in self.data_func.items() if v["dataset"] is not None])} datasets loaded successfully."
+            f"{'/'.join([k for k,v in self.data_func.items() if v['dataset'] is not None])} datasets loaded successfully."
         )
 
     def get_dataloader(self):

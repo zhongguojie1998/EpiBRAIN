@@ -17,3 +17,6 @@ Res
 
 # other files
 hostfile
+
+# slurm output
+*.out
