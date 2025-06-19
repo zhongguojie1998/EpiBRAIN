@@ -67,7 +67,7 @@ logger = LazyLogger(f"{LOGGER_PREFIX}-Main")
 def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_data):
 
     if torchrun and deepspeed:
-        raise ValueError("Cannot both enbale torchrun and deepspeed")
+        raise ValueError("Cannot both enable torchrun and deepspeed")
 
     # read in config file and setup logging
     myconfig = load_config(config_dir, config_setting, override_config)
