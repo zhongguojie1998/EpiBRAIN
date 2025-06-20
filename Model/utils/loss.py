@@ -1,5 +1,5 @@
 import torch.nn as nn
 
 LOSS_DICT = {
-    "poisson": nn.PoissonNLLLoss(log_input=False, reduction="mean"),
+    "poisson": nn.PoissonNLLLoss(log_input=False, reduction="mean", eps=1e-7),
 }
