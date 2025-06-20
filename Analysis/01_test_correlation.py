@@ -1,4 +1,7 @@
 import os
+import warnings
+
+warnings.filterwarnings("ignore")
 
 import click
 import matplotlib.pyplot as plt
@@ -13,11 +16,12 @@ base_cmap = plt.get_cmap("tab20")
 
 
 @click.command()
-@click.option("--exp_name", "-e", required=True, type=str)
+@click.option("-e", "--exp_name", required=True, type=str)
 @click.option("--chk", required=True, type=str)
+@click.option("-s", "--splits", multiple=True, type=str, default=["Test"])
 @click.option("--res_base", required=True, default="./Res")
 @click.option("--data_base", required=True, default="./Data/enformer_style_split_data_v1")
-def main(exp_name, chk, res_base, data_base):
+def main(exp_name, chk, splits, res_base, data_base):
     DATA_BASE = os.path.abspath(data_base)
     RES_BASE = os.path.abspath(res_base)
 
@@ -27,7 +31,7 @@ def main(exp_name, chk, res_base, data_base):
     # load label meta info
     label_meta = pd.read_csv(f"{DATA_BASE}/label_meta.csv", index_col=0)
 
-    splits = ["Train", "Valid", "Test"]
+    # splits = ["Train", "Valid", "Test"]
 
     # calculate correlation and other metrics
     for split in splits:
