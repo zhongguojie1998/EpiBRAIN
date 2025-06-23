@@ -28,6 +28,7 @@ seed: 42  # random seed for reproduciblility
 optimizer: Adam # optimizer to use, should be supported by deepspeed
 optimizer_params: # optimizer parameters
   lr: ${training.lr}
+  adam_w_mode: False  # use traditional adam instead of adamw
 
 scheduler: WarmupLR # learning rate scheduler to use, should be supported by deepspeed
 scheduler_params: # scheduler parameters

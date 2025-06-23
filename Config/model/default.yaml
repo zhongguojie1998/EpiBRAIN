@@ -23,5 +23,5 @@ bins_to_return: 896  # how many (central) bins used to calculate loss, same as i
 
 ## prediction heads
 output_heads: # set up the prediction head name and trial number
-  human: 93 
+  human: 90 
 use_head: human # the head use for forward pass
