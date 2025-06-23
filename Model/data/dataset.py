@@ -19,7 +19,7 @@ class GenomeIntervalDataset(Dataset):
         shift_augs=None,
         rc_aug=False,
         return_augs=True,
-        **kwargs
+        **kwargs,
     ):
         super().__init__()
 
@@ -72,13 +72,6 @@ class GenomeIntervalDataset(Dataset):
             )
 
         return one_hot, label, ind
-
-
-def safe_collate_fn(batch):
-    one_hots, labels = zip(*batch)
-    one_hots = torch.stack([x.clone() for x in one_hots])
-    labels = torch.stack([x.clone() for x in labels])
-    return one_hots, labels
 
 
 class DumySampler:

@@ -34,16 +34,19 @@ def aggregate_test_res(trainer, prefix="Test"):
     else:
         all_labels = []
         all_preds = []
+        all_inds = []
         for file_path in file_list:
             data = torch.load(file_path, map_location="cpu")
             all_labels.append(data["label"])
             all_preds.append(data["pred"])
+            all_inds.append(data["index"])
 
         all_labels = torch.cat(all_labels, dim=0)
         all_preds = torch.cat(all_preds, dim=0)
+        all_inds = torch.cat(all_inds, dim=0)
 
         torch.save(
-            {"label": all_labels, "pred": all_preds},
+            {"label": all_labels, "pred": all_preds, "index": all_inds},
             f"{trainer.logging_config.res_dir}/{prefix}_preds_epoch_{trainer.current_epoch}.pt",
         )
 
@@ -282,6 +285,76 @@ class DNASeqModelTrainer:
             self.logger.error(f"Loss {self.training_config.loss} is not implemented yet.")
             exit(1)
 
+    @property
+    def inference_model(self):
+        """Property to access the model for inference, allowing subclasses to override."""
+        return self.model
+
+    @property
+    def training_model(self):
+        """Property to access the model for training logging, allowing subclasses to override."""
+        return self.model
+
+    def _log_training_metrics(self, report_loss, should_exit_on_nan=False):
+        """Shared training metrics logging logic with NaN detection and exit capability."""
+        nan_detected = False
+        
+        if self.logging_config.use_tensorboard:
+            self.logger.metric(
+                f"Train/rank[{self.rank}]_loss",
+                report_loss,
+                step=self.current_step,
+                log_also=False,
+                diagnose=self.logging_config.diagnose,
+            )
+            self.logger.metric("Train/lr", self.current_lr, step=self.current_step, log_also=False)
+
+            # we can only log these info in tensorboard
+            if self.logging_config.log_more:
+                for tag, value in self.training_model.named_parameters():
+                    tag = tag.replace(".", "/")
+
+                    # add weight histogram
+                    weight = value.data.detach().cpu().numpy()
+                    if not np.isnan(weight).any():
+                        self.logger.metric(
+                            "weights/" + tag,
+                            weight,
+                            self.current_step,
+                            log_also=False,
+                            write_hist=True,
+                        )
+                    else:
+                        self.logger.warning(
+                            f"failed to add weight histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
+                        )
+                        nan_detected = True
+
+                    # only add gradients if they are not None
+                    if value.grad is not None:
+                        grad = value.grad.data.detach().cpu().numpy()
+                        if not np.isnan(grad).any():
+                            self.logger.metric(
+                                "grads/" + tag,
+                                grad,
+                                self.current_step,
+                                log_also=False,
+                                write_hist=True,
+                            )
+                        else:
+                            self.logger.warning(
+                                f"failed to add grad histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
+                            )
+                            nan_detected = True
+        else:
+            self.logger.info(
+                f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
+            )
+
+        if should_exit_on_nan and nan_detected:
+            self.logger.error("NaN detected in model weight/gradients. Exiting after this step.")
+            exit(1)
+
     def load_checkpoint(self):
 
         self.logger.info(f"Loading checkpoint from {self.training_config.load_checkpoint}")
@@ -390,56 +463,8 @@ class DNASeqModelTrainer:
                 if self.current_step % self.logging_config.report_every == 0:
                     # report_loss = batch_loss / (i + 1)
                     report_loss = batch_loss / batch_count
-
-                    if self.logging_config.use_tensorboard:
-                        self.logger.metric(
-                            f"Train/rank[{self.rank}]_loss",
-                            report_loss,
-                            step=self.current_step,
-                            log_also=False,
-                            diagnose=self.logging_config.diagnose,
-                        )
-                        self.logger.metric("Train/lr", self.current_lr, step=self.current_step, log_also=False)
-
-                        # we can only log these info in tensorboard
-                        if self.logging_config.log_more:
-                            for tag, value in self.model.named_parameters():
-                                tag = tag.replace(".", "/")
-
-                                # add weight histogram
-                                weight = value.data.detach().cpu().numpy()
-                                if not np.isnan(weight).any():
-                                    self.logger.metric(
-                                        "weights/" + tag,
-                                        weight,
-                                        self.current_step,
-                                        log_also=False,
-                                        write_hist=True,
-                                    )
-                                else:
-                                    self.logger.warning(
-                                        f"failed to add weight histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
-                                    )
-
-                                # only add gradients if they are not None
-                                if value.grad is not None:
-                                    grad = value.grad.data.detach().cpu().numpy()
-                                    if not np.isnan(grad).any():
-                                        self.logger.metric(
-                                            "grads/" + tag,
-                                            grad,
-                                            self.current_step,
-                                            log_also=False,
-                                            write_hist=True,
-                                        )
-                                    else:
-                                        self.logger.warning(
-                                            f"failed to add grad histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
-                                        )
-                    else:
-                        self.logger.info(
-                            f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
-                        )
+                    
+                    self._log_training_metrics(report_loss, should_exit_on_nan=True)
 
                     batch_loss = 0
                     batch_count = 0
@@ -462,13 +487,14 @@ class DNASeqModelTrainer:
         # self.metrics.update(tm_metrics.compute())
 
     def infer_step(self, log_loss=False, save_pred=False, log_prefix="Valid"):
-        self.model.eval()
+        self.inference_model.eval()
 
         if log_loss:
             running_loss_local = torch.tensor(0.0, device=self.local_rank)
         if save_pred:
             preds = []
             labels = []
+            inds = []
 
         tm_metrics = get_metric_collection(prefix=f"{log_prefix}/", num_outputs=self.trial_num).to(self.local_rank)
         tm_metrics.reset()
@@ -483,7 +509,7 @@ class DNASeqModelTrainer:
                     self.local_rank, non_blocking=True
                 )
                 # pred_embedding shape [batch, num_trail (93), num_central_bin (896)]
-                pred = self.model(
+                pred = self.inference_model(
                     seq_embedding.permute(0, 2, 1),
                     self.model_config.use_head,
                     data_parallel_training=True if self.world_size > 1 else False,
@@ -497,6 +523,8 @@ class DNASeqModelTrainer:
                 if save_pred:
                     preds.append(pred.detach().cpu())
                     labels.append(label.detach().cpu())
+                    inds.append(ind)
+
                 # metrics
                 tm_metrics.update(
                     pred.reshape(-1, self.trial_num).double(), label.reshape(-1, self.trial_num).double()
@@ -516,7 +544,11 @@ class DNASeqModelTrainer:
         if save_pred:
             # we have to pre save all the res and later aggregate them
             torch.save(
-                {"label": torch.cat(labels, dim=0), "pred": torch.cat(preds, dim=0)},
+                {
+                    "label": torch.cat(labels, dim=0),
+                    "pred": torch.cat(preds, dim=0),
+                    "index": torch.cat(inds, dim=0),
+                },
                 f"{self.logging_config.res_dir}/{log_prefix}_preds_rank_{self.rank}_epoch_{self.current_epoch}.pt",
             )
 
@@ -614,6 +646,16 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         self.logger.info(f"Model {self.model_config.model_name} loaded successfully.")
 
+    @property
+    def inference_model(self):
+        """Override to use model_engine for DeepSpeed inference."""
+        return self.model_engine
+
+    @property
+    def training_model(self):
+        """Override to use model_engine.module for DeepSpeed training logging."""
+        return self.model_engine.module
+
     def load_checkpoint(self):
 
         self.logger.info(f"Loading checkpoint from {self.training_config.load_checkpoint}")
@@ -691,55 +733,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
                 # report_loss = batch_loss / (i + 1)
                 report_loss = batch_loss / batch_count
 
-                if self.logging_config.use_tensorboard:
-                    self.logger.metric(
-                        f"Train/rank[{self.rank}]_loss",
-                        report_loss,
-                        step=self.current_step,
-                        log_also=False,
-                        diagnose=self.logging_config.diagnose,
-                    )
-                    self.logger.metric("Train/lr", self.current_lr, step=self.current_step, log_also=False)
-
-                    # we can only log these info in tensorboard
-                    if self.logging_config.log_more:
-                        for tag, value in self.model_engine.module.named_parameters():
-                            tag = tag.replace(".", "/")
-
-                            # add weight histogram
-                            weight = value.data.detach().cpu().numpy()
-                            if not np.isnan(weight).any():
-                                self.logger.metric(
-                                    "weights/" + tag,
-                                    weight,
-                                    self.current_step,
-                                    log_also=False,
-                                    write_hist=True,
-                                )
-                            else:
-                                self.logger.warning(
-                                    f"failed to add weight histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
-                                )
-
-                            # only add gradients if they are not None
-                            if value.grad is not None:
-                                grad = value.grad.data.detach().cpu().numpy()
-                                if not np.isnan(grad).any():
-                                    self.logger.metric(
-                                        "grads/" + tag,
-                                        grad,
-                                        self.current_step,
-                                        log_also=False,
-                                        write_hist=True,
-                                    )
-                                else:
-                                    self.logger.warning(
-                                        f"failed to add grad histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
-                                    )
-                else:
-                    self.logger.info(
-                        f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
-                    )
+                self._log_training_metrics(report_loss, should_exit_on_nan=True)
 
                 batch_loss = 0
                 batch_count = 0
@@ -757,66 +751,6 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         self.current_epoch += 1
 
-    def infer_step(self, log_loss=False, save_pred=False, log_prefix="Valid"):
-
-        ## only change here is change from model to model_engine
-        self.model_engine.eval()
-
-        if log_loss:
-            running_loss_local = torch.tensor(0.0, device=self.local_rank)
-        if save_pred:
-            preds = []
-            labels = []
-
-        tm_metrics = get_metric_collection(prefix=f"{log_prefix}/", num_outputs=self.trial_num).to(self.local_rank)
-        tm_metrics.reset()
-
-        dataloader = self.data_func[log_prefix.lower()]["data_loader"]
-
-        with torch.no_grad():
-            for i, (seq_embedding, label, ind) in enumerate(dataloader):
-                # seq_embedding shape [batch, L, 4]
-                # label shape [batch, num_central_bin (896), num_trail (93)]
-                seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
-                    self.local_rank, non_blocking=True
-                )
-                # pred_embedding shape [batch, num_trail (93), num_central_bin (896)]
-                pred = self.model_engine(
-                    seq_embedding.permute(0, 2, 1),
-                    self.model_config.use_head,
-                    data_parallel_training=True if self.world_size > 1 else False,
-                ).permute(0, 2, 1)
-
-                # loss
-                if log_loss:
-                    loss = self.criterion(pred, label)
-                    running_loss_local += loss.detach()
-                # pred
-                if save_pred:
-                    preds.append(pred.detach().cpu())
-                    labels.append(label.detach().cpu())
-                # metrics
-                tm_metrics.update(
-                    pred.reshape(-1, self.trial_num).double(), label.reshape(-1, self.trial_num).double()
-                )
-
-        # get and write the metric logs
-        self.metrics.update(tm_metrics.compute())
-        # get global loss
-        if log_loss:
-            total_loss = running_loss_local.clone()
-            # aggregate the loss value from all devices
-            global_aggregate(total_loss, aggregate="sum", world_size=self.world_size)
-
-            global_avg_loss = total_loss / (len(dataloader) * self.world_size)
-            self.metrics.update({f"{log_prefix}/loss": global_avg_loss.cpu().item()})
-
-        if save_pred:
-            # we have to pre save all the res and later aggregate them
-            torch.save(
-                {"label": torch.cat(labels, dim=0), "pred": torch.cat(preds, dim=0)},
-                f"{self.logging_config.res_dir}/{log_prefix}_preds_rank_{self.rank}_epoch_{self.current_epoch}.pt",
-            )
 
 
 # this function also support single GPU training
