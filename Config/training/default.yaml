@@ -20,9 +20,23 @@ lr: 1e-4 # learning rate
 lr_warmup_step: 2000  # gradually increase lr from 0 to `lr` in given optimization steps
 batch_size: 12 # batch size for one single GPU
 total_epoch: 100  # maximum training epoch number
-loss: poisson # the name of the loss function
 accum_step: 1 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
 seed: 42  # random seed for reproduciblility
+
+## loss setup
+# loss: poisson # the name of the loss function (now support: poisson, poisson_mn)
+# loss_params:
+#   log_input: False
+#   eps: 1e-7
+#   reduction: mean
+
+loss: poisson_mn # the name of the loss function (now support: poisson, poisson_mn)
+loss_params:
+  total_weight: 0.2
+  weight_range: 8
+  weight_exp: 6
+  eps: 1e-7
+  reduction: mean
 
 ## optimizer setup
 optimizer: Adam # optimizer to use, the name should be in the torch.optim package

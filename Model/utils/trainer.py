@@ -279,11 +279,13 @@ class DNASeqModelTrainer:
             self.scheduler.load_state_dict(self.checkpoint["scheduler_state_dict"])
 
     def get_loss(self):
-        self.criterion = LOSS_DICT.get(self.training_config.loss)
+        loss_cls = LOSS_DICT.get(self.training_config.loss)
 
-        if self.criterion is None:
+        if loss_cls is None:
             self.logger.error(f"Loss {self.training_config.loss} is not implemented yet.")
             exit(1)
+
+        self.criterion = loss_cls(**self.training_config.get("loss_params", {}))
 
     @property
     def inference_model(self):
@@ -298,7 +300,7 @@ class DNASeqModelTrainer:
     def _log_training_metrics(self, report_loss, should_exit_on_nan=False):
         """Shared training metrics logging logic with NaN detection and exit capability."""
         nan_detected = False
-        
+
         if self.logging_config.use_tensorboard:
             self.logger.metric(
                 f"Train/rank[{self.rank}]_loss",
@@ -422,11 +424,12 @@ class DNASeqModelTrainer:
         for i, (seq_embedding, label, ind) in enumerate(dataloader):
 
             # seq_embedding shape [batch, L, 4]
-            # label shape [batch, num_central_bin (896), num_trail (93)]
+            # label shape [batch, num_central_bin, num_trail]
             seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
                 self.local_rank, non_blocking=True
             )
-            # pred_embedding shape [batch, num_trail (93), num_central_bin (896)]
+            # pred_embedding shape [batch, num_trail, num_central_bin]
+            # after permute, should be [batch, num_central_bin, num_trail]
             pred = self.model(
                 seq_embedding.permute(0, 2, 1),
                 self.model_config.use_head,
@@ -463,7 +466,7 @@ class DNASeqModelTrainer:
                 if self.current_step % self.logging_config.report_every == 0:
                     # report_loss = batch_loss / (i + 1)
                     report_loss = batch_loss / batch_count
-                    
+
                     self._log_training_metrics(report_loss, should_exit_on_nan=True)
 
                     batch_loss = 0
@@ -750,7 +753,6 @@ class DeepspeedTrainer(DNASeqModelTrainer):
                     self.save_checkpoint(f"diag_step_{self.current_step}")
 
         self.current_epoch += 1
-
 
 
 # this function also support single GPU training
