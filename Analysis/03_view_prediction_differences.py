@@ -321,6 +321,65 @@ class GenomeViewer:
         plt.close(fig)
         print(f"Saved plot: {output_path}")
 
+    def create_scatter_plot(self, data: Dict[str, Any], output_path: str):
+        """Create diagonal scatter plot with pred vs label for all trials."""
+        labels = data["data"]["labels"]  # shape: [n_points, n_trials]
+        predictions = data["data"]["predictions"]  # shape: [n_points, n_trials]
+        trial_names = data["metadata"]["trial_names"]
+        n_trials = len(trial_names)
+
+        # Calculate subplot arrangement
+        n_cols = min(4, n_trials)  # Max 4 columns
+        n_rows = (n_trials + n_cols - 1) // n_cols  # Ceiling division
+
+        # Create figure with subplots
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 4*n_rows))
+        if n_trials == 1:
+            axes = [axes]
+        elif n_rows == 1:
+            axes = axes.reshape(1, -1)
+
+        # Flatten axes for easy iteration
+        axes_flat = axes.flatten() if n_trials > 1 else axes
+
+        for trial_idx, trial_name in tqdm(enumerate(trial_names)):
+            print(f"Add {trial_name}")
+            ax = axes_flat[trial_idx]
+
+            # Get data for this trial
+            y_true = labels[:, trial_idx]
+            y_pred = predictions[:, trial_idx]
+
+            # Calculate Pearson correlation (only coefficient, skip p-value for speed)
+            corr = np.corrcoef(y_true, y_pred)[0, 1]
+
+            # Create scatter plot with reduced alpha for many points
+            ax.scatter(y_true, y_pred, alpha=0.2, s=1, edgecolor='none')
+
+            # Add diagonal line (perfect prediction)
+            min_val = min(np.min(y_true), np.min(y_pred))
+            max_val = max(np.max(y_true), np.max(y_pred))
+            ax.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.8, linewidth=1)
+
+            # Set labels and title
+            ax.set_xlabel('True Values', fontsize=10)
+            ax.set_ylabel('Predicted Values', fontsize=10)
+            ax.set_title(f'{trial_name}\nPearson r = {corr:.3f}', fontsize=11)
+
+            # Add correlation text in corner
+            ax.text(0.05, 0.95, f'r = {corr:.3f}', 
+                   transform=ax.transAxes, verticalalignment='top', fontsize=9,
+                   bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8))
+
+            # Add grid
+            ax.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+        print(f"Saving")
+        plt.savefig(output_path, dpi=300, bbox_inches="tight")
+        print(f"Saved scatter plot: {output_path}")
+        plt.close(fig)
+
 
 def plot_single_trial(args):
     """Helper function for parallel plotting of individual trials."""
@@ -348,6 +407,32 @@ def plot_single_trial(args):
         return f"Error creating plot for {trial_name}: {str(e)}"
 
 
+def plot_scatter_all_trials(args):
+    """Helper function for creating scatter plot with all trials."""
+    (processor_config, split, trial_names, output_path, region_filter) = args
+    
+    try:
+        # Recreate processor and viewer objects (needed for multiprocessing)
+        processor = PredictionDifferenceProcessor(**processor_config)
+        viewer = GenomeViewer(processor)
+        
+        # Load data for all specified trials
+        data = processor.load_data_for_trials(split, trial_names)
+        
+        # Apply region filtering if specified
+        if region_filter:
+            chrom, start, end = region_filter
+            data = processor.filter_by_region(data, chrom, start, end)
+            if len(data["coordinates"]["chrom"]) == 0:
+                return f"No data in specified region for scatter plot"
+        
+        # Create the scatter plot
+        viewer.create_scatter_plot(data, output_path)
+        return f"Successfully created scatter plot for {len(trial_names)} trials"
+    except Exception as e:
+        return f"Error creating scatter plot: {str(e)}"
+
+
 @click.command()
 @click.option("-e", "--exp_name", required=True, type=str, help="Experiment name")
 @click.option("--chk", required=True, type=str, help="Checkpoint identifier")
@@ -359,7 +444,7 @@ def plot_single_trial(args):
 @click.option("--trials", multiple=True, type=str, help="Specific trials to plot (default: all)")
 @click.option(
     "--data_type",
-    type=click.Choice(["diff", "abs_diff", "predictions", "labels"]),
+    type=click.Choice(["diff", "abs_diff", "predictions", "labels", "scatter"]),
     default="diff",
     help="Type of data to visualize",
 )
@@ -422,9 +507,7 @@ def main(
         else:
             trial_names = processor.label_meta.index.tolist()
 
-        print(f"Creating genome views for {len(trial_names)} trials...")
-
-        # Prepare arguments for parallel processing
+        # Prepare processor config and region filter
         processor_config = {
             'data_base': data_base,
             'res_base': res_base,
@@ -441,31 +524,51 @@ def main(
             region_filter = (chrom, start, end)
             print(f"Will filter by region: {chrom}:{start}-{end}")
 
-        plot_args = []
-        for trial_name in trial_names:
-            # Generate filename
+        # Handle scatter plot differently (all trials in one plot)
+        if data_type == "scatter":
+            print(f"Creating scatter plot for {len(trial_names)} trials...")
+            
+            # Generate filename for scatter plot
             region_suffix = ""
             if region_filter:
                 chrom_part, start_part, end_part = region_filter
                 region_suffix = f"_{chrom_part or 'all'}_{start_part or 'start'}_{end_part or 'end'}"
-
-            output_path = f"{processor.output_dir}/plot/genome_view/{split}_{trial_name}_{data_type}{region_suffix}.png"
-            plot_args.append((processor_config, split, trial_name, output_path, data_type, region_filter))
-
-        # Execute plotting in parallel
-        if num_workers > 1 and len(plot_args) > 1:
-            print(f"Using {num_workers} workers for parallel plotting...")
-            with mp.Pool(processes=min(num_workers, len(plot_args))) as pool:
-                results = pool.map(plot_single_trial, plot_args)
             
-            # Print results
-            for result in results:
-                print(result)
+            output_path = f"{processor.output_dir}/plot/{split}_all_trials_scatter{region_suffix}.png"
+            args = (processor_config, split, trial_names, output_path, region_filter)
+            
+            result = plot_scatter_all_trials(args)
+            print(result)
+            
         else:
-            print("Using sequential plotting...")
-            for args in tqdm(plot_args, desc="Creating plots"):
-                result = plot_single_trial(args)
-                print(result)
+            # Handle individual trial plots
+            print(f"Creating genome views for {len(trial_names)} trials...")
+            
+            plot_args = []
+            for trial_name in trial_names:
+                # Generate filename
+                region_suffix = ""
+                if region_filter:
+                    chrom_part, start_part, end_part = region_filter
+                    region_suffix = f"_{chrom_part or 'all'}_{start_part or 'start'}_{end_part or 'end'}"
+
+                output_path = f"{processor.output_dir}/plot/genome_view/{split}_{trial_name}_{data_type}{region_suffix}.png"
+                plot_args.append((processor_config, split, trial_name, output_path, data_type, region_filter))
+
+            # Execute plotting in parallel
+            if num_workers > 1 and len(plot_args) > 1:
+                print(f"Using {num_workers} workers for parallel plotting...")
+                with mp.Pool(processes=min(num_workers, len(plot_args))) as pool:
+                    results = pool.map(plot_single_trial, plot_args)
+                
+                # Print results
+                for result in results:
+                    print(result)
+            else:
+                print("Using sequential plotting...")
+                for args in tqdm(plot_args, desc="Creating plots"):
+                    result = plot_single_trial(args)
+                    print(result)
 
         print(f"Completed {split} split")
 
