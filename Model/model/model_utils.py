@@ -61,7 +61,7 @@ def setup_model(config, logger):
 
     # initialize the model
     if training_config.load_checkpoint is None:
-        model.apply(model._init_weights)
+        model._init_weights()
 
     # in case we need to load the pretrained model and only want to load part of them
     partial_load = model_config.get("partial_load", None)

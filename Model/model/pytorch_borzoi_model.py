@@ -188,7 +188,7 @@ class Borzoi(PreTrainedModel):
             self.prediction_head[head_name] = nn.Conv1d(in_channels=1920, out_channels=track_num, kernel_size=1)
         self.final_softplus = nn.Softplus()
 
-    def _init_weights(self, module):
+    def _init_weights(self):
         """Initialize the weights"""
         # kernel_initializer = lecun_normal, for all layers except for transformer
         # kernel_initializer = he_normal, for transformer layers
