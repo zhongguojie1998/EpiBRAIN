@@ -24,6 +24,44 @@ from utils.loss import LOSS_DICT
 from utils.multi_gpu import blocking_sync_wait, cleanup, deepspeed_setup, global_aggregate, setup, torchrun_setup
 
 
+def create_optimizer_grouped_parameters(model):
+    """
+    Create optimizer parameter groups with differential weight decay:
+    - overall_decay_params: 1.0e-6 weight decay for most parameters
+    - transformer_decay_params: 2.0e-8 weight decay for transformer layers
+    - no_decay_params: 0.0 weight decay for biases and 1D parameters
+    
+    Args:
+        model: The model to extract parameters from
+        
+    Returns:
+        list: Parameter groups suitable for optimizer initialization
+    """
+    overall_decay_params = []
+    transformer_decay_params = []
+    no_decay_params = []
+    
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        # Check for parameters to exclude from weight decay
+        if param.ndim == 1 or name.endswith(".bias"):
+            no_decay_params.append(param)
+        else:
+            if "transformer" in name:
+                transformer_decay_params.append(param)
+            else:
+                overall_decay_params.append(param)
+    
+    optimizer_grouped_parameters = [
+        {'params': overall_decay_params, 'weight_decay': 1.0e-6},
+        {'params': transformer_decay_params, 'weight_decay': 2.0e-8},
+        {'params': no_decay_params, 'weight_decay': 0.0}
+    ]
+    
+    return optimizer_grouped_parameters
+
+
 def aggregate_test_res(trainer, prefix="Test"):
     # aggregate the results and clear per rank file
     pattern = f"{trainer.logging_config.res_dir}/{prefix}_preds_rank_*_epoch_{trainer.current_epoch}.pt"
@@ -258,30 +296,8 @@ class DNASeqModelTrainer:
 
     def get_optimizer(self):
         optim_class = eval(f"optim.{self.training_config.optimizer}")
-        # need optimier need to apply l2 decay
-        # l2_scale = 1.0e-6 for all parameters except for transformer layer
-        # l2_scale = 2.0e-8 for transformer layer
-        # iterate through the model parameters and set the weight decay
-        # TODO: do this to deepspeed trainer
-        overall_decay_params = []
-        transformer_decay_params = []
-        no_decay_params = []
-        for name, param in self.model.named_parameters():
-            if not param.requires_grad:
-                continue
-            # Check for parameters to exclude from weight decay
-            if param.ndim == 1 or name.endswith(".bias"):
-                no_decay_params.append(param)
-            else:
-                if "transformer" in name:
-                    transformer_decay_params.append(param)
-                else:
-                    overall_decay_params.append(param)
-        optimizer_grouped_parameters = [
-            {'params': overall_decay_params, 'weight_decay': 1.0e-6},
-            {'params': transformer_decay_params, 'weight_decay': 2.0e-8},
-            {'params': no_decay_params, 'weight_decay': 0.0}
-        ]
+        # Apply differential weight decay using the shared function
+        optimizer_grouped_parameters = create_optimizer_grouped_parameters(self.model)
         self.optimizer = optim_class(optimizer_grouped_parameters, **self.training_config.optimizer_params)
         
         scheduler_class = eval(f"optim.lr_scheduler.{self.training_config.scheduler}")
@@ -652,12 +668,13 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         self.model = setup_model(self.config, self.logger)
 
-        # set up deepspeed
+        # set up deepspeed with weight decay protocol
+        optimizer_grouped_parameters = create_optimizer_grouped_parameters(self.model)
         self.model_engine, self.optimizer, _, self.scheduler = deepspeed.initialize(
             model=self.model,
-            model_parameters=[m for _, m in self.model.named_parameters() if m.requires_grad],
+            model_parameters=optimizer_grouped_parameters,
             config=self.training_config.deepspeed_config,
-            dist_init_required=self.world_size > 1,  # we are using DDP
+            dist_init_required=True,  # we are using DDP
         )
 
         # set up scheduler step logic
