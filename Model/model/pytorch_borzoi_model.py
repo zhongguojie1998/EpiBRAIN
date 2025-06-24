@@ -13,7 +13,6 @@
 # limitations under the License.
 # =========================================================================
 
-
 import copy
 import math
 from pathlib import Path
@@ -22,11 +21,10 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from transformers import PreTrainedModel
-
 from model.config_borzoi import BorzoiConfig
 from model.pytorch_borzoi_transformer import Attention, FlashAttention
 from model.pytorch_borzoi_utils import Residual, TargetLengthCrop, undo_squashed_scale
+from transformers import PreTrainedModel
 
 ## these for AnnotatedBorzoi
 # DIR = Path(__file__).parents[0]
@@ -35,6 +33,44 @@ from model.pytorch_borzoi_utils import Residual, TargetLengthCrop, undo_squashed
 # torch.backends.cudnn.deterministic = True
 
 # torch.set_float32_matmul_precision('high')
+
+
+def lecun_normal_init(layer):
+    if isinstance(layer, nn.Conv1d):
+        fan_in = layer.in_channels * layer.kernel_size[0]
+        std = math.sqrt(1.0 / fan_in)
+        nn.init.normal_(layer.weight, mean=0, std=std)
+    elif isinstance(layer, nn.Linear):
+        fan_in = layer.in_features
+        std = math.sqrt(1.0 / fan_in)
+        nn.init.normal_(layer.weight, mean=0, std=std)
+    # bias are set to 0 for all layers in TF
+    if isinstance(layer, (nn.Linear, nn.Conv1d)) and layer.bias is not None:
+        layer.bias.data.zero_()
+
+
+def conditional_recursive_he_normal_init(layer):
+    # --- Stop Condition ---
+    # If the current module is one of the types we want to skip,
+    # we stop the recursion for this entire branch.
+    if isinstance(layer, (Attention, FlashAttention)):
+        return
+    # --- Initialization Logic for the current module ---
+    # Apply the appropriate initialization based on the module type.
+    if isinstance(layer, nn.Linear):
+        nn.init.kaiming_normal_(layer.weight, mode="fan_in", nonlinearity="relu")
+        if layer.bias is not None:
+            layer.bias.data.zero_()
+    # --- Recursive  ---
+    for child in layer.children():
+        conditional_recursive_he_normal_init(child)
+
+
+def other_init(layer):
+    # same as in TF
+    if isinstance(layer, (nn.LayerNorm, nn.BatchNorm1d)):
+        layer.bias.data.zero_()
+        layer.weight.data.fill_(1.0)
 
 
 class ConvDna(nn.Module):
@@ -59,7 +95,9 @@ class ConvBlock(nn.Module):
             self.conv_layer = nn.Sequential(depthwise_conv, pointwise_conv)
             self.activation = nn.Identity()
         else:
-            self.norm = nn.BatchNorm1d(in_channels, eps=0.001) # momentum default is 0.1, it is equivalent to 0.9 in tensorflow as in Borzoi
+            self.norm = nn.BatchNorm1d(
+                in_channels, eps=0.001
+            )  # momentum default is 0.1, it is equivalent to 0.9 in tensorflow as in Borzoi
             self.activation = nn.GELU(approximate="tanh")
             self.conv_layer = nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, padding="same")
 
@@ -83,7 +121,9 @@ class Borzoi(PreTrainedModel):
         # whether to use FlashAttention, default as False
         self.flashed = config.flashed if "flashed" in config.__dict__.keys() else False
         # whether to use autocast, if using FlashAttention, always set to True, else, default as False
-        self.use_autocast = True if self.flashed else config.use_autocast if "use_autocast" in config.__dict__.keys() else False
+        self.use_autocast = (
+            True if self.flashed else config.use_autocast if "use_autocast" in config.__dict__.keys() else False
+        )
 
         # model settings
         ## initial convolutional layers
@@ -193,18 +233,6 @@ class Borzoi(PreTrainedModel):
         # kernel_initializer = lecun_normal, for all layers except for transformer
         # kernel_initializer = he_normal, for transformer layers
         # apply lecun norm to all layers except for transformer
-        def lecun_normal_init(layer):
-            if isinstance(layer, nn.Conv1d):
-                fan_in = layer.in_channels * layer.kernel_size[0]
-                std = math.sqrt(1. / fan_in)
-                nn.init.normal_(layer.weight, mean=0, std=std)
-            elif isinstance(layer, nn.Linear):
-                fan_in = layer.in_features
-                std = math.sqrt(1. / fan_in)
-                nn.init.normal_(layer.weight, mean=0, std=std)
-            # bias are set to 0 for all layers in TF
-            if isinstance(layer, (nn.Linear, nn.Conv1d)) and layer.bias is not None:
-                layer.bias.data.zero_()
         self.conv_dna.apply(lecun_normal_init)
         self.res_tower.apply(lecun_normal_init)
         self.unet1.apply(lecun_normal_init)
@@ -218,30 +246,12 @@ class Borzoi(PreTrainedModel):
             self.separable0.apply(lecun_normal_init)
         self.final_joined_convs.apply(lecun_normal_init)
         self.prediction_head.apply(lecun_normal_init)
+
         # apply he normal to transformer layers, only to the linear output layer after Attention
         # The Attention has handeled the initialization of its weights, don't overwrite them
-        def conditional_recursive_he_normal_init(layer):
-            # --- Stop Condition ---
-            # If the current module is one of the types we want to skip,
-            # we stop the recursion for this entire branch.
-            if isinstance(layer, (Attention, FlashAttention)):
-                return
-            # --- Initialization Logic for the current module ---
-            # Apply the appropriate initialization based on the module type.
-            if isinstance(layer, nn.Linear):
-                nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='relu')
-                if layer.bias is not None:
-                    layer.bias.data.zero_()
-            # --- Recursive  ---
-            for child in layer.children():
-                conditional_recursive_he_normal_init(child)
         conditional_recursive_he_normal_init(self.transformer)
+
         # Other initializations
-        def other_init(layer):
-            # same as in TF
-            if isinstance(layer, (nn.LayerNorm, nn.BatchNorm1d)):
-                layer.bias.data.zero_()
-                layer.weight.data.fill_(1.0)
         self.apply(other_init)
 
     # def set_track_subset(self, track_subset):
@@ -282,7 +292,7 @@ class Borzoi(PreTrainedModel):
              torch.Tensor: Output of the model up to the cropping layer with shape (N, dim, crop_bin_num)
         """
         x = self.conv_dna(x)
-        x_unet0 = self.res_tower(x) # resolution 32
+        x_unet0 = self.res_tower(x)  # resolution 32
         x_unet1 = self.unet1(x_unet0)  # resolution 64
         x = self._max_pool(x_unet1)  # resolution 128
         x_unet1 = self.horizontal_conv1(x_unet1)
@@ -330,7 +340,7 @@ class Borzoi(PreTrainedModel):
         # Run the model head
         with torch.amp.autocast("cuda", enabled=self.use_autocast):
             seq_embs = self.final_joined_convs(seq_embs)
-        with torch.amp.autocast('cuda', enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             conved_slices = self.final_softplus(self.prediction_head[use_head](seq_embs.float()))
         if remove_squashed_scale:
             conved_slices = undo_squashed_scale(conved_slices)
@@ -353,7 +363,7 @@ class Borzoi(PreTrainedModel):
             x = self.final_joined_convs(x)
 
         # disable autocast for more precision in final layer
-        with torch.amp.autocast('cuda', enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             if data_parallel_training:
                 # we need this to get gradients for both heads if doing DDP training
                 out = self.final_softplus(self.prediction_head[use_head](x.float()))
