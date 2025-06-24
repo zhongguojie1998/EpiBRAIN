@@ -258,8 +258,32 @@ class DNASeqModelTrainer:
 
     def get_optimizer(self):
         optim_class = eval(f"optim.{self.training_config.optimizer}")
-        self.optimizer = optim_class(self.model.parameters(), **self.training_config.optimizer_params)
-
+        # need optimier need to apply l2 decay
+        # l2_scale = 1.0e-6 for all parameters except for transformer layer
+        # l2_scale = 2.0e-8 for transformer layer
+        # iterate through the model parameters and set the weight decay
+        # TODO: do this to deepspeed trainer
+        overall_decay_params = []
+        transformer_decay_params = []
+        no_decay_params = []
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            # Check for parameters to exclude from weight decay
+            if param.ndim == 1 or name.endswith(".bias"):
+                no_decay_params.append(param)
+            else:
+                if "transformer" in name:
+                    transformer_decay_params.append(param)
+                else:
+                    overall_decay_params.append(param)
+        optimizer_grouped_parameters = [
+            {'params': overall_decay_params, 'weight_decay': 1.0e-6},
+            {'params': transformer_decay_params, 'weight_decay': 2.0e-8},
+            {'params': no_decay_params, 'weight_decay': 0.0}
+        ]
+        self.optimizer = optim_class(optimizer_grouped_parameters, **self.training_config.optimizer_params)
+        
         scheduler_class = eval(f"optim.lr_scheduler.{self.training_config.scheduler}")
         self.scheduler = scheduler_class(self.optimizer, **self.training_config.scheduler_params)
 

@@ -105,6 +105,18 @@ class Attention(nn.Module):
 
         self.pos_dropout = nn.Dropout(pos_dropout)
         self.attn_dropout = nn.Dropout(dropout)
+        
+        # initialize parameters
+        def he_normal_init(layer):
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='relu')
+                if layer.bias is not None:
+                    layer.bias.data.zero_()
+        self.to_q.apply(he_normal_init)
+        self.to_k.apply(he_normal_init)
+        self.to_v.apply(he_normal_init)
+        # don't change to_out!
+        self.to_rel_k.apply(he_normal_init)
 
     def forward(self, x):
         n, h, device = x.shape[-2], self.heads, x.device

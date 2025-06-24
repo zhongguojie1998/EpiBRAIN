@@ -59,7 +59,7 @@ class ConvBlock(nn.Module):
             self.conv_layer = nn.Sequential(depthwise_conv, pointwise_conv)
             self.activation = nn.Identity()
         else:
-            self.norm = nn.BatchNorm1d(in_channels, eps=0.001)
+            self.norm = nn.BatchNorm1d(in_channels, eps=0.001) # momentum default is 0.1, it is equivalent to 0.9 in tensorflow as in Borzoi
             self.activation = nn.GELU(approximate="tanh")
             self.conv_layer = nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, padding="same")
 
@@ -190,14 +190,59 @@ class Borzoi(PreTrainedModel):
 
     def _init_weights(self, module):
         """Initialize the weights"""
-        if isinstance(module, (nn.Linear, nn.Embedding, nn.Conv1d)):
-            # module.weight.data.normal_(mean=0.0, std=0.02)
-            nn.init.xavier_normal_(module.weight)
-        elif isinstance(module, (nn.LayerNorm, nn.BatchNorm1d)):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
-        if isinstance(module, (nn.Linear, nn.Conv1d)) and module.bias is not None:
-            module.bias.data.zero_()
+        # kernel_initializer = lecun_normal, for all layers except for transformer
+        # kernel_initializer = he_normal, for transformer layers
+        # apply lecun norm to all layers except for transformer
+        def lecun_normal_init(layer):
+            if isinstance(layer, nn.Conv1d):
+                fan_in = layer.in_channels * layer.kernel_size[0]
+                std = math.sqrt(1. / fan_in)
+                nn.init.normal_(layer.weight, mean=0, std=std)
+            elif isinstance(layer, nn.Linear):
+                fan_in = layer.in_features
+                std = math.sqrt(1. / fan_in)
+                nn.init.normal_(layer.weight, mean=0, std=std)
+            # bias are set to 0 for all layers in TF
+            if isinstance(layer, (nn.Linear, nn.Conv1d)) and layer.bias is not None:
+                layer.bias.data.zero_()
+        self.conv_dna.apply(lecun_normal_init)
+        self.res_tower.apply(lecun_normal_init)
+        self.unet1.apply(lecun_normal_init)
+        self.horizontal_conv0.apply(lecun_normal_init)
+        self.horizontal_conv1.apply(lecun_normal_init)
+        if self.upsample_layer_num >= 1:
+            self.upsampling_unet1.apply(lecun_normal_init)
+            self.separable1.apply(lecun_normal_init)
+        if self.upsample_layer_num >= 2:
+            self.upsampling_unet0.apply(lecun_normal_init)
+            self.separable0.apply(lecun_normal_init)
+        self.final_joined_convs.apply(lecun_normal_init)
+        self.prediction_head.apply(lecun_normal_init)
+        # apply he normal to transformer layers, only to the linear output layer after Attention
+        # The Attention has handeled the initialization of its weights, don't overwrite them
+        def conditional_recursive_he_normal_init(layer):
+            # --- Stop Condition ---
+            # If the current module is one of the types we want to skip,
+            # we stop the recursion for this entire branch.
+            if isinstance(layer, (Attention, FlashAttention)):
+                return
+            # --- Initialization Logic for the current module ---
+            # Apply the appropriate initialization based on the module type.
+            if isinstance(layer, nn.Linear):
+                nn.init.kaiming_normal_(layer.weight, mode='fan_in', nonlinearity='relu')
+                if layer.bias is not None:
+                    layer.bias.data.zero_()
+            # --- Recursive  ---
+            for child in layer.children():
+                conditional_recursive_he_normal_init(child)
+        conditional_recursive_he_normal_init(self.transformer)
+        # Other initializations
+        def other_init(layer):
+            # same as in TF
+            if isinstance(layer, (nn.LayerNorm, nn.BatchNorm1d)):
+                layer.bias.data.zero_()
+                layer.weight.data.fill_(1.0)
+        self.apply(other_init)
 
     # def set_track_subset(self, track_subset):
     #     """
