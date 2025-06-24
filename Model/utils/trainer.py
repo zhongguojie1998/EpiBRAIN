@@ -249,7 +249,7 @@ class DNASeqModelTrainer:
                     process_group=None,  # we do compression on all ranks
                     **self.training_config.get("powerSGD_params", {}),
                 )
-                if self.checkpoint.get("hook_state", {}):
+                if self.training_config.load_checkpoint is not None and self.checkpoint.get("hook_state", {}):
                     self.hook_state.__setstate__(self.checkpoint["hook_state"])
 
                 self.model.register_comm_hook(self.hook_state, PowerSGD.powerSGD_hook)
