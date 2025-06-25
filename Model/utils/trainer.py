@@ -24,23 +24,27 @@ from utils.loss import LOSS_DICT
 from utils.multi_gpu import blocking_sync_wait, cleanup, deepspeed_setup, global_aggregate, setup, torchrun_setup
 
 
-def create_optimizer_grouped_parameters(model):
+def create_optimizer_grouped_parameters(model, use_groups=True):
     """
     Create optimizer parameter groups with differential weight decay:
     - overall_decay_params: 1.0e-6 weight decay for most parameters
     - transformer_decay_params: 2.0e-8 weight decay for transformer layers
     - no_decay_params: 0.0 weight decay for biases and 1D parameters
-    
+
     Args:
         model: The model to extract parameters from
-        
+        use_groups: Whether to use grouped parameters or return all parameters
+
     Returns:
         list: Parameter groups suitable for optimizer initialization
     """
+    if not use_groups:
+        return [param for param in model.parameters() if param.requires_grad]
+
     overall_decay_params = []
     transformer_decay_params = []
     no_decay_params = []
-    
+
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
@@ -52,13 +56,13 @@ def create_optimizer_grouped_parameters(model):
                 transformer_decay_params.append(param)
             else:
                 overall_decay_params.append(param)
-    
+
     optimizer_grouped_parameters = [
-        {'params': overall_decay_params, 'weight_decay': 1.0e-6},
-        {'params': transformer_decay_params, 'weight_decay': 2.0e-8},
-        {'params': no_decay_params, 'weight_decay': 0.0}
+        {"params": overall_decay_params, "weight_decay": 1.0e-6},
+        {"params": transformer_decay_params, "weight_decay": 2.0e-8},
+        {"params": no_decay_params, "weight_decay": 0.0},
     ]
-    
+
     return optimizer_grouped_parameters
 
 
@@ -297,9 +301,11 @@ class DNASeqModelTrainer:
     def get_optimizer(self):
         optim_class = eval(f"optim.{self.training_config.optimizer}")
         # Apply differential weight decay using the shared function
-        optimizer_grouped_parameters = create_optimizer_grouped_parameters(self.model)
+        optimizer_grouped_parameters = create_optimizer_grouped_parameters(
+            self.model, self.training_config.add_opt_group
+        )
         self.optimizer = optim_class(optimizer_grouped_parameters, **self.training_config.optimizer_params)
-        
+
         scheduler_class = eval(f"optim.lr_scheduler.{self.training_config.scheduler}")
         self.scheduler = scheduler_class(self.optimizer, **self.training_config.scheduler_params)
 
@@ -669,7 +675,9 @@ class DeepspeedTrainer(DNASeqModelTrainer):
         self.model = setup_model(self.config, self.logger)
 
         # set up deepspeed with weight decay protocol
-        optimizer_grouped_parameters = create_optimizer_grouped_parameters(self.model)
+        optimizer_grouped_parameters = create_optimizer_grouped_parameters(
+            self.model, self.training_config.add_opt_group
+        )
         self.model_engine, self.optimizer, _, self.scheduler = deepspeed.initialize(
             model=self.model,
             model_parameters=optimizer_grouped_parameters,

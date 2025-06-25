@@ -40,6 +40,7 @@ loss_params:
 
 ## optimizer setup
 optimizer: Adam # optimizer to use, the name should be in the torch.optim package
+add_opt_group: True # whether to use optimizer parameter groups
 optimizer_params: # optimizer parameters
   lr: ${training.lr}
 
