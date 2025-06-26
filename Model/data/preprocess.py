@@ -32,6 +32,7 @@ logger = LazyLogger(f"{LOGGER_PREFIX}-Data Preprocess")
 
 PARA_CHECK = [
     "refer_genom",
+    "trial_summary_path",
     "gap_bed",
     "unmap_bed",
     "unmap_threshold",
@@ -51,7 +52,7 @@ PARA_CHECK = [
 ]
 
 
-def get_trail_value_mp(trial, storage_path, mseqs, blacklist_bed, window_size, n_window, restart=False):
+def get_trail_value_mp(trial, storage_path, mseqs, blacklist_bed, window_size, n_window, umap_npy_path,restart=False):
 
     exp = trial["exp"]
     genome_cov_file = trial["file"]
@@ -60,6 +61,7 @@ def get_trail_value_mp(trial, storage_path, mseqs, blacklist_bed, window_size, n
     # for data transformation
     sum_stat = trial.get("sum_stat", "sum")
     baseline_pct = trial.get("baseline_pct", 0.25)
+    umap_pct = trial.get("umap_pct", 1)
     scale = trial.get("scale", 1)
     extreme_clip_pct = trial.get("extreme_clip_pct", None)
     offset = trial.get("offset", None)
@@ -80,9 +82,11 @@ def get_trail_value_mp(trial, storage_path, mseqs, blacklist_bed, window_size, n
             kept_num_after_crop=n_window,
             seqs_cov_file=seqs_cov_file,
             genome_cov_file=genome_cov_file,
+            umap_npy_path=umap_npy_path,
             # the rest for data scale transformation
             sum_stat=sum_stat,
             baseline_pct=baseline_pct,
+            umap_pct=umap_pct,
             scale=scale,
             extreme_clip_pct=extreme_clip_pct,
             offset=offset,
@@ -322,6 +326,7 @@ def preprocess(
             blacklist_bed=blacklist_bed,
             window_size=window_size,
             n_window=n_window,
+            umap_npy_path=unmap_npy if unmap_bed is not None else None,
             restart=force_restart,
         )
 

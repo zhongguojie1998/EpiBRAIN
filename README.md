@@ -67,7 +67,8 @@ The configuration can have the following fields:
 - `exp` (required): the name of the trial
 - `file` (required): the path to the raw bigwig file
 - `sum_stat` (optional, default: sum): in each bin, how to aggregate the raw reads into a summary
-- `baseline_pct` (optional, default: 0.25): set the nan/blacklist region value to this quantile of all values 
+- `baseline_pct` (optional, default: 0.5): set the nan/blacklist region value to this quantile of all values
+- `umap_pct` (optional, default: 0.5): set the umap region value to this quantile of all values
 - `scale` (optional, default: 1): scale the raw reads
 - `extreme_clip_pct`(optional, default: None): final hard clip all values above this quantile to the corresponding value. If not provided, skip.
 - `offset` (optional, default: None): shift the value by a given value (org_read - offset), which can be used to reduce some noise. If not provided, skip.
@@ -81,11 +82,12 @@ The data preprocess pipeline would be:
 1. impute nan / reset value in the blacklist region to the `baseline_pct` of the whole context length (eg. 196608)
 2. scale the data based on `scale`
 3. aggregate the data for given pool width into bins with the given `sum_stat`
-4. hard clip extreme value above `extreme_clip_pct` to the corresponding value (if applicable)
-5. Subtract the original value by `offset` (if applicable)
-6. anchor the value at the `anchor_pct` to `anchor_target` (if applicable)
-7. soft clip based on threshold `clip_soft` (if applicable)
-8. hard clip based on threshold `clip` (if applicable)
+4. clip the umap region to the `umap_pct` of the whole context length (if umap bedfile is provided)
+5. hard clip extreme value above `extreme_clip_pct` to the corresponding value (if applicable)
+6. Subtract the original value by `offset` (if applicable)
+7. anchor the value at the `anchor_pct` to `anchor_target` (if applicable)
+8. soft clip based on threshold `clip_soft` (if applicable)
+9. hard clip based on threshold `clip` (if applicable)
 
 # Usage
 

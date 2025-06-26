@@ -487,11 +487,13 @@ def get_labels(
     kept_num_after_crop,
     seqs_cov_file,
     genome_cov_file,
+    umap_npy_path=None,
     sum_stat="sum",
-    baseline_pct=0.25,
+    baseline_pct=0.5,
+    umap_pct=0.5,
     scale=1,
     extreme_clip_pct=None,
-    offset=None, 
+    offset=None,
     anchor_target=None,
     anchor_pct=0.999,
     clip=None,
@@ -501,7 +503,7 @@ def get_labels(
 
     logger.debug(
         f"""Setting for {seqs_cov_file.split('/')[-1].split('.')[0]}:
-        sum_stat {sum_stat}, baseline_pct {baseline_pct}, scale {scale}, extreme_clip_pct {extreme_clip_pct}, offset {offset}, anchor_target {anchor_target}, anchor_pct {anchor_pct}, clip_threshold {clip}, softclip_threshold {clip_soft}"""
+        sum_stat {sum_stat}, baseline_pct {baseline_pct}, umap_pct {umap_pct}, scale {scale}, extreme_clip_pct {extreme_clip_pct}, offset {offset}, anchor_target {anchor_target}, anchor_pct {anchor_pct}, clip_threshold {clip}, softclip_threshold {clip_soft}"""
     )
 
     # read blacklist regions
@@ -520,6 +522,10 @@ def get_labels(
 
     # open genome coverage file
     genome_cov_open = CovFace(genome_cov_file)
+
+    # open unmap files if applicable
+    if umap_npy_path is not None:
+        unmap_mask = np.load(umap_npy_path)
 
     # for each model sequence
     for si in range(num_seqs):
@@ -546,8 +552,6 @@ def get_labels(
                 seq_cov_nt[black_seq_start:black_seq_end] = np.clip(black_seq_values, -baseline_cov, baseline_cov)
                 # seq_cov_nt[black_seq_start:black_seq_end] = baseline_cov
 
-        # TODO: set umap list value to baseline
-
         # set NaN's to baseline
         nan_mask = np.isnan(seq_cov_nt)
         seq_cov_nt[nan_mask] = baseline_cov
@@ -557,8 +561,6 @@ def get_labels(
 
         # sum pool
         seq_cov = seq_cov_nt.reshape(target_length, pool_width)
-        trim = (kept_num_after_crop - target_length) // 2
-        seq_cov = seq_cov[-trim:trim, :]
 
         if sum_stat == "sum":
             seq_cov = seq_cov.sum(axis=1, dtype="float32")
@@ -582,6 +584,14 @@ def get_labels(
         else:
             logger.error('ERROR: Unrecognized summary statistic "%s".' % sum_stat)
             exit(1)
+
+        if umap_npy_path is not None:
+            umap_cov = np.percentile(seq_cov, 100 * umap_pct)
+            seq_cov[unmap_mask[si, :]] = np.minimum(seq_cov[unmap_mask[si, :]], umap_cov)
+
+        # crop to final central size
+        trim = (kept_num_after_crop - target_length) // 2
+        seq_cov = seq_cov[-trim:trim]
 
         # save
         targets.append(seq_cov)
@@ -727,8 +737,6 @@ def aggregate_data(storage_path, preload_data, task=None):
 
     label_data = np.stack(label_data, axis=-1)
     label_data = torch.tensor(label_data)
-
-    # TODO: add data tokenization into the precompute pipeline
 
     if preload_data:
         # save the aggregated data
