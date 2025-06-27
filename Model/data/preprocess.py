@@ -293,11 +293,9 @@ def preprocess(
 
         # write all the sequences to BED
         seqs_bed_file = f"{storage_path}/sequences.bed"
-        write_seqs_bed(seqs_bed_file, mseqs, labels=True)
+        seq_stats = write_seqs_bed(seqs_bed_file, mseqs, labels=True, return_stats=True)
 
-        logger.info(
-            "Get\n" + "\n".join(f"{fold_labels[fi]}_num: {len(fold_mseqs[fi])}" for fi in range(num_folds))
-        )
+        logger.info("Get\n" + "\n".join(f"{k}_num: {v}" for k, v in seq_stats.items()))
 
         ################################################################
         # generate labels for the model sequences
@@ -357,8 +355,8 @@ def preprocess(
         stats_dict["kept_bin_num"] = n_window
         stats_dict["time"] = end_time - start_time
 
-        for fi in range(num_folds):
-            stats_dict["%s_seqs" % fold_labels[fi]] = len(fold_mseqs[fi])
+        for k,v in seq_stats.items():
+            stats_dict["%s_seqs" % k] = v
 
         with open(f"{storage_path}/statistics.json", "w") as stats_json_out:
             json.dump(stats_dict, stats_json_out, indent=4)

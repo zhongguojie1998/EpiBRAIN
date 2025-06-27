@@ -10,4 +10,4 @@ preprocess:
   unmap_bed: ./Data/source/umap_k36_t10_l32.bed # if provided, delete reads with too many unmap regions so that they are not included in the datasets
   unmap_threshold: 0.5 # the threshold to filter the unmap regions, if unmap_bed is provided, remove sequences with more than this unmappable bin percentile (should be between 0 and 1)
 
-  blacklist_bed: ./Data/source/blacklist_hg38_all.bed # if provided, set all the reads value from blacklist regions to within the baseline value
+  blacklist_bed: ./Data/source/blacklist.bed # if provided, set all the reads value from blacklist regions to within the baseline value

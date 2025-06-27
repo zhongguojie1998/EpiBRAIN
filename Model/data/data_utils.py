@@ -449,15 +449,24 @@ def annotate_unmap(mseqs, unmap_bed, seq_length, pool_width):
     return seqs_unmap
 
 
-def write_seqs_bed(bed_file, seqs, labels=False):
+def write_seqs_bed(bed_file, seqs, labels=False, return_stats=False):
     """Write sequences to BED file."""
     bed_out = open(bed_file, "w")
+    if return_stats:
+        stats_dict = {}
     for i in range(len(seqs)):
         line = "%s\t%d\t%d" % (seqs[i].chr, seqs[i].start, seqs[i].end)
         if labels:
             line += "\t%s" % seqs[i].label
+        if return_stats:
+            if seqs[i].label not in stats_dict:
+                stats_dict[seqs[i].label] = 0
+            stats_dict[seqs[i].label] += 1
         print(line, file=bed_out)
     bed_out.close()
+
+    if return_stats:
+        return stats_dict
 
 
 def read_blacklist(blacklist_bed, black_buffer=20):
@@ -597,6 +606,7 @@ def get_labels(
         targets.append(seq_cov)
 
     targets = np.array(targets, dtype="float32")
+    assert targets.shape[0] == unmap_mask.shape[0]
 
     # clip extreme values
     if extreme_clip_pct is not None:
