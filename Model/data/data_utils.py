@@ -565,9 +565,6 @@ def get_labels(
         nan_mask = np.isnan(seq_cov_nt)
         seq_cov_nt[nan_mask] = baseline_cov
 
-        # scale
-        seq_cov_nt = scale * seq_cov_nt
-
         # sum pool
         seq_cov = seq_cov_nt.reshape(target_length, pool_width)
 
@@ -630,6 +627,9 @@ def get_labels(
         targets[clip_mask] = clip_soft - 1 + np.sqrt(targets[clip_mask] - clip_soft + 1)
     if clip is not None:
         targets = np.clip(targets, -clip, clip)
+
+    # scale (we follow the Borzoi org implementation, put the scale at the end)
+    targets = scale * targets
 
     # clip float16 min/max
     # targets = np.clip(targets, np.finfo(np.float16).min, np.finfo(np.float16).max).astype("float16")

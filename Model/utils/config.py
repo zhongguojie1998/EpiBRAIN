@@ -31,13 +31,20 @@ def input_check(
 
 def load_config(config_dir: str, config_name="default", overrides: tuple[str, ...] = []):
 
-    with initialize_config_dir(config_dir=os.path.abspath(config_dir), version_base="1.1"):
-        config = compose(
-            config_name=config_name,
-            overrides=list(overrides),
-        )
+    if config_name.endswith(('.yaml', '.yml')):
+        logger.info(f"Loading complete config directly from {config_name}")
+        config = OmegaConf.load(config_name)
         config = OmegaConf.to_container(config, resolve=True)
         config = OmegaConf.create(config)
+    
+    else:
+        with initialize_config_dir(config_dir=os.path.abspath(config_dir), version_base="1.1"):
+            config = compose(
+                config_name=config_name,
+                overrides=list(overrides),
+            )
+            config = OmegaConf.to_container(config, resolve=True)
+            config = OmegaConf.create(config)
 
     # some input check
     input_check(

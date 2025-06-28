@@ -302,7 +302,7 @@ class DNASeqModelTrainer:
         optim_class = eval(f"optim.{self.training_config.optimizer}")
         # Apply differential weight decay using the shared function
         optimizer_grouped_parameters = create_optimizer_grouped_parameters(
-            self.model, self.training_config.add_opt_group
+            self.model, self.training_config.get("add_opt_group", False)
         )
         self.optimizer = optim_class(optimizer_grouped_parameters, **self.training_config.optimizer_params)
 
@@ -676,7 +676,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         # set up deepspeed with weight decay protocol
         optimizer_grouped_parameters = create_optimizer_grouped_parameters(
-            self.model, self.training_config.add_opt_group
+            self.model, self.training_config.get("add_opt_group", False)
         )
         self.model_engine, self.optimizer, _, self.scheduler = deepspeed.initialize(
             model=self.model,

@@ -162,10 +162,12 @@ python Model/train.py -c finetune -x "logging=debug" -x "logging.exp_name=250605
 
 ### Data
 
-1. Data v1: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
-2. Data v2: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, offset `out_peak_non_zero_median`, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
-3. Data v3: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, offset `out_peak_mean`, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
-4. Data v4: Default pipeline, baseline_pct 0.25, scale 1, extreme_clip_pct None, offset None, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300 (New source: MACS2_bw, discard GP-GABA-Glut trials)
+1. Data v1: Default pipeline, sum_stat mean, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
+2. Data v2: Default pipeline, sum_stat mean, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, offset `out_peak_non_zero_median`, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
+3. Data v3: Default pipeline, sum_stat mean, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, offset `out_peak_mean`, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
+4. Data v4: Default pipeline, sum_stat mean, baseline_pct 0.25, scale 1, extreme_clip_pct None, offset None, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300 (New source: MACS2_bw, discard GP-GABA-Glut trials)
+5. Data v5: Default pipeline, sum_stat sum, baseline_pct 0.5, umap_pct 0.5, scale 1, extreme_clip_pct None, offset None, anchor_target None, anchor_pct 0.999, clip_threshold None, softclip_threshold None (New source: bamCoverage_bw, discard GP-GABA-Glut trials, change blacklist (blacklist.bed), add umap (umap_k36_t10_l32.bed))
+6. Data v6: Default pipeline 2.0 (put scale in the very end, after clip), sum_stat mean, baseline_pct 0.5, umap_pct 0.5, scale 2, extreme_clip_pct None, offset None, anchor_target None, anchor_pct 0.999, clip_threshold 128, softclip_threshold 32 (New source: bamCoverage_bw, discard GP-GABA-Glut, SMC trials, change blacklist (blacklist.bed), add umap (umap_k36_t10_l32.bed))
 
 ### Training
 
