@@ -58,7 +58,7 @@ def create_optimizer_grouped_parameters(model, use_groups=True):
                 overall_decay_params.append(param)
 
     optimizer_grouped_parameters = [
-        {"params": overall_decay_params, "weight_decay": 1.0e-6},
+        {"params": overall_decay_params, "weight_decay": 4.0e-8},
         {"params": transformer_decay_params, "weight_decay": 2.0e-8},
         {"params": no_decay_params, "weight_decay": 0.0},
     ]
