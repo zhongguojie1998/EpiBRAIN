@@ -359,6 +359,9 @@ class DNASeqModelTrainer:
 
             # we can only log these info in tensorboard
             if self.logging_config.log_more:
+                # track sqrtsuml2 of gradients and weights
+                weights = []
+                grads = []
                 for tag, value in self.training_model.named_parameters():
                     tag = tag.replace(".", "/")
 
@@ -372,6 +375,7 @@ class DNASeqModelTrainer:
                             log_also=False,
                             write_hist=True,
                         )
+                        weights.append(weight)
                     else:
                         self.logger.warning(
                             f"failed to add weight histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
@@ -389,11 +393,17 @@ class DNASeqModelTrainer:
                                 log_also=False,
                                 write_hist=True,
                             )
+                            grads.append(grad)
                         else:
                             self.logger.warning(
                                 f"failed to add grad histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
                             )
                             nan_detected = True
+                # log total weights and grads
+                weights_norm = np.sqrt(sum(np.linalg.norm(w)**2 for w in weights))
+                grads_norm = np.sqrt(sum(np.linalg.norm(g)**2 for g in grads))
+                self.logger.metric('grads/grads_norm', grads_norm, self.current_step, log_also=False)
+                self.logger.metric('weights/weights_norm', weights_norm, self.current_step, log_also=False)
         else:
             self.logger.info(
                 f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
