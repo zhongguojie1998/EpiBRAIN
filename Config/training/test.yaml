@@ -1,7 +1,0 @@
-defaults:
-  - default
-
-# disable grad compression
-use_grad_compression: False
-
-test_only: True
