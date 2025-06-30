@@ -376,7 +376,7 @@ class DNASeqModelTrainer:
                             write_hist=True,
                         )
                         self.logger.metric(
-                            "weights/weights_norm/" + tag,
+                            "weights_norm/" + tag,
                             np.sqrt(sum(np.linalg.norm(weight)**2)),
                             self.current_step,
                             log_also=False,
@@ -400,7 +400,7 @@ class DNASeqModelTrainer:
                                 write_hist=True,
                             )
                             self.logger.metric(
-                                "grads/grads_norm/" + tag,
+                                "grads_norm/" + tag,
                                 np.sqrt(sum(np.linalg.norm(grad)**2)),
                                 self.current_step,
                                 log_also=False,
@@ -414,8 +414,8 @@ class DNASeqModelTrainer:
                 # log total weights and grads
                 weights_norm = np.sqrt(sum(np.linalg.norm(w)**2 for w in weights))
                 grads_norm = np.sqrt(sum(np.linalg.norm(g)**2 for g in grads))
-                self.logger.metric('grads/grads_norm/total', grads_norm, self.current_step, log_also=False)
-                self.logger.metric('weights/weights_norm/total', weights_norm, self.current_step, log_also=False)
+                self.logger.metric('grads_norm/total', grads_norm, self.current_step, log_also=False)
+                self.logger.metric('weights_norm/total', weights_norm, self.current_step, log_also=False)
         else:
             self.logger.info(
                 f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
