@@ -1,6 +1,0 @@
-defaults:
-  - default
-
-## technical setup
-flashed: False  # whether to use FlashAttention, in finetune setting, we should disable this
-use_autocast: False  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
