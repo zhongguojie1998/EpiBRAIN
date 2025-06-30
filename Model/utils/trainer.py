@@ -377,7 +377,7 @@ class DNASeqModelTrainer:
                         )
                         self.logger.metric(
                             "weights_norm/" + tag,
-                            np.sqrt(sum(np.linalg.norm(weight)**2)),
+                            np.sqrt(np.linalg.norm(weight)**2),
                             self.current_step,
                             log_also=False,
                         )
@@ -401,7 +401,7 @@ class DNASeqModelTrainer:
                             )
                             self.logger.metric(
                                 "grads_norm/" + tag,
-                                np.sqrt(sum(np.linalg.norm(grad)**2)),
+                                np.sqrt(np.linalg.norm(grad)**2),
                                 self.current_step,
                                 log_also=False,
                             )
