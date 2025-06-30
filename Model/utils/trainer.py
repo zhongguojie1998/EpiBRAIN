@@ -375,6 +375,12 @@ class DNASeqModelTrainer:
                             log_also=False,
                             write_hist=True,
                         )
+                        self.logger.metric(
+                            "weights/weights_norm/" + tag,
+                            np.sqrt(sum(np.linalg.norm(weight)**2)),
+                            self.current_step,
+                            log_also=False,
+                        )
                         weights.append(weight)
                     else:
                         self.logger.warning(
@@ -393,6 +399,12 @@ class DNASeqModelTrainer:
                                 log_also=False,
                                 write_hist=True,
                             )
+                            self.logger.metric(
+                                "grads/grads_norm/" + tag,
+                                np.sqrt(sum(np.linalg.norm(grad)**2)),
+                                self.current_step,
+                                log_also=False,
+                            )
                             grads.append(grad)
                         else:
                             self.logger.warning(
@@ -402,8 +414,8 @@ class DNASeqModelTrainer:
                 # log total weights and grads
                 weights_norm = np.sqrt(sum(np.linalg.norm(w)**2 for w in weights))
                 grads_norm = np.sqrt(sum(np.linalg.norm(g)**2 for g in grads))
-                self.logger.metric('grads/grads_norm', grads_norm, self.current_step, log_also=False)
-                self.logger.metric('weights/weights_norm', weights_norm, self.current_step, log_also=False)
+                self.logger.metric('grads/grads_norm/total', grads_norm, self.current_step, log_also=False)
+                self.logger.metric('weights/weights_norm/total', weights_norm, self.current_step, log_also=False)
         else:
             self.logger.info(
                 f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
@@ -509,14 +521,6 @@ class DNASeqModelTrainer:
                 loss.backward()
 
             if should_update:
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.2)
-                self.lr_warmup()
-                self.optimizer.step()
-                self.current_lr = self.optimizer.param_groups[0]["lr"]
-                if self.scheduler_update_freq == "batch":
-                    self.scheduler.step()
-                self.current_step += 1
-
                 # log training status
                 ## in the training loop, we only look at the local loss
                 if self.current_step % self.logging_config.report_every == 0:
@@ -527,6 +531,14 @@ class DNASeqModelTrainer:
 
                     batch_loss = 0
                     batch_count = 0
+
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.15) # 0.15 as in borzoi
+                self.lr_warmup()
+                self.optimizer.step()
+                self.current_lr = self.optimizer.param_groups[0]["lr"]
+                if self.scheduler_update_freq == "batch":
+                    self.scheduler.step()
+                self.current_step += 1
 
                 # here we reset the gradient in the final stage as we may need to log the gradient value
                 self.optimizer.zero_grad()
