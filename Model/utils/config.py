@@ -29,14 +29,17 @@ def input_check(
         exit(1)
 
 
-def load_config(config_dir: str, config_name="default", overrides: tuple[str, ...] = []):
+def load_config(config_dir: str = ".", config_name: str = "default", overrides: tuple[str, ...] = []):
 
     if config_name.endswith(('.yaml', '.yml')):
         logger.info(f"Loading complete config directly from {config_name}")
         config = OmegaConf.load(config_name)
         config = OmegaConf.to_container(config, resolve=True)
         config = OmegaConf.create(config)
-    
+        if overrides:
+            override_cfg = OmegaConf.from_dotlist(list(overrides))
+            config = OmegaConf.merge(config, override_cfg)
+
     else:
         with initialize_config_dir(config_dir=os.path.abspath(config_dir), version_base="1.1"):
             config = compose(
