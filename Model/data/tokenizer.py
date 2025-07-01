@@ -1,7 +1,7 @@
 # Adapted from https://github.com/lucidrains/enformer-pytorch/blob/main/enformer_pytorch/data.py
 
+import random
 from pathlib import Path
-from random import random, randrange
 
 import numpy as np
 import torch
@@ -18,8 +18,8 @@ def cast_list(t):
     return t if isinstance(t, list) else [t]
 
 
-def coin_flip():
-    return random() > 0.5
+def coin_flip(rng):
+    return rng.random() > 0.5
 
 
 # genomic function transforms, define the tokens
@@ -116,7 +116,7 @@ class FastaInterval:
         self.shift_augs = shift_augs
         self.rc_aug = rc_aug
 
-    def __call__(self, chr_name, start, end, return_augs=False, return_rela_idx=False):
+    def __call__(self, chr_name, start, end, return_augs=False, return_rela_idx=False, seed=42):
         """
         Encode DNA sequence. Do seq shift and strand flip data augumentation. Extend the sequence to reach the context length if necessary. Padding if out of range.
 
@@ -126,6 +126,8 @@ class FastaInterval:
         return_augs: whether to also return the aug metadata (the exact augmentation parameter used)
         return_rela_idx: whether to return the relative index of the org seq in the final returned padded data. This is useful in the interpreting stage
         """
+
+        rng = random.Random(seed)
 
         return_dict = {}
 
@@ -147,7 +149,7 @@ class FastaInterval:
             min_shift = min(max(start + min_shift, 0) - start, 0)
             max_shift = max(min(end + max_shift, chromosome_length) - end, 1)
 
-            rand_shift = randrange(min_shift, max_shift)
+            rand_shift = rng.randrange(min_shift, max_shift)
             start += rand_shift
             end += rand_shift
         else:
@@ -181,7 +183,7 @@ class FastaInterval:
 
         seq = ("." * left_padding) + str(chromosome[start:end]) + ("." * right_padding)
 
-        should_rc_aug = self.rc_aug and coin_flip()
+        should_rc_aug = self.rc_aug and coin_flip(rng)
 
         if self.return_seq_indices:
             seq = str_to_seq_indices(seq)

@@ -2,6 +2,7 @@ import copy
 import glob
 import json
 import logging
+import multiprocessing as mp
 import os
 
 import numpy as np
@@ -196,13 +197,17 @@ class DNASeqModelTrainer:
 
         self.logger.info("Loading datasets...")
 
+        self.data_rand_seed = mp.Value("i", 0)
+
         for split in self.data_split:
             try:
                 config = copy.deepcopy(self.dataset_config)
                 if split != "train":
                     # for valid and test, we disable the data augumentation
                     config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
-                self.data_func[split]["dataset"] = GenomeIntervalDataset(split, **config)
+                self.data_func[split]["dataset"] = GenomeIntervalDataset(
+                    split, **config, external_rand_seed=self.data_rand_seed
+                )
 
                 assert self.trial_num == self.data_func[split]["dataset"].label_meta.shape[0]
                 self.label_meta = self.data_func[split]["dataset"].label_meta
@@ -377,7 +382,7 @@ class DNASeqModelTrainer:
                         )
                         self.logger.metric(
                             "weights_norm/" + tag,
-                            np.sqrt(np.linalg.norm(weight)**2),
+                            np.sqrt(np.linalg.norm(weight) ** 2),
                             self.current_step,
                             log_also=False,
                         )
@@ -401,7 +406,7 @@ class DNASeqModelTrainer:
                             )
                             self.logger.metric(
                                 "grads_norm/" + tag,
-                                np.sqrt(np.linalg.norm(grad)**2),
+                                np.sqrt(np.linalg.norm(grad) ** 2),
                                 self.current_step,
                                 log_also=False,
                             )
@@ -412,10 +417,10 @@ class DNASeqModelTrainer:
                             )
                             nan_detected = True
                 # log total weights and grads
-                weights_norm = np.sqrt(sum(np.linalg.norm(w)**2 for w in weights))
-                grads_norm = np.sqrt(sum(np.linalg.norm(g)**2 for g in grads))
-                self.logger.metric('grads_norm/total', grads_norm, self.current_step, log_also=False)
-                self.logger.metric('weights_norm/total', weights_norm, self.current_step, log_also=False)
+                weights_norm = np.sqrt(sum(np.linalg.norm(w) ** 2 for w in weights))
+                grads_norm = np.sqrt(sum(np.linalg.norm(g) ** 2 for g in grads))
+                self.logger.metric("grads_norm/total", grads_norm, self.current_step, log_also=False)
+                self.logger.metric("weights_norm/total", weights_norm, self.current_step, log_also=False)
         else:
             self.logger.info(
                 f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
@@ -424,6 +429,15 @@ class DNASeqModelTrainer:
         if should_exit_on_nan and nan_detected:
             self.logger.error("NaN detected in model weight/gradients. Exiting after this step.")
             exit(1)
+
+    def _diagnose_extra_log(self, ind):
+        ## output the sample index
+        self.logger.debug(
+            f"batch id for step {self.current_step} is {','.join([str(int(i)) for i in ind])}",
+            diagnose=self.logging_config.diagnose,
+        )
+        if self.current_step % self.logging_config.get("diagnose_save_step", 1) == 0:
+            self.save_checkpoint(f"diag_step_{self.current_step}")
 
     def load_checkpoint(self):
 
@@ -532,25 +546,20 @@ class DNASeqModelTrainer:
                     batch_loss = 0
                     batch_count = 0
 
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.15) # 0.15 as in borzoi
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.15)  # 0.15 as in borzoi
                 self.lr_warmup()
                 self.optimizer.step()
                 self.current_lr = self.optimizer.param_groups[0]["lr"]
                 if self.scheduler_update_freq == "batch":
                     self.scheduler.step()
-                self.current_step += 1
-
                 # here we reset the gradient in the final stage as we may need to log the gradient value
                 self.optimizer.zero_grad()
 
             if self.logging_config.diagnose:
-                ## output the sample index
-                self.logger.debug(
-                    f"batch id for step {self.current_step} is {','.join([str(int(i)) for i in ind])}",
-                    diagnose=self.logging_config.diagnose,
-                )
-                if self.current_step % self.logging_config.get("diagnose_save_step", 1) == 0:
-                    self.save_checkpoint(f"diag_step_{self.current_step}")
+                self._diagnose_extra_log(ind)
+
+            if should_update:
+                self.current_step += 1
 
         self.current_epoch += 1
 
@@ -815,13 +824,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             self.model_engine.step()
 
             if self.logging_config.diagnose:
-                ## output the sample index
-                self.logger.debug(
-                    f"batch id for step {self.current_step} is {','.join([str(int(i)) for i in ind])}",
-                    diagnose=self.logging_config.diagnose,
-                )
-                if self.current_step % self.logging_config.get("diagnose_save_step", 1) == 0:
-                    self.save_checkpoint(f"diag_step_{self.current_step}")
+                self._diagnose_extra_log(ind)
 
         self.current_epoch += 1
 
@@ -866,8 +869,10 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
             for epoch in range(trainer.current_epoch, myconfig.training.total_epoch):
                 trainer.logger.info(f"Current Epoch: {trainer.current_epoch + 1}")
 
+                # set up random seed
+                trainer.data_rand_seed.value = trainer.current_epoch
                 for split in trainer.data_split:
-                    trainer.data_func[split]["data_sampler"].set_epoch(epoch)
+                    trainer.data_func[split]["data_sampler"].set_epoch(trainer.current_epoch)
 
                 if trainer.data_func["train"]["data_loader"] is not None:
                     with timer(f"[Train] [Epoch {trainer.current_epoch + 1}]", logger, rank, world_size):
@@ -925,6 +930,8 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                 trainer.save_checkpoint(save_name="last_epoch")
 
         else:
+            trainer.data_rand_seed.value = trainer.current_epoch
+            
             if trainer.data_func["train"]["data_loader"] is not None:
                 with timer(f"[Train/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
                     trainer.infer_step(log_loss=False, log_prefix="Train", save_pred=True)

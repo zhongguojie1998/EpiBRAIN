@@ -1,10 +1,11 @@
 import math
+import multiprocessing as mp
 
 import pandas as pd
 import torch
 import torch.distributed as dist
 from data.tokenizer import FastaInterval
-from torch.utils.data import Dataset, Sampler
+from torch.utils.data import Dataset, Sampler, get_worker_info
 
 
 class GenomeIntervalDataset(Dataset):
@@ -19,12 +20,16 @@ class GenomeIntervalDataset(Dataset):
         shift_augs=None,
         rc_aug=False,
         return_augs=True,
+        return_token_dict=False,
+        external_rand_seed=mp.Value("i", 0),
         **kwargs,
     ):
         super().__init__()
 
         self.storage_path = storage_path
         self.context_length = context_length
+
+        assert return_augs if rc_aug else True, "If you want to use reverse complement augmentation, you must also return the augmentation information"
 
         # load meta data
         df = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
@@ -46,6 +51,9 @@ class GenomeIntervalDataset(Dataset):
             rc_aug=rc_aug,
         )
         self.return_augs = return_augs
+        self.return_token_dict = return_token_dict
+
+        self.external_rand_seed = external_rand_seed
 
     def __len__(self):
         return len(self.df)
@@ -58,7 +66,9 @@ class GenomeIntervalDataset(Dataset):
         else:
             label = torch.load(f"{self.storage_path}/data/{chrom}_{start}_{end}.pt")["label"]
 
-        token_dict = self.tokenizer(chrom, start, end, return_augs=self.return_augs)
+        token_dict = self.tokenizer(
+            chrom, start, end, return_augs=self.return_augs, seed=self.external_rand_seed.value + ind
+        )
         one_hot = token_dict["one_hot"]
 
         if self.return_augs:
@@ -71,7 +81,7 @@ class GenomeIntervalDataset(Dataset):
                 f"Context length not match (expecting {self.context_length}, {one_hot.shape[0]} observed). Chr {chrom}, start {start}, end {end}, aug shift {token_dict.get('rand_shift')}"
             )
 
-        return one_hot, label, ind
+        return one_hot if not self.return_token_dict else token_dict, label, ind
 
 
 class DumySampler:
