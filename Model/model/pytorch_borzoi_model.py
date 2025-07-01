@@ -236,12 +236,12 @@ class Borzoi(PreTrainedModel):
         self.conv_dna.apply(lecun_normal_init)
         self.res_tower.apply(lecun_normal_init)
         self.unet1.apply(lecun_normal_init)
-        self.horizontal_conv0.apply(lecun_normal_init)
-        self.horizontal_conv1.apply(lecun_normal_init)
         if self.upsample_layer_num >= 1:
+            self.horizontal_conv1.apply(lecun_normal_init)
             self.upsampling_unet1.apply(lecun_normal_init)
             self.separable1.apply(lecun_normal_init)
         if self.upsample_layer_num >= 2:
+            self.horizontal_conv0.apply(lecun_normal_init)
             self.upsampling_unet0.apply(lecun_normal_init)
             self.separable0.apply(lecun_normal_init)
         self.final_joined_convs.apply(lecun_normal_init)
@@ -295,15 +295,15 @@ class Borzoi(PreTrainedModel):
         x_unet0 = self.res_tower(x)  # resolution 32
         x_unet1 = self.unet1(x_unet0)  # resolution 64
         x = self._max_pool(x_unet1)  # resolution 128
-        x_unet1 = self.horizontal_conv1(x_unet1)
-        x_unet0 = self.horizontal_conv0(x_unet0)
         x = self.transformer(x.permute(0, 2, 1))
         x = x.permute(0, 2, 1)
         if self.upsample_layer_num >= 1:
+            x_unet1 = self.horizontal_conv1(x_unet1)
             x = self.upsampling_unet1(x)
             x += x_unet1
             x = self.separable1(x)
         if self.upsample_layer_num >= 2:
+            x_unet0 = self.horizontal_conv0(x_unet0)
             x = self.upsampling_unet0(x)
             x += x_unet0
             x = self.separable0(x)
