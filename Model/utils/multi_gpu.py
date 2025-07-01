@@ -3,6 +3,7 @@
 import os
 import socket
 
+import torch
 import torch.distributed as dist
 from utils.logging import LOGGER_PREFIX, LazyLogger
 
@@ -25,14 +26,24 @@ def find_free_port(orig_port: int) -> int:
     return port
 
 
-def setup(rank, world_size=1, MASTER_ADDR="localhost", MASTER_PORT=12320):
+def setup(
+    rank,
+    world_size=1,
+    MASTER_ADDR="localhost",
+    MASTER_PORT=12320,
+    backend="nccl",
+    local_rank=None,
+):
 
     os.environ["MASTER_ADDR"] = MASTER_ADDR
     os.environ["MASTER_PORT"] = str(MASTER_PORT)
 
     # initialize the process group
     if world_size > 1:
-        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+        if backend == "nccl":
+            torch.cuda.set_device(local_rank if local_rank is not None else rank)
+
+        dist.init_process_group(backend, rank=rank, world_size=world_size)
 
 
 def torchrun_setup():
