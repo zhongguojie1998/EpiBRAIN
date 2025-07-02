@@ -144,9 +144,6 @@ class Borzoi(PreTrainedModel):
             nn.MaxPool1d(kernel_size=2, padding=0),
             ConvBlock(in_channels=1280, out_channels=config.dim, kernel_size=5),
         )
-        self.horizontal_conv0, self.horizontal_conv1 = ConvBlock(
-            in_channels=1280, out_channels=config.dim, kernel_size=1
-        ), ConvBlock(in_channels=config.dim, out_channels=config.dim, kernel_size=1)
 
         ## transformer layers
         transformer = []
@@ -194,6 +191,7 @@ class Borzoi(PreTrainedModel):
         # upsample convolutional layers
         self.upsample_layer_num = config.upsample_layer_num
         if config.upsample_layer_num >= 1:
+            self.horizontal_conv1 = ConvBlock(in_channels=config.dim, out_channels=config.dim, kernel_size=1)
             self.upsampling_unet1 = nn.Sequential(
                 ConvBlock(in_channels=config.dim, out_channels=config.dim, kernel_size=1),
                 torch.nn.Upsample(scale_factor=2),
@@ -202,6 +200,7 @@ class Borzoi(PreTrainedModel):
                 in_channels=config.dim, out_channels=config.dim, kernel_size=3, conv_type="separable"
             )
         if config.upsample_layer_num >= 2:
+            self.horizontal_conv0 = ConvBlock(in_channels=1280, out_channels=config.dim, kernel_size=1)
             self.upsampling_unet0 = nn.Sequential(
                 ConvBlock(in_channels=config.dim, out_channels=config.dim, kernel_size=1),
                 torch.nn.Upsample(scale_factor=2),

@@ -1,5 +1,5 @@
 defaults:
-  - data: with_umap
+  - data: default
   - model: default
   - training: default
   - logging: default

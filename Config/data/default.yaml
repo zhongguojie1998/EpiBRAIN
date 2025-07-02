@@ -1,4 +1,4 @@
-storage_path: ./Data/enformer_style_split_data_v4 # where to store the data embedding, now only support precomputed version
+storage_path: ./Data/enformer_style_split_data_v7 # where to store the data embedding, now only support precomputed version
 refer_genom: ./Data/source/hg38/hg38.fa # path to the reference genome
 context_length: 196_608  # The length of the DNA serving as one sample. For enformer, the number is 196,608
 preload_data: True  # whether to preload the data into memory, if True, will load the data into memory, if False, will load the data from disk when needed
@@ -10,13 +10,13 @@ used_dataset: # the dataset to load in the training process
 preprocess:
   storage_path: ${data.storage_path}
   refer_genom: ${data.refer_genom}
-  trial_summary_path: ./Data/data_config/data_v4.csv # path to the trials (label), only support bigwig files
-  gap_bed: ./Data/source/hg38_unmap_macro.bed # if provided, delete all the reads from gap regions so that they are not included in the datasets
+  trial_summary_path: ./Data/data_config/data_v7.csv # path to the trials (label), only support bigwig files
+  gap_bed: ./Data/source/merged_blacklist_gaps.bed # if provided, delete all the reads from gap regions so that they are not included in the datasets
 
-  unmap_bed: null # if provided, delete reads with too many unmap regions so that they are not included in the datasets
+  unmap_bed: ./Data/source/umap_k36_t10_l32.bed # if provided, delete reads with too many unmap regions so that they are not included in the datasets
   unmap_threshold: 0.5 # the threshold to filter the unmap regions, if unmap_bed is provided, remove sequences with more than this unmappable bin percentile (should be between 0 and 1)
 
-  blacklist_bed: ./Data/source/hg38-blacklist.v2.bed # if provided, set all the reads value from blacklist regions to within the baseline value
+  blacklist_bed: ./Data/source/blacklist.bed # if provided, set all the reads value from blacklist regions to within the baseline value
 
   break_threshold: 1_179_648 # the threshold to break the long contig into smaller pieces to preprocess, for enformer, the number is 1,179,648 (196,608 * 6). This is to speed up the preprocessing
 
