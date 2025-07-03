@@ -40,8 +40,8 @@ def poisson_multinomial(
         position_weights = position_weights.unsqueeze(0).unsqueeze(-1)
     
     # transform to float32 to ensure multinomial loss precision
-    y_true = y_true.to(torch.float32) * position_weights
-    y_pred = y_pred.to(torch.float32) * position_weights
+    y_true = y_true.to(torch.float32) * position_weights / torch.mean(position_weights)
+    y_pred = y_pred.to(torch.float32) * position_weights / torch.mean(position_weights)
 
     # sum across lengths
     m_true = torch.mean(y_true, dim=-2)  # B x T
@@ -49,7 +49,6 @@ def poisson_multinomial(
 
     # total count poisson loss, mean across targets
     poisson_term = poisson(m_pred, m_true, eps=eps)  # B x T
-    poisson_term *= y_true.shape[-2] / torch.sum(position_weights) # scale by number of positions and sum of weights
     # note this grad of the loss is essentially same as previous loss 
     # that we weighted sum y_true and y_pred, then average across targets
     # but it will result in a constant term that is not dependent on y_pred 
@@ -59,10 +58,10 @@ def poisson_multinomial(
     y_pred += eps
 
     # normalize to sum to one, then log transform pred
-    pl_pred = torch.log(y_pred) - torch.log(m_pred).unsqueeze(-2) - torch.log(torch.tensor(y_pred.shape[-2]))  # B x L x T
-    pl_true = y_true / (m_true.unsqueeze(-2) * y_true.shape[-2] + eps)  # B x L x T
+    pl_pred = torch.log(y_pred) - torch.log(y_pred.sum(dim=-2, keepdim=True))  # B x L x T
+    p_true = y_true / y_true.sum(dim=-2, keepdim=True)  # B x L x T
     # multinomial loss
-    multinomial_dot = -pl_true * pl_pred  # B x L x T
+    multinomial_dot = -p_true * pl_pred  # B x L x T
     multinomial_term = torch.sum(multinomial_dot, dim=-2)  # B x T
     multinomial_term /= torch.sum(position_weights)
 
