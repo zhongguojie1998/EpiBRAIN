@@ -60,7 +60,7 @@ def poisson_multinomial(
 
     # normalize to sum to one, then log transform pred
     pl_pred = torch.log(y_pred) - torch.log(m_pred).unsqueeze(-2) - torch.log(torch.tensor(y_pred.shape[-2]))  # B x L x T
-    pl_true = y_true / m_true.unsqueeze(-2) / y_true.shape[-2]  # B x L x T
+    pl_true = y_true / (m_true.unsqueeze(-2) * y_true.shape[-2] + eps)  # B x L x T
     # multinomial loss
     multinomial_dot = -pl_true * pl_pred  # B x L x T
     multinomial_term = torch.sum(multinomial_dot, dim=-2)  # B x T
