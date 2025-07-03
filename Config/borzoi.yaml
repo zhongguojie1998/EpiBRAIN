@@ -1,0 +1,5 @@
+defaults:
+  - data: borzoi
+  - model: borzoi
+  - training: borzoi
+  - logging: default

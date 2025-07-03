@@ -597,7 +597,8 @@ def get_labels(
 
         # crop to final central size
         trim = (kept_num_after_crop - target_length) // 2
-        seq_cov = seq_cov[-trim:trim]
+        if trim < 0:
+            seq_cov = seq_cov[-trim:trim]
 
         # save
         targets.append(seq_cov)

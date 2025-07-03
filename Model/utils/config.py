@@ -62,10 +62,6 @@ def load_config(config_dir: str = ".", config_name: str = "default", overrides: 
         "Predict head (`model.use_head`) should be registered (`model.output_heads`)",
         check="within",
     )
-    if config.model.model_name == "borzoi":
-        input_check(
-            config.data.preprocess.window_size, 128, "Enformer model only support 128 bp resolution", check="equal"
-        )
     if config.training.test_only:
         input_check(
             config.training.get("load_checkpoint", None),

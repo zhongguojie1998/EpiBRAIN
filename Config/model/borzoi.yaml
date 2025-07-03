@@ -1,0 +1,24 @@
+
+model_name: borzoi
+
+## technical setup
+flashed: True  # whether to use FlashAttention
+use_autocast: True  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
+
+## model hyperparameter
+dim: 1536  # hidden layer dim for conv layer output/transformer input
+depth: 8  # transformer layer depth
+heads: 8  # atten head num
+attn_dropout: 0.05  # atten dropout
+attn_dim_key: 64  # set up atten, not used in FlashAttention
+attn_dim_value: 192  # set up atten, not used in FlashAttention
+pos_dropout: 0.01  # set up atten, not used in FlashAttention
+dropout_rate: 0.2  # transformer linear layer dp rate
+upsample_layer_num: 2  # how many upsample layers to use, deciding final resolution, 0 corresponding to 128 bp resolution, 1 -> 64, 2 -> 32
+
+return_center_bins_only: True
+bins_to_return: 16320 
+
+output_heads: # set up the prediction head name and trial number
+  mouse: 1594 
+use_head: mouse # the head use for forward pass

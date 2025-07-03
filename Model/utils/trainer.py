@@ -546,7 +546,9 @@ class DNASeqModelTrainer:
                     batch_loss = 0
                     batch_count = 0
 
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 0.15)  # 0.15 as in borzoi
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.training_config.clip_grad_norm
+                )  # 0.15 as in borzoi
                 self.lr_warmup()
                 self.optimizer.step()
                 self.current_lr = self.optimizer.param_groups[0]["lr"]

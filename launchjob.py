@@ -52,6 +52,11 @@ def validate_launch_method(ctx, param, value):
     multiple=True,
     help="Hydra override string(s), e.g. 'model=no_flashatten' (change whole config profile), or '-x training=single_gpu -x training.gpu_id=3' (change profile, then change specific parameter)",
 )
+@click.option(
+    "--bypass_data",
+    is_flag=True,
+    help="If we have already processed the data and want to bypass the data processing step",
+)
 @click.option("--nproc-per-node", default=4, help="GPU available per machine")
 @click.option("--master-port", default=1234, help="The master node port")
 def launch_distributed(
@@ -61,6 +66,7 @@ def launch_distributed(
     launch_method: str,
     load_checkpoint: str,
     override_config: list,
+    bypass_data: bool,
     nproc_per_node: int,
     master_port: int,
 ):
@@ -121,10 +127,12 @@ def launch_distributed(
                 "-x",
                 f"logging.overwrite_log_file=False",
             ]
-        
+
         if override_config:
             for change in override_config:
                 cmd = cmd + ["-x"] + [change]
+        if bypass_data:
+            cmd += ["--bypass_data"]
 
         full_cmd = f"""
         cd {WORK_PATH}

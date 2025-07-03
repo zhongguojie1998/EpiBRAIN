@@ -63,8 +63,13 @@ logger = LazyLogger(f"{LOGGER_PREFIX}-Main")
     is_flag=True,
     help="If we are only processing the data",
 )
+@click.option(
+    "--bypass_data",
+    is_flag=True,
+    help="If we have already processed the data and want to bypass the data processing step",
+)
 @record
-def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_data):
+def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_data, bypass_data):
 
     if torchrun and deepspeed:
         raise ValueError("Cannot both enable torchrun and deepspeed")
@@ -149,12 +154,13 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
         )
 
     # get data split and labels
-    try:
-        preprocess(**myconfig.data.preprocess)
-    except Exception as e:
-        logger.error("Please check preprocess setting")
-        logger.exception(e)
-        exit(1)
+    if not bypass_data:
+        try:
+            preprocess(**myconfig.data.preprocess)
+        except Exception as e:
+            logger.error("Please check preprocess setting")
+            logger.exception(e)
+            exit(1)
     if only_data:
         exit(0)
 
