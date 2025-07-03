@@ -38,28 +38,31 @@ def poisson_multinomial(
         position_weights = torch.exp(-((positions / sigma) ** weight_exp))
         position_weights /= torch.max(position_weights)
         position_weights = position_weights.unsqueeze(0).unsqueeze(-1)
-
-    y_true = y_true * position_weights
-    y_pred = y_pred * position_weights
+    
+    # transform to float32 to ensure multinomial loss precision
+    y_true = y_true.to(torch.float32) * position_weights
+    y_pred = y_pred.to(torch.float32) * position_weights
 
     # sum across lengths
-    s_true = torch.sum(y_true, dim=-2)  # B x T
-    s_pred = torch.sum(y_pred, dim=-2)  # B x T
+    m_true = torch.mean(y_true, dim=-2)  # B x T
+    m_pred = torch.mean(y_pred, dim=-2)  # B x T
 
     # total count poisson loss, mean across targets
-    poisson_term = poisson(s_pred, s_true, eps=eps)  # B x T
-    poisson_term /= torch.sum(position_weights)
+    poisson_term = poisson(m_pred, m_true, eps=eps)  # B x T
+    poisson_term *= y_true.shape[-2] / torch.sum(position_weights) # scale by number of positions and sum of weights
+    # note this grad of the loss is essentially same as previous loss 
+    # that we weighted sum y_true and y_pred, then average across targets
+    # but it will result in a constant term that is not dependent on y_pred 
 
     # add eps to protect against tiny values
     y_true += eps
     y_pred += eps
 
-    # normalize to sum to one
-    p_pred = y_pred / s_pred.unsqueeze(-2)  # B x L x T
-
+    # normalize to sum to one, then log transform pred
+    pl_pred = torch.log(y_pred) - torch.log(m_pred).unsqueeze(-2) - torch.log(torch.tensor(y_pred.shape[-2]))  # B x L x T
+    pl_true = y_true / m_true.unsqueeze(-2) / y_true.shape[-2]  # B x L x T
     # multinomial loss
-    pl_pred = torch.log(p_pred)  # B x L x T
-    multinomial_dot = -y_true * pl_pred  # B x L x T
+    multinomial_dot = -pl_true * pl_pred  # B x L x T
     multinomial_term = torch.sum(multinomial_dot, dim=-2)  # B x T
     multinomial_term /= torch.sum(position_weights)
 
