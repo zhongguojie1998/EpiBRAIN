@@ -52,7 +52,9 @@ PARA_CHECK = [
 ]
 
 
-def get_trail_value_mp(trial, storage_path, mseqs, blacklist_bed, window_size, n_window, umap_npy_path,restart=False):
+def get_trail_value_mp(
+    trial, storage_path, mseqs, blacklist_bed, window_size, n_window, umap_npy_path, restart=False
+):
 
     exp = trial["exp"]
     genome_cov_file = trial["file"]
@@ -130,6 +132,7 @@ def preprocess(
     num_worker=16,
     force_restart=False,
     preload_data=True,
+    precision="float32",
 ):
     #################################################
     # basic settings
@@ -355,7 +358,7 @@ def preprocess(
         stats_dict["kept_bin_num"] = n_window
         stats_dict["time"] = end_time - start_time
 
-        for k,v in seq_stats.items():
+        for k, v in seq_stats.items():
             stats_dict["%s_seqs" % k] = v
 
         with open(f"{storage_path}/statistics.json", "w") as stats_json_out:
@@ -403,7 +406,7 @@ def preprocess(
         if force_restart or not os.path.exists(f"{storage_path}/data/all_label.pt"):
             logger.info("Start to aggregate data")
             data = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
-            aggregate_data(storage_path=storage_path, preload_data=True, task=data)
+            aggregate_data(storage_path=storage_path, preload_data=True, task=data, precision=precision)
             logger.info("Finish aggregation")
     else:
         data = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
@@ -413,5 +416,7 @@ def preprocess(
 
         if data["generate"].any():
             logger.info("Start to aggregate data")
-            aggregate_data(storage_path=storage_path, preload_data=False, task=data[data["generate"]])
+            aggregate_data(
+                storage_path=storage_path, preload_data=False, task=data[data["generate"]], precision=precision
+            )
             logger.info("Finish aggregation")

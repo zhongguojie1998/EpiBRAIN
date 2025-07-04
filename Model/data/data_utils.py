@@ -724,7 +724,7 @@ class CovFace:
             self.cov_open.close()
 
 
-def aggregate_data(storage_path, preload_data, task=None):
+def aggregate_data(storage_path, preload_data, task=None, precision="float32"):
     """Aggregate the label data from multiple files into a single file."""
 
     separate_label_file = [
@@ -747,7 +747,12 @@ def aggregate_data(storage_path, preload_data, task=None):
     label_meta.to_csv(f"{storage_path}/label_meta.csv", index=True)
 
     label_data = np.stack(label_data, axis=-1)
-    label_data = torch.tensor(label_data)
+    try:
+        precision = getattr(torch, precision)
+    except AttributeError:
+        logger.warning(f"Specified precision {precision} is not accept, save as float32")
+        precision = getattr(torch, "float32")
+    label_data = torch.tensor(label_data, dtype=precision)
 
     if preload_data:
         # save the aggregated data
@@ -760,4 +765,4 @@ def aggregate_data(storage_path, preload_data, task=None):
         # save per data point separately
         for i in task.index:
             chrom, start, end = task.iloc[i, [0, 1, 2]]
-            torch.save({"label": label_data[i]}, f"{storage_path}/data/{chrom}_{start}_{end}.pt")
+            torch.save(label_data[i], f"{storage_path}/data/{chrom}_{start}_{end}.pt")

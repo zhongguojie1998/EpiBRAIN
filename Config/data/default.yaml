@@ -37,6 +37,7 @@ preprocess:
   preload_data: ${data.preload_data}
 
   force_restart: False # whether to restart the preprocessing, if True, will delete the existing processed data and start from scratch
+  precision: float32  # save data at this precision
 
 dataset:
   storage_path: ${data.storage_path}
