@@ -1,6 +1,6 @@
 # full precision Model Setup, no flashatten and autocast
 defaults:
-  - default
+  - flashzoi_enformer_style
 
 model_name: johahi/borzoi-replicate-0 # 'johahi/borzoi-replicate-[0-3]'
 

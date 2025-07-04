@@ -33,7 +33,7 @@ seed: 42  # random seed for reproduciblility
 
 loss: poisson_mn # the name of the loss function (now support: poisson, poisson_mn)
 loss_params:
-  total_weight: 0.2
+  total_weight: 1
   weight_range: 1
   eps: 1e-7
   reduction: mean

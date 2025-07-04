@@ -1,0 +1,16 @@
+defaults:
+  - default
+
+storage_path: ./Data/borzoi_style_split_data_v1 # where to store the data embedding, now only support precomputed version
+context_length: 524_288
+
+preprocess:
+
+  break_threshold: 3_145_728
+
+  stride_train: 174_775 # ~ 524288 /3 + 13 to shift the bin
+  stride_test: 174_775 
+
+  window_size: 32
+  n_window: 16320
+

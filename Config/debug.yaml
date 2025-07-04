@@ -1,5 +1,5 @@
 defaults:
   - data: debug
-  - model: default
+  - model: flashzoi_enformer_style
   - training: debug
   - logging: debug

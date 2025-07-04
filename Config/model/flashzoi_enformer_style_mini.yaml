@@ -1,5 +1,5 @@
 defaults:
-  - default
+  - flashzoi_enformer_style
 
 model_name: flashzoi_enformer_style_mini
 
@@ -19,4 +19,5 @@ final_joined_conv_param:
   out_channels: 912  # number of output channels for the final conv layer
 
 output_heads: # set up the prediction head name and trial number
-  human: 6 
+  human: 6
+use_head: human # the head use for forward pass

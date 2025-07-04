@@ -1,0 +1,11 @@
+defaults:
+  - flashzoi_enformer_style_mini
+
+model_name: flashzoi_mini
+
+crop_param:
+  bins_to_return: 16320  # how many (central) bins used to calculate loss, same as in enformer (114,688 bp aggregated into 128 bp bins)
+
+upsample_param:
+  upsample_layer_num: 2  # how many upsample layers to use, deciding final resolution, 0 corresponding to 128 bp resolution, 1 -> 64, 2 -> 32
+
