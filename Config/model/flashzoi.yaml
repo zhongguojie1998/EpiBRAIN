@@ -1,6 +1,5 @@
-# default Model Setup
 
-model_name: flashzoi_enformer_style
+model_name: flashzoi
 
 ## technical setup
 flashed: True  # whether to use FlashAttention
@@ -31,10 +30,10 @@ transformer_param:
 
 crop_param:
   return_center_bins_only: True # whether to only use the central bins for loss calculation
-  bins_to_return: 896  # how many (central) bins used to calculate loss, same as in enformer (114,688 bp aggregated into 128 bp bins)
+  bins_to_return: 16320  # how many (central) bins used to calculate loss, same as in enformer (114,688 bp aggregated into 128 bp bins)
 
 upsample_param:
-  upsample_layer_num: 0  # how many upsample layers to use, deciding final resolution, 0 corresponding to 128 bp resolution, 1 -> 64, 2 -> 32
+  upsample_layer_num: 2  # how many upsample layers to use, deciding final resolution, 0 corresponding to 128 bp resolution, 1 -> 64, 2 -> 32
   kernel_size: 3
 
 final_joined_conv_param:
@@ -42,12 +41,5 @@ final_joined_conv_param:
   dropout: 0.1  # dropout rate for the final conv layer
 
 output_heads: # set up the prediction head name and trial number
-  human: 87 
-use_head: human # the head use for forward pass
-
-
-
-
-
-
-
+  mouse: 1594 
+use_head: mouse # the head use for forward pass

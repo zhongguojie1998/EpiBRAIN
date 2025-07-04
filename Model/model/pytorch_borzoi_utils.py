@@ -21,8 +21,8 @@
 # SOFTWARE.
 # =========================================================================
 
+import numpy as np
 import torch.nn as nn
-
 
 
 class Residual(nn.Module):
@@ -55,30 +55,29 @@ class TargetLengthCrop(nn.Module):
 
         return x[:, -trim:trim]
 
+def compute_channel_sizes(
+    filters_init: int,
+    filters_end: int = None,
+    filters_mult: float = None,
+    divisible_by: int = 1,
+    depth: int = 1,
+) -> list[int]:
 
-def undo_squashed_scale(x, clip_soft=384, track_transform=3 / 4, track_scale=0.01, old_transform=True):
-    """
-    Reverses the squashed scaling transformation applied to the output profiles.
+    def _round(x: float) -> int:
+        return int(np.round(x / divisible_by) * divisible_by)
 
-    Args:
-        x (torch.Tensor): The input tensor to be unsquashed.
-        clip_soft (float, optional): The soft clipping value. Defaults to 384.
-        track_transform (float, optional): The transformation factor. Defaults to 3/4.
-        track_scale (float, optional): The scale factor. Defaults to 0.01.
+    if filters_mult is None:
+        if filters_end is None:
+            raise ValueError("Either filters_end or filters_mult must be provided.")
+        if depth < 2:
+            filters_mult = 1.0
+        else:
+            filters_mult = np.exp(np.log(filters_end / filters_init) / (depth - 1))
 
-    Returns:
-        torch.Tensor: The unsquashed tensor.
-    """
-    x = x.clone()  # IMPORTANT BECAUSE OF IMPLACE OPERATIONS TO FOLLOW?
+    sizes = []
+    current = float(filters_init)
+    for _ in range(depth):
+        sizes.append(_round(current))
+        current *= filters_mult
 
-    if old_transform:
-        x = x / track_scale
-        unclip_mask = x > clip_soft
-        x[unclip_mask] = (x[unclip_mask] - clip_soft) ** 2 + clip_soft
-        x = x ** (1.0 / track_transform)
-    else:
-        unclip_mask = x > clip_soft
-        x[unclip_mask] = (x[unclip_mask] - clip_soft + 1) ** 2 + clip_soft - 1
-        x = (x + 1) ** (1.0 / track_transform) - 1
-        x = x / track_scale
-    return x
+    return sizes

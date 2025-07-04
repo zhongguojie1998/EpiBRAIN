@@ -51,7 +51,7 @@ def load_config(config_dir: str = ".", config_name: str = "default", overrides: 
 
     # some input check
     input_check(
-        config.model.bins_to_return,
+        config.model.crop_param.bins_to_return,
         config.data.preprocess.n_window,
         "`model.bins_to_return` should be same as `data.preprocess.n_window`",
         check="equal",

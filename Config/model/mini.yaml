@@ -1,0 +1,22 @@
+defaults:
+  - default
+
+model_name: flashzoi_enformer_style_mini
+
+conv_dna_param:  # parameters for the convolutional DNA layer
+  out_channels: 320  # number of output channels for the conv layer
+  kernel_size: 11  # kernel size for the conv layer
+
+res_tower_param:  # parameters for the residual tower
+  filters_init: 384 # initial number of output channels
+  filters_end: 768 # final number of output channels
+  divisible_by: 16 
+
+transformer_param:
+  heads: 4  # atten head num
+
+final_joined_conv_param:
+  out_channels: 912  # number of output channels for the final conv layer
+
+output_heads: # set up the prediction head name and trial number
+  human: 6 

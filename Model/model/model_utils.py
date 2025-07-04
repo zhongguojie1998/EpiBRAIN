@@ -51,7 +51,7 @@ def setup_model(config, logger):
     training_config = config.training
 
     # get our model skeleton
-    if "borzoi" in model_config.model_name:
+    if "borzoi" in model_config.model_name or "flashzoi" in model_config.model_name:
         model_cls = Borzoi
     else:
         logger.error(f"Model {model_config.model_name} is not implemented yet.")
@@ -61,7 +61,7 @@ def setup_model(config, logger):
 
     # initialize the model
     if training_config.load_checkpoint is None:
-        model._init_weights()
+        model.init_weights()
 
     # in case we need to load the pretrained model and only want to load part of them
     partial_load = model_config.get("partial_load", None)
