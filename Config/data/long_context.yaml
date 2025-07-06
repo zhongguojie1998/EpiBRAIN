@@ -1,10 +1,12 @@
 defaults:
   - default
 
-storage_path: ./Data/borzoi_style_split_data_v1 # where to store the data embedding, now only support precomputed version
+storage_path: ./Data/borzoi_style_split_data_v2 # where to store the data embedding, now only support precomputed version
 context_length: 524_288
 
 preprocess:
+
+  trial_summary_path: ./Data/data_config/data_v9.csv # path to the trials (label), only support bigwig files
 
   break_threshold: 3_145_728
 
