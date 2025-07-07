@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import os
 import warnings
 
@@ -15,13 +16,34 @@ from tqdm import tqdm
 base_cmap = plt.get_cmap("tab20")
 
 
+def calculate_trial_metrics(trial_data):
+    """
+    Calculate metrics for a single trial.
+
+    Args:
+        trial_data: Tuple of (trial_name, trial_label, trial_pred)
+
+    Returns:
+        Tuple of (trial_name, (mse, mae, pearsonr_val))
+    """
+    trial_name, trial_label, trial_pred = trial_data
+
+    mse = mean_squared_error(trial_label, trial_pred)
+    mae = mean_absolute_error(trial_label, trial_pred)
+    pearsonr_val = pearsonr(trial_label, trial_pred)[0]
+
+    return trial_name, (mse, mae, pearsonr_val)
+
+
 @click.command()
 @click.option("-e", "--exp_name", required=True, type=str)
 @click.option("--chk", required=True, type=str)
 @click.option("-s", "--splits", multiple=True, type=str, default=["Test"])
 @click.option("--res_base", required=True, default="./Res")
 @click.option("--data_base", required=True, default="./Data/enformer_style_split_data_v1")
-def main(exp_name, chk, splits, res_base, data_base):
+@click.option("--use_mp", is_flag=True, default=False, help="Enable multiprocessing for metric calculation")
+@click.option("--n_processes", type=int, default=None, help="Number of processes to use (default: CPU count)")
+def main(exp_name, chk, splits, res_base, data_base, use_mp, n_processes):
     DATA_BASE = os.path.abspath(data_base)
     RES_BASE = os.path.abspath(res_base)
 
@@ -44,15 +66,43 @@ def main(exp_name, chk, splits, res_base, data_base):
 
             metric = pd.DataFrame(index=label_meta["trial"], columns=["MSE", "MAE", "PearsonR"])
 
-            for i in tqdm(label_meta.index):
-                trail_label = test_label[:, i]
-                trail_pred = test_pred[:, i]
+            if use_mp:
+                # Prepare data for multiprocessing
+                trial_data_list = []
+                for i in label_meta.index:
+                    trial_name = label_meta.loc[i, "trial"]
+                    trial_label = test_label[:, i]
+                    trial_pred = test_pred[:, i]
+                    trial_data_list.append((trial_name, trial_label, trial_pred))
 
-                metric.loc[label_meta.loc[i, "trial"]] = (
-                    mean_squared_error(trail_label, trail_pred),
-                    mean_absolute_error(trail_label, trail_pred),
-                    pearsonr(trail_label, trail_pred)[0],
-                )
+                # Set number of processes
+                n_proc = n_processes if n_processes else mp.cpu_count()
+                print(f"Using {n_proc} processes for parallel calculation")
+
+                # Calculate metrics in parallel
+                with mp.Pool(n_proc) as pool:
+                    results = list(
+                        tqdm(
+                            pool.imap(calculate_trial_metrics, trial_data_list),
+                            total=len(trial_data_list),
+                            desc="Calculating metrics",
+                        )
+                    )
+
+                # Store results
+                for trial_name, (mse, mae, pearsonr_val) in results:
+                    metric.loc[trial_name] = (mse, mae, pearsonr_val)
+            else:
+                # Original sequential approach
+                for i in tqdm(label_meta.index):
+                    trail_label = test_label[:, i]
+                    trail_pred = test_pred[:, i]
+
+                    metric.loc[label_meta.loc[i, "trial"]] = (
+                        mean_squared_error(trail_label, trail_pred),
+                        mean_absolute_error(trail_label, trail_pred),
+                        pearsonr(trail_label, trail_pred)[0],
+                    )
 
             metric.to_csv(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric.csv")
 
