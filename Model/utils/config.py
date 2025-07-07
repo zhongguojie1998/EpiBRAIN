@@ -107,6 +107,7 @@ def write_deepspeed_config(config, save_file):
     }
     deepspeed_setup["train_micro_batch_size_per_gpu"] = training_config.batch_size
     deepspeed_setup["gradient_accumulation_steps"] = training_config.accum_step
+    deepspeed_setup["gradient_clipping"] = training_config.clip_grad_norm
 
     with open(save_file, "w") as f:
         json.dump(deepspeed_setup, f)
