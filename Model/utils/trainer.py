@@ -277,6 +277,10 @@ class DNASeqModelTrainer:
 
         self.model = setup_model(self.config, self.logger)
 
+        # since the batchsize is small, we need to sync batchnorm statistics
+        if self.world_size > 1:
+            self.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
+
         # if necessary, load the checkpoint
         ## load the full model before we wrap the model into DDP
         if self.training_config.load_checkpoint is not None:
@@ -499,6 +503,7 @@ class DNASeqModelTrainer:
         # for loss log
         batch_loss = 0
         batch_count = 0
+        epoch_loss_list = []
         # for other metric log
         # tm_metrics = get_metric_collection(prefix="Train/", num_outputs=self.trial_num).to(self.local_rank)
         # tm_metrics.reset()
@@ -524,6 +529,7 @@ class DNASeqModelTrainer:
             loss = self.criterion(pred, label) / self.training_config.accum_step
             batch_loss += loss.detach().cpu().item() * self.training_config.accum_step
             batch_count += 1
+            epoch_loss_list.append(batch_loss)
 
             # metrics
             # tm_metrics.update(pred.reshape(-1, self.trial_num).double(), label.reshape(-1, self.trial_num).double())
@@ -564,12 +570,12 @@ class DNASeqModelTrainer:
 
             if should_update:
                 self.current_step += 1
-            
+
             if nan_termination:
                 exit(1)
 
         self.current_epoch += 1
-
+        self.metrics.update({f"Train/epoch_avg_loss": np.mean(epoch_loss_list)})
         # get and write the metric logs
         # self.metrics.update(tm_metrics.compute())
 
@@ -712,6 +718,10 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         self.model = setup_model(self.config, self.logger)
 
+        # since the batchsize is small, we need to sync batchnorm statistics
+        if self.world_size > 1:
+            self.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
+
         # set up deepspeed with weight decay protocol
         optimizer_grouped_parameters = create_optimizer_grouped_parameters(
             self.model, self.training_config.get("add_opt_group", False)
@@ -832,7 +842,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
             if self.logging_config.diagnose:
                 self._diagnose_extra_log(ind)
-            
+
             if nan_termination:
                 exit(1)
 

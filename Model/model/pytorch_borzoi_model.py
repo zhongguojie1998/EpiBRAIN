@@ -267,7 +267,6 @@ class Borzoi(PreTrainedModel):
         # this is for loading from hugging face parameter
         pass
 
-
     def init_weights(self):
         """Initialize the weights"""
         # kernel_initializer = lecun_normal, for all layers except for transformer
@@ -294,35 +293,6 @@ class Borzoi(PreTrainedModel):
         # Other initializations
         self.apply(other_init)
 
-    def get_embs_after_crop(self, x):
-        """
-        Performs the forward pass of the model until right before the final conv layers, and includes a cropping layer.
-
-        Args:
-            x (torch.Tensor): Input DNA sequence tensor of shape (N, 4, L).
-
-        Returns:
-             torch.Tensor: Output of the model up to the cropping layer with shape (N, dim, crop_bin_num)
-        """
-        x = self.conv_dna(x)
-        x_unet0 = self.res_tower(x)  # resolution 32
-        x_unet1 = self.unet1(x_unet0)  # resolution 64
-        x = self._max_pool(x_unet1)  # resolution 128
-        x = self.transformer(x.permute(0, 2, 1))
-        x = x.permute(0, 2, 1)
-        if self.upsample_layer_num >= 1:
-            x_unet1 = self.horizontal_conv1(x_unet1)
-            x = self.upsampling_unet1(x)
-            x += x_unet1
-            x = self.separable1(x)
-        if self.upsample_layer_num >= 2:
-            x_unet0 = self.horizontal_conv0(x_unet0)
-            x = self.upsampling_unet0(x)
-            x += x_unet0
-            x = self.separable0(x)
-        x = self.crop(x.permute(0, 2, 1))
-        return x.permute(0, 2, 1)
-
     def forward(self, x, use_head="human", data_parallel_training=False):
         """
         Performs the forward pass of the model.
@@ -336,7 +306,29 @@ class Borzoi(PreTrainedModel):
             torch.Tensor: Output tensor with shape (N, C, crop_bin_num), where C is the number of tracks.
         """
         with torch.amp.autocast("cuda", enabled=self.use_autocast):
-            x = self.get_embs_after_crop(x)
+            x = self.conv_dna(x)
+            x_unet0 = self.res_tower(x)  # resolution 32
+            x_unet1 = self.unet1(x_unet0)  # resolution 64
+            x = self._max_pool(x_unet1)  # resolution 128
+
+        # if we are using flashattention, the transformer layer must use autocast
+        with torch.amp.autocast("cuda", enabled=self.use_autocast if not self.flashed else True):
+            x = self.transformer(x.permute(0, 2, 1))
+
+        with torch.amp.autocast("cuda", enabled=self.use_autocast):
+            x = x.permute(0, 2, 1)
+            if self.upsample_layer_num >= 1:
+                x_unet1 = self.horizontal_conv1(x_unet1)
+                x = self.upsampling_unet1(x)
+                x += x_unet1
+                x = self.separable1(x)
+            if self.upsample_layer_num >= 2:
+                x_unet0 = self.horizontal_conv0(x_unet0)
+                x = self.upsampling_unet0(x)
+                x += x_unet0
+                x = self.separable0(x)
+            x = self.crop(x.permute(0, 2, 1))
+            x = x.permute(0, 2, 1)
             x = self.final_joined_convs(x)
 
         # disable autocast for more precision in final layer

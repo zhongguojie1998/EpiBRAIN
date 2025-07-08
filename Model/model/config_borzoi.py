@@ -67,7 +67,7 @@ class BorzoiConfig(PretrainedConfig):
     ):
 
         self.flashed = flashed
-        self.use_autocast = use_autocast if not flashed else True
+        self.use_autocast = use_autocast
 
         self.conv_dna_param = deep_update_dict(BorzoiConfig._DEFAULT_CONV_DNA, conv_dna_param or {})
         self.res_tower_param = deep_update_dict(BorzoiConfig._DEFAULT_RES_TOWER, res_tower_param or {})
