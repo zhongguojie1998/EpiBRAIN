@@ -428,7 +428,9 @@ class DNASeqModelTrainer:
 
         if should_exit_on_nan and nan_detected:
             self.logger.error("NaN detected in model weight/gradients. Exiting after this step.")
-            exit(1)
+            return True
+        else:
+            return False
 
     def _diagnose_extra_log(self, ind):
         ## output the sample index
@@ -541,7 +543,7 @@ class DNASeqModelTrainer:
                     # report_loss = batch_loss / (i + 1)
                     report_loss = batch_loss / batch_count
 
-                    self._log_training_metrics(report_loss, should_exit_on_nan=True)
+                    nan_termination = self._log_training_metrics(report_loss, should_exit_on_nan=True)
 
                     batch_loss = 0
                     batch_count = 0
@@ -562,6 +564,9 @@ class DNASeqModelTrainer:
 
             if should_update:
                 self.current_step += 1
+            
+            if nan_termination:
+                exit(1)
 
         self.current_epoch += 1
 
@@ -818,7 +823,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
                 # report_loss = batch_loss / (i + 1)
                 report_loss = batch_loss / batch_count
 
-                self._log_training_metrics(report_loss, should_exit_on_nan=True)
+                nan_termination = self._log_training_metrics(report_loss, should_exit_on_nan=True)
 
                 batch_loss = 0
                 batch_count = 0
@@ -827,6 +832,9 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
             if self.logging_config.diagnose:
                 self._diagnose_extra_log(ind)
+            
+            if nan_termination:
+                exit(1)
 
         self.current_epoch += 1
 
