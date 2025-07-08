@@ -765,4 +765,4 @@ def aggregate_data(storage_path, preload_data, task=None, precision="float32"):
         # save per data point separately
         for i in task.index:
             chrom, start, end = task.iloc[i, [0, 1, 2]]
-            torch.save(label_data[i], f"{storage_path}/data/{chrom}_{start}_{end}.pt")
+            torch.save(label_data[i].clone(), f"{storage_path}/data/{chrom}_{start}_{end}.pt")
