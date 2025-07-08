@@ -3,7 +3,7 @@ model_name: flashzoi
 
 ## technical setup
 flashed: True  # whether to use FlashAttention
-use_autocast: True  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
+use_autocast: False  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
 
 ## model hyperparameter
 conv_dna_param:  # parameters for the convolutional DNA layer
@@ -41,5 +41,5 @@ final_joined_conv_param:
   dropout: 0.1  # dropout rate for the final conv layer
 
 output_heads: # set up the prediction head name and trial number
-  mouse: 1594 
-use_head: mouse # the head use for forward pass
+  human: 87 
+use_head: human # the head use for forward pass

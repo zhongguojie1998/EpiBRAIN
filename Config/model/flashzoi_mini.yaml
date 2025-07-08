@@ -1,11 +1,19 @@
 defaults:
-  - flashzoi_enformer_style_mini
+  - flashzoi
 
 model_name: flashzoi_mini
 
-crop_param:
-  bins_to_return: 16320  # how many (central) bins used to calculate loss, same as in enformer (114,688 bp aggregated into 128 bp bins)
+conv_dna_param:  # parameters for the convolutional DNA layer
+  out_channels: 320  # number of output channels for the conv layer
+  kernel_size: 11  # kernel size for the conv layer
 
-upsample_param:
-  upsample_layer_num: 2  # how many upsample layers to use, deciding final resolution, 0 corresponding to 128 bp resolution, 1 -> 64, 2 -> 32
+res_tower_param:  # parameters for the residual tower
+  filters_init: 384 # initial number of output channels
+  filters_end: 768 # final number of output channels
+  divisible_by: 16 
 
+transformer_param:
+  heads: 4  # atten head num
+
+final_joined_conv_param:
+  out_channels: 912  # number of output channels for the final conv layer

@@ -1,0 +1,13 @@
+defaults:
+  - flashzoi
+
+model_name: johahi/flashzoi-replicate-0
+
+
+finetune_method: lora 
+finetune_param:
+    target_modules: # add lora layer
+      - Wqkv
+    modules_to_save:  # other layers requiring optimization
+      - prediction_head.human
+    r: 8  # lora rank

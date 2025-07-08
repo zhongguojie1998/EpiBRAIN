@@ -1,5 +1,5 @@
 defaults:
-  - data: borzoi
+  - data: long_context
   - model: flashzoi
-  - training: borzoi
+  - training: long_context
   - logging: default
