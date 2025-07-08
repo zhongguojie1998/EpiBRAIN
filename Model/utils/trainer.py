@@ -799,6 +799,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
         # for loss log
         batch_loss = 0
         batch_count = 0
+        epoch_loss_list = []
 
         dataloader = self.data_func["train"]["data_loader"]
 
@@ -820,6 +821,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             loss = self.criterion(pred, label) / self.training_config.accum_step
             batch_loss += loss.detach().cpu().item() * self.training_config.accum_step
             batch_count += 1
+            epoch_loss_list.append(batch_loss)
 
             self.model_engine.backward(loss)
 
@@ -847,7 +849,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
                 exit(1)
 
         self.current_epoch += 1
-
+        self.metrics.update({f"Train/epoch_avg_loss": np.mean(epoch_loss_list)})
 
 # this function also support single GPU training
 def mp_main(rank, world_size, myconfig, local_rank=None):
