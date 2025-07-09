@@ -401,12 +401,19 @@ def preprocess(
 
     # start to aggregate the preprocessed data
     os.makedirs(f"{storage_path}/data", exist_ok=True)
+    trial_files = pd.read_csv(trial_summary_path)
 
     if preload_data:
         if force_restart or not os.path.exists(f"{storage_path}/data/all_label.pt"):
             logger.info("Start to aggregate data")
             data = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
-            aggregate_data(storage_path=storage_path, preload_data=True, task=data, precision=precision)
+            aggregate_data(
+                storage_path=storage_path,
+                preload_data=True,
+                ref_order=trial_files["exp"].tolist(),
+                task=data,
+                precision=precision,
+            )
             logger.info("Finish aggregation")
     else:
         data = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
@@ -417,6 +424,10 @@ def preprocess(
         if data["generate"].any():
             logger.info("Start to aggregate data")
             aggregate_data(
-                storage_path=storage_path, preload_data=False, task=data[data["generate"]], precision=precision
+                storage_path=storage_path,
+                preload_data=False,
+                ref_order=trial_files["exp"].tolist(),
+                task=data[data["generate"]],
+                precision=precision,
             )
             logger.info("Finish aggregation")

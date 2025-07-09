@@ -724,11 +724,16 @@ class CovFace:
             self.cov_open.close()
 
 
-def aggregate_data(storage_path, preload_data, task=None, precision="float32"):
+def aggregate_data(storage_path, preload_data, ref_order, task=None, precision="float32"):
     """Aggregate the label data from multiple files into a single file."""
 
     separate_label_file = [
         f"{storage_path}/labels/{i}" for i in os.listdir(f"{storage_path}/labels") if i.endswith(".h5")
+    ]
+    separate_label_file = [
+        f"{storage_path}/labels/{i}.h5"
+        for i in ref_order
+        if f"{storage_path}/labels/{i}.h5" in separate_label_file
     ]
     if not separate_label_file:
         logger.error("No label files found in the specified directory.")
