@@ -31,7 +31,7 @@ def input_check(
 
 def load_config(config_dir: str = ".", config_name: str = "default", overrides: tuple[str, ...] = []):
 
-    if config_name.endswith(('.yaml', '.yml')):
+    if config_name.endswith((".yaml", ".yml")):
         logger.info(f"Loading complete config directly from {config_name}")
         config = OmegaConf.load(config_name)
         config = OmegaConf.to_container(config, resolve=True)

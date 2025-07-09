@@ -20,21 +20,48 @@ lr: 1e-4 # learning rate
 lr_warmup_step: 2000  # gradually increase lr from 0 to `lr` in given optimization steps
 batch_size: 12 # batch size for one single GPU
 total_epoch: 100  # maximum training epoch number
-loss: poisson # the name of the loss function
 accum_step: 1 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
+clip_grad_norm: 0.15 # gradient clipping norm, 0.15 as in borzoi
 seed: 42  # random seed for reproduciblility
 
+## loss setup
+loss: poisson_mn # the name of the loss function (now support: poisson, poisson_mn)
+loss_params:
+  total_weight: 1
+  weight_range: 1
+  eps: 1e-7
+  reduction: mean
+
 ## optimizer setup
-optimizer: Adam # optimizer to use, should be supported by deepspeed
+add_opt_group: True # whether to use optimizer parameter groups
+
+# optimizer: AdamW # optimizer to use, should be supported by deepspeed
+# optimizer_params: # optimizer parameters
+#   lr: ${training.lr}
+#   # adam_w_mode: True  # whether to use traditional adam instead of adamw (only when setting this to false and use the Adam can we get traditional adam, or we will get adamw)
+
+optimizer: OneBitAdam # optimizer to use, should be supported by deepspeed
 optimizer_params: # optimizer parameters
   lr: ${training.lr}
-  adam_w_mode: False  # use traditional adam instead of adamw
+  freeze_step: ${training.lr_warmup_step}
+
+# optimizer: ZeroOneAdam # optimizer to use, should be supported by deepspeed
+# optimizer_params: # optimizer parameters
+#   lr: ${training.lr}
+#   var_freeze_step: ${training.lr_warmup_step}
+#   local_step_scaler: 37100
 
 scheduler: WarmupLR # learning rate scheduler to use, should be supported by deepspeed
 scheduler_params: # scheduler parameters
   warmup_min_lr: 0
   warmup_max_lr: ${training.lr}
   warmup_num_steps: ${training.lr_warmup_step}
+# scheduler: WarmupDecayLR # learning rate scheduler to use, should be supported by deepspeed
+# scheduler_params: # scheduler parameters
+#   warmup_min_lr: 0
+#   warmup_max_lr: ${training.lr}
+#   warmup_num_steps: ${training.lr_warmup_step}
+#   total_num_steps: 84200
 
 ## dataloader setup
 dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader
