@@ -16,7 +16,7 @@ test_only: False # whether to only run the test stage, if True, load_checkpoint 
 finetune: False # whether to finetune the model
 
 ## training hyperparameter
-lr: 1e-4 # learning rate
+lr: 1e-4 # maximum learning rate
 lr_warmup_step: 2000  # gradually increase lr from 0 to `lr` in given optimization steps
 batch_size: 12 # batch size for one single GPU
 total_epoch: 100  # maximum training epoch number
@@ -51,17 +51,25 @@ optimizer_params: # optimizer parameters
 #   var_freeze_step: ${training.lr_warmup_step}
 #   local_step_scaler: 37100
 
-scheduler: WarmupLR # learning rate scheduler to use, should be supported by deepspeed
-scheduler_params: # scheduler parameters
-  warmup_min_lr: 0
-  warmup_max_lr: ${training.lr}
-  warmup_num_steps: ${training.lr_warmup_step}
-# scheduler: WarmupDecayLR # learning rate scheduler to use, should be supported by deepspeed
+## scheduler setup
+# scheduler: WarmupLR # learning rate scheduler to use, should be supported by deepspeed
 # scheduler_params: # scheduler parameters
 #   warmup_min_lr: 0
 #   warmup_max_lr: ${training.lr}
 #   warmup_num_steps: ${training.lr_warmup_step}
+
+scheduler: WarmupCosineLR # learning rate scheduler to use, should be supported by deepspeed
+scheduler_params: # scheduler parameters
+  total_num_steps: 84200
+  warmup_num_steps: ${training.lr_warmup_step}
+  warmup_type: linear
+
+# scheduler: WarmupDecayLR # learning rate scheduler to use, should be supported by deepspeed
+# scheduler_params: # scheduler parameters
 #   total_num_steps: 84200
+#   warmup_max_lr: ${training.lr}
+#   warmup_num_steps: ${training.lr_warmup_step}
+#   warmup_type: linear
 
 ## dataloader setup
 dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader

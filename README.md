@@ -43,6 +43,7 @@ pip install flash-attn --no-build-isolation  # flash attention
 
 ## install deepspeed, make sure you've already installed cuda-toolkit in the former step
 pip install deepspeed
+pip install cupy-cuda12x # if want to use onebitadam
 
 # util packages
 pip install click # command line tool

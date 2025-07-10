@@ -68,8 +68,13 @@ logger = LazyLogger(f"{LOGGER_PREFIX}-Main")
     is_flag=True,
     help="If we have already processed the data and want to bypass the data processing step",
 )
+@click.option(
+    "--only_config",
+    is_flag=True,
+    help="If to just generate the config",
+)
 @record
-def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_data, bypass_data):
+def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_data, bypass_data, only_config):
 
     if torchrun and deepspeed:
         raise ValueError("Cannot both enable torchrun and deepspeed")
@@ -152,6 +157,9 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
         save_tensorboard_run_script(
             log_dir=f"{myconfig.logging.log_dir}/tb", save_dir=f"{myconfig.logging.log_dir}"
         )
+    
+    if only_config:
+        exit(0)
 
     # get data split and labels
     if not bypass_data:

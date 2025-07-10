@@ -22,6 +22,7 @@ from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSa
 from model.model_utils import setup_model
 from utils.logging import LOGGER_PREFIX, TrainingLogger, timer
 from utils.loss import LOSS_DICT
+from utils.scheduler import SCHEDULER_DICT
 from utils.multi_gpu import blocking_sync_wait, cleanup, deepspeed_setup, global_aggregate, setup, torchrun_setup
 
 
@@ -151,7 +152,6 @@ class DNASeqModelTrainer:
         # get the training settings
         self.current_epoch = 0
         self.current_step = 0  # based on update step
-        self.current_lr = self.training_config.lr
         self.best_valid_loss = torch.inf
         self.metrics = {}
 
@@ -308,6 +308,7 @@ class DNASeqModelTrainer:
         self.logger.info(f"Model {self.model_config.model_name} loaded successfully.")
 
     def get_optimizer(self):
+        # get optim
         optim_class = eval(f"optim.{self.training_config.optimizer}")
         # Apply differential weight decay using the shared function
         optimizer_grouped_parameters = create_optimizer_grouped_parameters(
@@ -315,32 +316,42 @@ class DNASeqModelTrainer:
         )
         self.optimizer = optim_class(optimizer_grouped_parameters, **self.training_config.optimizer_params)
 
-        scheduler_class = eval(f"optim.lr_scheduler.{self.training_config.scheduler}")
+        # get scheduler
+        scheduler_class = SCHEDULER_DICT.get(self.training_config.scheduler)
+        if scheduler_class is None:
+            try:
+                scheduler_class = eval(f"optim.lr_scheduler.{self.training_config.scheduler}")
+            except:
+                self.logger.error(f"Scheduler {self.training_config.scheduler} is not implemented yet.")
+                exit(1)
         self.scheduler = scheduler_class(self.optimizer, **self.training_config.scheduler_params)
 
-        if self.training_config.scheduler in ["ReduceLROnPlateau"]:
-            self.scheduler_update_freq = "epoch"
+        # get initial lr
+        self.current_lr = self.scheduler.get_last_lr()[0]
 
+        if "ReduceLROnPlateau" in self.training_config.scheduler:
+            self.scheduler_need_monitor = True
             # we should further check if valid set is available
             if not self.training_config.test_only and self.data_func["valid"]["dataset"] is None:
                 self.logger.error("The given scheduler requires the valid dataset")
                 exit(1)
         else:
-            self.scheduler_update_freq = "batch"
+            self.scheduler_need_monitor = False
 
         # if necessary, load the checkpoint
         if self.training_config.load_checkpoint is not None:
             self.optimizer.load_state_dict(self.checkpoint["optimizer_state_dict"])
             self.scheduler.load_state_dict(self.checkpoint["scheduler_state_dict"])
+            self.current_lr = self.checkpoint["lr"]
 
     def get_loss(self):
-        loss_cls = LOSS_DICT.get(self.training_config.loss)
+        loss_class = LOSS_DICT.get(self.training_config.loss)
 
-        if loss_cls is None:
+        if loss_class is None:
             self.logger.error(f"Loss {self.training_config.loss} is not implemented yet.")
             exit(1)
 
-        self.criterion = loss_cls(**self.training_config.get("loss_params", {}))
+        self.criterion = loss_class(**self.training_config.get("loss_params", {}))
 
     @property
     def inference_model(self):
@@ -455,7 +466,6 @@ class DNASeqModelTrainer:
         # since this is first called in the model initialization pipeline, the model and optimizers loads the checkpoint in their own functions instead of here
         self.current_epoch = self.checkpoint["epoch"]
         self.current_step = self.checkpoint["step"]
-        self.current_lr = self.checkpoint["lr"]
         self.best_valid_loss = self.checkpoint["best_valid_loss"]
 
         self.logger.info("Checkpoint loaded successfully.")
@@ -487,16 +497,6 @@ class DNASeqModelTrainer:
         self.logger.info("Checkpoint saved successfully.")
         blocking_sync_wait(self.world_size)
 
-    def lr_warmup(self):
-        # lr warmup, gradually change from 0 to the given lr
-        if self.current_step < self.training_config.lr_warmup_step:
-            lr_scale = min(
-                1.0,
-                float(self.current_step + 1) / float(self.training_config.lr_warmup_step),
-            )
-            for pg in self.optimizer.param_groups:
-                pg["lr"] = lr_scale * float(self.training_config.lr)
-
     def train_step(self):
         self.model.train()
 
@@ -504,6 +504,7 @@ class DNASeqModelTrainer:
         batch_loss = 0
         batch_count = 0
         epoch_loss_list = []
+        nan_termination = False
         # for other metric log
         # tm_metrics = get_metric_collection(prefix="Train/", num_outputs=self.trial_num).to(self.local_rank)
         # tm_metrics.reset()
@@ -554,21 +555,19 @@ class DNASeqModelTrainer:
                     batch_loss = 0
                     batch_count = 0
 
+                # model step
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.training_config.clip_grad_norm
-                )  # 0.15 as in borzoi
-                self.lr_warmup()
+                )
                 self.optimizer.step()
-                self.current_lr = self.optimizer.param_groups[0]["lr"]
-                if self.scheduler_update_freq == "batch":
-                    self.scheduler.step()
-                # here we reset the gradient in the final stage as we may need to log the gradient value
+                self.scheduler.step()
                 self.optimizer.zero_grad()
 
             if self.logging_config.diagnose:
                 self._diagnose_extra_log(ind)
 
             if should_update:
+                self.current_lr = self.scheduler.get_last_lr()[0]
                 self.current_step += 1
 
             if nan_termination:
@@ -671,7 +670,6 @@ class DeepspeedTrainer(DNASeqModelTrainer):
         # get the training settings
         self.current_epoch = 0
         self.current_step = 0  # based on update step
-        self.current_lr = self.training_config.lr
         self.best_valid_loss = torch.inf
         self.metrics = {}
 
@@ -732,17 +730,17 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             config=self.training_config.deepspeed_config,
             dist_init_required=True,  # we are using DDP
         )
+        self.current_lr = self.scheduler.get_last_lr()[0]
 
         # set up scheduler step logic
-        if self.training_config.scheduler in ["ReduceLROnPlateau"]:
-            self.scheduler_update_freq = "epoch"
-
+        if "ReduceLROnPlateau" in self.training_config.scheduler:
+            self.scheduler_need_monitor = True
             # we should further check if valid set is available
             if not self.training_config.test_only and self.data_func["valid"]["dataset"] is None:
                 self.logger.error("The given scheduler requires the valid dataset")
                 exit(1)
         else:
-            self.scheduler_update_freq = "batch"
+            self.scheduler_need_monitor = False
 
         self.logger.info(f"Model {self.model_config.model_name} loaded successfully.")
 
@@ -800,6 +798,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
         batch_loss = 0
         batch_count = 0
         epoch_loss_list = []
+        nan_termination = False
 
         dataloader = self.data_func["train"]["data_loader"]
 
@@ -827,8 +826,6 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
             # log training status
             ## in the training loop, we only look at the local loss
-            self.current_step = self.model_engine.global_steps
-            self.current_lr = self.optimizer.param_groups[0]["lr"]
             should_update = ((i + 1) % self.training_config.accum_step == 0) or (i + 1 == len(dataloader))
 
             if self.current_step % self.logging_config.report_every == 0 and should_update:
@@ -840,7 +837,11 @@ class DeepspeedTrainer(DNASeqModelTrainer):
                 batch_loss = 0
                 batch_count = 0
 
+            # model optimize
             self.model_engine.step()
+
+            self.current_step = self.model_engine.global_steps
+            self.current_lr = self.scheduler.get_last_lr()[0]
 
             if self.logging_config.diagnose:
                 self._diagnose_extra_log(ind)
@@ -915,7 +916,7 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                         with timer(f"Saving new best model", logger, rank, world_size):
                             trainer.save_checkpoint(save_name="best_valid_loss")
 
-                    if trainer.scheduler_update_freq == "epoch":
+                    if trainer.scheduler_need_monitor:
                         trainer.scheduler.step(valid_loss)
 
                 # testing the model and get the metrics during the run time
@@ -953,7 +954,7 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
 
         else:
             trainer.data_rand_seed.value = trainer.current_epoch
-            
+
             if trainer.data_func["train"]["data_loader"] is not None:
                 with timer(f"[Train/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
                     trainer.infer_step(log_loss=False, log_prefix="Train", save_pred=True)

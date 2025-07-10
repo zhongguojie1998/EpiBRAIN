@@ -16,7 +16,7 @@ test_only: False # whether to only run the test stage, if True, load_checkpoint 
 finetune: False # whether to finetune the model
 
 ## training hyperparameter
-lr: 1e-4 # learning rate
+lr: 1e-4 # maximum learning rate
 lr_warmup_step: 2000  # gradually increase lr from 0 to `lr` in given optimization steps
 batch_size: 12 # batch size for one single GPU
 total_epoch: 100  # maximum training epoch number
@@ -44,12 +44,21 @@ optimizer: AdamW # optimizer to use, the name should be in the torch.optim packa
 optimizer_params: # optimizer parameters
   lr: ${training.lr}
 
-scheduler: ReduceLROnPlateau # learning rate scheduler to use, the name should be in the torch.optim.lr_scheduler package
-scheduler_params: # scheduler parameters
-  mode: min # mode to use, 'min' or 'max'
-  factor: 0.8 # factor to reduce the learning rate by
-  patience: 10 # number of epochs to wait before reducing the learning rate
-  min_lr: 1e-6 # the minimum learning rate
+## scheduler setup
+scheduler: WarmupThenCosineDecay
+scheduler_params:
+  num_warmup_steps: ${training.lr_warmup_step}
+  num_training_steps: 84200
+# scheduler: WarmupThenReduceLROnPlateau # learning rate scheduler to use
+# scheduler_params: # scheduler parameters
+#   warmup_steps: ${training.lr_warmup_step}
+#   init_lr: ${training.min_lr}
+#   peak_lr: ${training.lr}
+#   plateau_kwargs:
+#     mode: min # mode to use, 'min' or 'max'
+#     factor: 0.8 # factor to reduce the learning rate by
+#     patience: 5 # number of epochs to wait before reducing the learning rate
+#     min_lr: 1e-6 # the minimum learning rate
 
 ## dataloader setup
 dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader
