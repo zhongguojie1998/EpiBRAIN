@@ -47,6 +47,7 @@ def process_region_chunk(args):
         device,
         force_restart,
         save_raw,
+        prefix,
     ) = args
 
     save_base = f"{res_base}/{exp_name}/analysis_{chk}/raw_data"
@@ -87,6 +88,11 @@ def process_region_chunk(args):
     # Process each region in the chunk
     for idx in range(len(region_chunk_data)):
         chr_name, start, end, _, trial = region_chunk_data.iloc[idx, [0, 1, 2, 3, 4]]
+        name_base = (
+            f"{prefix}_{chr_name}_{start}_{end}_{trial}"
+            if prefix is not None
+            else f"{chr_name}_{start}_{end}_{trial}"
+        )
 
         try:
             trial_dim = label_meta.loc[trial, "dim"]
@@ -119,14 +125,20 @@ def process_region_chunk(args):
 
         # generate label and pred
         ## pred
-        pred_res = model(
-            test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), myconfig.model.use_head, False
-        ).permute(0, 2, 1)
-        pred_res_trial = pred_res.detach().cpu().numpy()[0, :, trial_dim]
+        with torch.no_grad():
+            pred_res = model(
+                test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), myconfig.model.use_head, False
+            ).permute(0, 2, 1)
+            pred_res_trial = pred_res.detach().cpu().numpy()[0, :, trial_dim]
+            del pred_res
+        
+        # Clear GPU cache after model prediction
+        if device.startswith('cuda'):
+            torch.cuda.empty_cache()
 
         ## label
-        unmap_npy = f"{save_base}/label/{chr_name}_{start}_{end}_{trial}_mseqs_unmap.npy"
-        label_h5 = f"{save_base}/label/{chr_name}_{start}_{end}_{trial}_label.h5"
+        unmap_npy = f"{save_base}/label/{name_base}_mseqs_unmap.npy"
+        label_h5 = f"{save_base}/label/{name_base}_label.h5"
 
         mseqs = [ModelSeq(chr_name, real_start, real_end, "test")]
 
@@ -155,20 +167,39 @@ def process_region_chunk(args):
         plot_title = [f"{trial} Target", f"{trial} Pred"]
 
         for baseline_type, baseline_seq_onehot in baseline_seq_onehots:
-            identifier = f"{chr_name}_{start}_{end}_{trial}_{baseline_type}"
+            identifier = f"{name_base}_{baseline_type}"
             if not os.path.exists(f"{save_base}/interp/{identifier}.pt") or force_restart:
                 all_attribution = []
                 nan_occur = False
+                
+                # Prepare inputs once to avoid repeated tensor operations
+                input_tensor = test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device)
+                baseline_tensor = baseline_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device)
+                
                 for bin in bin_range:
                     attribution = dl_model.attribute(
-                        inputs=test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device),
-                        baselines=baseline_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device),
+                        inputs=input_tensor,
+                        baselines=baseline_tensor,
                         target=(trial_dim, bin),
                     )
                     if not torch.isfinite(attribution).all():
                         logger.warning(f"NAN occur in {identifier}, bin num {bin}")
                         nan_occur = True
-                    all_attribution.append(attribution.squeeze(0).detach().cpu())
+                    
+                    # Move to CPU immediately and clear GPU memory
+                    attribution_cpu = attribution.squeeze(0).detach().cpu()
+                    all_attribution.append(attribution_cpu)
+                    del attribution
+                    
+                    # Clear GPU cache periodically during attribution computation
+                    if device.startswith('cuda') and len(all_attribution) % 10 == 0:
+                        torch.cuda.empty_cache()
+                
+                # Clean up input tensors
+                del input_tensor, baseline_tensor
+                if device.startswith('cuda'):
+                    torch.cuda.empty_cache()
+                    
                 all_attribution = torch.stack(all_attribution)
 
                 if save_raw:
@@ -187,11 +218,15 @@ def process_region_chunk(args):
 
             # we only look at the contribution from the ref genome
             # [batch, N, 4] -> [batch, N] -> [N] -> [bin_num, window_size] -> [bin_num]
-            signal = (all_attribution.permute(0, 2, 1) * test_seq_onehot).sum(dim=-1).mean(dim=0)
-            signal = signal.reshape(-1, myconfig.data.preprocess.window_size)[trim:-trim]
-            signal = signal.mean(dim=-1).detach()
+            with torch.no_grad():
+                signal = (all_attribution.permute(0, 2, 1) * test_seq_onehot).sum(dim=-1).mean(dim=0)
+                signal = signal.reshape(-1, myconfig.data.preprocess.window_size)[trim:-trim]
+                signal = signal.mean(dim=-1).detach()
 
             plot_data.append(signal)
+            
+            # Clean up attribution tensor
+            del all_attribution
             plot_title.append(f"Importance Score ({baseline_type} baseline)")
             # # Plot
             # viz_sequence.plot_weights(all_attribution.mean(dim=0)[:, s_idx:e_idx].T, subticks_frequency=20)
@@ -242,11 +277,16 @@ def process_region_chunk(args):
 
         plt.tight_layout()
         plt.savefig(
-            f"{res_base}/{exp_name}/analysis_{chk}/plot/interp/{chr_name}_{start}_{end}_{trial}.png",
+            f"{res_base}/{exp_name}/analysis_{chk}/plot/interp/{name_base}.png",
             dpi=300,
             bbox_inches="tight",
         )
         plt.close()
+        
+        # Clean up variables at the end of each region processing
+        del test_seq_onehot, plot_data, plot_title
+        if device.startswith('cuda'):
+            torch.cuda.empty_cache()
 
 
 @click.command()
@@ -261,6 +301,7 @@ def process_region_chunk(args):
     type=click.Choice(["random", "all_zero"], case_sensitive=False),
     default=["random"],
 )
+@click.option("--prefix", required=False, type=str, help="Name prefix for all the saving files")
 @click.option("--log_base", required=True, type=str, default="./logs")
 @click.option("--chk_base", required=True, type=str, default="./Chk")
 @click.option("--res_base", required=True, type=str, default="./Res")
@@ -278,6 +319,7 @@ def main(
     exp_name,
     chk,
     baseline,
+    prefix,
     log_base,
     chk_base,
     res_base,
@@ -298,9 +340,27 @@ def main(
 
     # read region data
     region_df = pd.read_csv(region_bed, header=None, sep="\t")
-    logger.info(f"Total regions to process: {len(region_df)}")
+    region_df["todo"] = True
+    for i in range(len(region_df)):
+        chr_name, start, end, _, trial = region_df.iloc[i, [0, 1, 2, 3, 4]]
+        name_base = (
+            f"{prefix}_{chr_name}_{start}_{end}_{trial}"
+            if prefix is not None
+            else f"{chr_name}_{start}_{end}_{trial}"
+        )
+        region_df.iloc[i, -1] = (
+            not os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp/{name_base}.png")
+            or force_restart
+        )
+        if not region_df.iloc[i, -1]:
+            logger.info(f"Skip {name_base}, already exists")
+    region_df = region_df[region_df["todo"]].copy()
 
-    # Check availability
+    logger.info(f"Total regions to process: {len(region_df)}")
+    if len(region_df) == 0:
+        exit(0)
+
+    # Check device availability
     if processor == "gpu":
         available_devices = torch.cuda.device_count()
         if available_devices == 0:
@@ -356,7 +416,8 @@ def main(
             RES_BASE,
             f"cuda:{process_id}" if processor == "gpu" else "cpu",
             force_restart,
-            save_raw
+            save_raw,
+            prefix,
         )
         process_args.append(args)
 
