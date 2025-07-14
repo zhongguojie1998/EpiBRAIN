@@ -62,8 +62,8 @@ def get_trail_value_mp(
 
     # for data transformation
     sum_stat = trial.get("sum_stat", "sum")
-    baseline_pct = trial.get("baseline_pct", 0.25)
-    umap_pct = trial.get("umap_pct", 1)
+    baseline_pct = trial.get("baseline_pct", 0.5)
+    umap_pct = trial.get("umap_pct", 0.5)
     scale = trial.get("scale", 1)
     extreme_clip_pct = trial.get("extreme_clip_pct", None)
     offset = trial.get("offset", None)
