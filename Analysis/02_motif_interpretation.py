@@ -77,6 +77,8 @@ def process_region_chunk(args):
             )
         elif baseline_type == "all_zero":
             baseline_seq = "N" * myconfig.data.context_length
+        elif baseline_type == "pad":
+            baseline_seq = "." * myconfig.data.context_length
         baseline_seq_onehot = str_to_one_hot(baseline_seq)
         baseline_seq_onehots.append((baseline_type, baseline_seq_onehot))
 
@@ -131,7 +133,7 @@ def process_region_chunk(args):
             ).permute(0, 2, 1)
             pred_res_trial = pred_res.detach().cpu().numpy()[0, :, trial_dim]
             del pred_res
-        
+
         # Clear GPU cache after model prediction
         if device.startswith('cuda'):
             torch.cuda.empty_cache()
@@ -171,11 +173,11 @@ def process_region_chunk(args):
             if not os.path.exists(f"{save_base}/interp/{identifier}.pt") or force_restart:
                 all_attribution = []
                 nan_occur = False
-                
+
                 # Prepare inputs once to avoid repeated tensor operations
                 input_tensor = test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device)
                 baseline_tensor = baseline_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device)
-                
+
                 for bin in bin_range:
                     attribution = dl_model.attribute(
                         inputs=input_tensor,
@@ -185,21 +187,21 @@ def process_region_chunk(args):
                     if not torch.isfinite(attribution).all():
                         logger.warning(f"NAN occur in {identifier}, bin num {bin}")
                         nan_occur = True
-                    
+
                     # Move to CPU immediately and clear GPU memory
                     attribution_cpu = attribution.squeeze(0).detach().cpu()
                     all_attribution.append(attribution_cpu)
                     del attribution
-                    
+
                     # Clear GPU cache periodically during attribution computation
                     if device.startswith('cuda') and len(all_attribution) % 10 == 0:
                         torch.cuda.empty_cache()
-                
+
                 # Clean up input tensors
                 del input_tensor, baseline_tensor
                 if device.startswith('cuda'):
                     torch.cuda.empty_cache()
-                    
+
                 all_attribution = torch.stack(all_attribution)
 
                 if save_raw:
@@ -224,7 +226,7 @@ def process_region_chunk(args):
                 signal = signal.mean(dim=-1).detach()
 
             plot_data.append(signal)
-            
+
             # Clean up attribution tensor
             del all_attribution
             plot_title.append(f"Importance Score ({baseline_type} baseline)")
@@ -282,7 +284,7 @@ def process_region_chunk(args):
             bbox_inches="tight",
         )
         plt.close()
-        
+
         # Clean up variables at the end of each region processing
         del test_seq_onehot, plot_data, plot_title
         if device.startswith('cuda'):
@@ -298,7 +300,7 @@ def process_region_chunk(args):
     "-b",
     required=True,
     multiple=True,
-    type=click.Choice(["random", "all_zero"], case_sensitive=False),
+    type=click.Choice(["random", "all_zero", "pad"], case_sensitive=False),
     default=["random"],
 )
 @click.option("--prefix", required=False, type=str, help="Name prefix for all the saving files")
