@@ -28,10 +28,8 @@ finetune_param:
 #     trainable_params: 
 #       - prediction_head.human
 
-
-partial_load: null  # only load the given part of the pretrained model. If not provided/null, default load all the pretrained parameters
-# partial_load:
-#   - conv_dna
-#   - res_tower
-#   - unet1
-#   - horizontal_conv
+partial_load:
+  - res_tower
+  - transformer
+  - upsample_tower
+  - final_joined_convs

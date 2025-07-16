@@ -136,12 +136,12 @@ def setup_model(config, logger):
     if training_config.load_checkpoint is None:
         model.init_weights()
 
-    # in case we need to load the pretrained model and only want to load part of them
-    partial_load = model_config.get("partial_load", None)
-    partial_load = list(model.state_dict().keys()) if partial_load is None else partial_load
-
     # if finetune, load the pretrained model
     if training_config.finetune:
+        # in case we need to load the pretrained model and only want to load part of them
+        partial_load = model_config.get("partial_load", None)
+        partial_load = list(model.state_dict().keys()) if partial_load is None else partial_load
+        
         # load the pretrained state dict
         pretrained_model = model_cls.from_pretrained(model_config.model_name)
         org_model_state_dict = model.state_dict()

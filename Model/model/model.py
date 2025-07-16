@@ -118,17 +118,17 @@ class Borzoi(PreTrainedModel):
         self.upsample_resolution = self.resolution[::-1][: config.upsample_param["upsample_layer_num"]]
 
         ## currently, it's still borzoi style conv (AlphaGenome crush the channel of input x)
-        self.upsample_res_tower = nn.ModuleDict()
+        self.upsample_tower = nn.ModuleDict()
         for resol in self.upsample_resolution:
             unet_channel = res_tower_setting[f"resol_{resol}"]["out_channels"]
-            self.upsample_res_tower[f"resol_{resol}_horizon"] = ConvBlock(
+            self.upsample_tower[f"resol_{resol}_horizon"] = ConvBlock(
                 in_channels=unet_channel, out_channels=internal_dim, kernel_size=1
             )
-            self.upsample_res_tower[f"resol_{resol}_x"] = nn.Sequential(
+            self.upsample_tower[f"resol_{resol}_x"] = nn.Sequential(
                 ConvBlock(in_channels=internal_dim, out_channels=internal_dim, kernel_size=1),
                 torch.nn.Upsample(scale_factor=pool_size),
             )
-            self.upsample_res_tower[f"resol_{resol}_separable"] = ConvBlock(
+            self.upsample_tower[f"resol_{resol}_separable"] = ConvBlock(
                 in_channels=internal_dim,
                 out_channels=internal_dim,
                 kernel_size=config.upsample_param["kernel_size"],
@@ -170,7 +170,7 @@ class Borzoi(PreTrainedModel):
         # kernel_initializer = he_normal, for transformer layers
         # apply lecun norm to all layers except for transformer
         self.res_tower.apply(lecun_normal_init)
-        self.upsample_res_tower.apply(lecun_normal_init)
+        self.upsample_tower.apply(lecun_normal_init)
         self.final_joined_convs.apply(lecun_normal_init)
         self.prediction_head.apply(lecun_normal_init)
 
@@ -194,10 +194,10 @@ class Borzoi(PreTrainedModel):
 
     def sequence_decoder(self, x, intermediates):
         for resol in self.upsample_resolution:
-            x = self.upsample_res_tower[f"resol_{resol}_x"](x)
-            horizon = self.upsample_res_tower[f"resol_{resol}_horizon"](intermediates[f"resol_{resol}"])
+            x = self.upsample_tower[f"resol_{resol}_x"](x)
+            horizon = self.upsample_tower[f"resol_{resol}_horizon"](intermediates[f"resol_{resol}"])
             x += horizon
-            x = self.upsample_res_tower[f"resol_{resol}_separable"](x)
+            x = self.upsample_tower[f"resol_{resol}_separable"](x)
 
         return x
 

@@ -155,7 +155,7 @@ class DNASeqModelTrainer:
         self.best_valid_loss = torch.inf
         self.metrics = {}
 
-        self.trial_num = self.model_config.output_heads[self.model_config.use_head]
+        self.trial_num = self.model_config.output_heads[self.model_config.use_head]["track_num"]
 
         # set up data
         self.data_split = self.config.data.used_dataset
@@ -672,7 +672,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
         self.best_valid_loss = torch.inf
         self.metrics = {}
 
-        self.trial_num = self.model_config.output_heads[self.model_config.use_head]
+        self.trial_num = self.model_config.output_heads[self.model_config.use_head]["track_num"]
 
         # set up data
         self.data_split = ["train", "valid", "test"]
