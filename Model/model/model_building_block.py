@@ -224,7 +224,7 @@ class TargetLengthCrop(nn.Module):
 
 
 class ConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=1, conv_type="standard"):
+    def __init__(self, in_channels, out_channels, kernel_size=1, conv_type="standard", res_link=False):
         super(ConvBlock, self).__init__()
         if conv_type == "separable":
             norm = nn.Identity()
@@ -243,21 +243,38 @@ class ConvBlock(nn.Module):
 
         self.block = nn.Sequential(norm, activation, conv_layer)
 
+        self.res_link = res_link
         self.in_channels = in_channels
         self.out_channels = out_channels
+        self.channel_diff = out_channels - in_channels
 
     def forward(self, x):
         out = self.block(x)
 
+        if self.res_link:
+            if self.channel_diff > 0:
+                # zeros shape: [B, channel_diff, L]
+                zeros = x.new_zeros(
+                    x.size(0),
+                    self.channel_diff,
+                    *x.shape[2:]
+                )
+                x_skipped = torch.cat([x, zeros], dim=1)  # -> (B, C_out, L)
+            else:
+                # if out_channels <= in_channels
+                x_skipped = x[:, : self.out_channels, ...]
+            
+            out += x_skipped
+            
         return out
 
 
 class ConvDna(nn.Module):
 
-    def __init__(self, out_channels, in_channels=4, kernel_size=1):
+    def __init__(self, out_channels, kernel_size=1, **kwargs):
         super(ConvDna, self).__init__()
         self.conv_layer = nn.Conv1d(
-            in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, padding="same"
+            in_channels=4, out_channels=out_channels, kernel_size=kernel_size, padding="same"
         )
 
     def forward(self, x):

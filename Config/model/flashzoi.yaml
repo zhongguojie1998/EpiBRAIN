@@ -17,6 +17,7 @@ res_tower_param:  # parameters for the residual tower
   kernel_size: 5
   pool_size: 2
   depth: 6  # number of residual blocks in the tower
+  res_link: False # whether to use residual link in the conv layer
 
 transformer_param:
   heads: 8  # atten head num
@@ -33,7 +34,8 @@ crop_param:
 
 upsample_param:
   upsample_layer_num: 2  # how many upsample layers to use, deciding final resolution, 0 corresponding to 128 bp resolution, 1 -> 64, 2 -> 32
-  kernel_size: 3
+  kernel_size: 3  # for separable conv
+  res_link: False # whether to use residual link for the separable conv
 
 final_joined_conv_param:
   out_channels: 1920  # number of output channels for the final conv layer

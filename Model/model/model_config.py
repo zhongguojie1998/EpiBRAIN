@@ -28,6 +28,7 @@ class BorzoiConfig(PretrainedConfig):
         kernel_size=5,
         pool_size=2,
         depth=6,
+        res_link=False,
     )
     _DEFAULT_TRANSFORMER = dict(
         heads=8,
@@ -45,6 +46,7 @@ class BorzoiConfig(PretrainedConfig):
     _DEFAULT_UPSAMPLE = dict(
         upsample_layer_num=2,
         kernel_size=3,
+        res_link=False,
     )
     _DEFAULT_FINAL_CONV = dict(
         out_channels=1920,

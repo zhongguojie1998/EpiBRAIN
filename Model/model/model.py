@@ -49,11 +49,12 @@ class Borzoi(PreTrainedModel):
         pool_size = config.res_tower_param["pool_size"]
 
         self.resolution = [pool_size**i for i in range(len(filter_dims))]
-        res_block_setting = {
+        res_tower_setting = {
             f"resol_{resol}": {
                 "in_channels": filter_dims[i - 1] if i >= 1 else 4,
                 "out_channels": filter_dims[i],
                 "kernel_size": kernel_sizes[i],
+                "res_link": config.res_tower_param["res_link"] if i >= 1 else False,
             }
             for i, resol in enumerate(self.resolution)
         }
@@ -62,7 +63,7 @@ class Borzoi(PreTrainedModel):
         self.res_tower = nn.ModuleDict()
         for resol in self.resolution:
             block_cls = ConvBlock if resol > 1 else ConvDna
-            self.res_tower[f"resol_{resol}_conv"] = block_cls(**res_block_setting[f"resol_{resol}"])
+            self.res_tower[f"resol_{resol}_conv"] = block_cls(**res_tower_setting[f"resol_{resol}"])
             self.res_tower[f"resol_{resol}_pool"] = nn.MaxPool1d(kernel_size=pool_size, padding=0)
 
         # transformer block
@@ -119,7 +120,7 @@ class Borzoi(PreTrainedModel):
         ## currently, it's still borzoi style conv (AlphaGenome crush the channel of input x)
         self.upsample_res_tower = nn.ModuleDict()
         for resol in self.upsample_resolution:
-            unet_channel = res_block_setting[f"resol_{resol}"]["out_channels"]
+            unet_channel = res_tower_setting[f"resol_{resol}"]["out_channels"]
             self.upsample_res_tower[f"resol_{resol}_horizon"] = ConvBlock(
                 in_channels=unet_channel, out_channels=internal_dim, kernel_size=1
             )
@@ -132,6 +133,7 @@ class Borzoi(PreTrainedModel):
                 out_channels=internal_dim,
                 kernel_size=config.upsample_param["kernel_size"],
                 conv_type="separable",
+                res_link=config.upsample_param["res_link"],
             )
 
         # sequence crop
