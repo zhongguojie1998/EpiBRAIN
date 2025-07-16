@@ -20,7 +20,6 @@ class BorzoiConfig(PretrainedConfig):
     _DEFAULT_CONV_DNA = dict(
         out_channels=512,
         kernel_size=15,
-        pool_size=2,
     )
     _DEFAULT_RES_TOWER = dict(
         filters_init=608,
@@ -62,7 +61,9 @@ class BorzoiConfig(PretrainedConfig):
         crop_param: dict | None = None,
         upsample_param: dict | None = None,
         final_joined_conv_param: dict | None = None,
-        output_heads=dict(human=7611, mouse=2608),
+        output_heads=dict(
+            human=dict(track_num=7611, task="regression"), mouse=dict(track_num=2608, task="regression")
+        ),
         **kwargs,
     ):
 
@@ -74,7 +75,9 @@ class BorzoiConfig(PretrainedConfig):
         self.transformer_param = deep_update_dict(BorzoiConfig._DEFAULT_TRANSFORMER, transformer_param or {})
         self.crop_param = deep_update_dict(BorzoiConfig._DEFAULT_CROP, crop_param or {})
         self.upsample_param = deep_update_dict(BorzoiConfig._DEFAULT_UPSAMPLE, upsample_param or {})
-        self.final_joined_conv_param = deep_update_dict(BorzoiConfig._DEFAULT_FINAL_CONV, final_joined_conv_param or {})
+        self.final_joined_conv_param = deep_update_dict(
+            BorzoiConfig._DEFAULT_FINAL_CONV, final_joined_conv_param or {}
+        )
 
         # prediction heads
         self.output_heads = output_heads  # set up the prediction head

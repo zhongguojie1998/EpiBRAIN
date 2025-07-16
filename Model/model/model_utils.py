@@ -1,6 +1,77 @@
+import math
+
+import numpy as np
+import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 
-from model.pytorch_borzoi_model import Borzoi
+from model.model_building_block import Attention, FlashAttention
+
+# model building utils
+def compute_channel_sizes(
+    filters_init: int,
+    filters_end: int = None,
+    filters_mult: float = None,
+    divisible_by: int = 1,
+    depth: int = 1,
+) -> list[int]:
+
+    def _round(x: float) -> int:
+        return int(np.round(x / divisible_by) * divisible_by)
+
+    if filters_mult is None:
+        if filters_end is None:
+            raise ValueError("Either filters_end or filters_mult must be provided.")
+        if depth < 2:
+            filters_mult = 1.0
+        else:
+            filters_mult = np.exp(np.log(filters_end / filters_init) / (depth - 1))
+
+    sizes = []
+    current = float(filters_init)
+    for _ in range(depth):
+        sizes.append(_round(current))
+        current *= filters_mult
+
+    return sizes
+
+
+# model init utils
+def lecun_normal_init(layer):
+    if isinstance(layer, nn.Conv1d):
+        fan_in = layer.in_channels * layer.kernel_size[0]
+        std = math.sqrt(1.0 / fan_in)
+        nn.init.normal_(layer.weight, mean=0, std=std)
+    elif isinstance(layer, nn.Linear):
+        fan_in = layer.in_features
+        std = math.sqrt(1.0 / fan_in)
+        nn.init.normal_(layer.weight, mean=0, std=std)
+    # bias are set to 0 for all layers in TF
+    if isinstance(layer, (nn.Linear, nn.Conv1d)) and layer.bias is not None:
+        layer.bias.data.zero_()
+
+
+def conditional_recursive_he_normal_init(layer):
+    # --- Stop Condition ---
+    # If the current module is one of the types we want to skip,
+    # we stop the recursion for this entire branch.
+    if isinstance(layer, (Attention, FlashAttention)):
+        return
+    # --- Initialization Logic for the current module ---
+    # Apply the appropriate initialization based on the module type.
+    if isinstance(layer, nn.Linear):
+        nn.init.kaiming_normal_(layer.weight, mode="fan_in", nonlinearity="relu")
+        if layer.bias is not None:
+            layer.bias.data.zero_()
+    # --- Recursive  ---
+    for child in layer.children():
+        conditional_recursive_he_normal_init(child)
+
+
+def other_init(layer):
+    # same as in TF
+    if isinstance(layer, (nn.LayerNorm, nn.BatchNorm1d)):
+        layer.bias.data.zero_()
+        layer.weight.data.fill_(1.0)
 
 
 # model setting up utils
@@ -47,6 +118,8 @@ def safe_state_dict_loader(org_model_state_dict, load_model_state_dict, partial_
 
 
 def setup_model(config, logger):
+    from model.model import Borzoi  # Import moved here to avoid circular import
+    
     model_config = config.model
     training_config = config.training
 

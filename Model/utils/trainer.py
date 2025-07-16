@@ -518,13 +518,12 @@ class DNASeqModelTrainer:
             seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
                 self.local_rank, non_blocking=True
             )
-            # pred_embedding shape [batch, num_trail, num_central_bin]
-            # after permute, should be [batch, num_central_bin, num_trail]
+            # [batch, num_central_bin, num_trail]
             pred = self.model(
                 seq_embedding.permute(0, 2, 1),
                 self.model_config.use_head,
                 data_parallel_training=True if self.world_size > 1 else False,
-            ).permute(0, 2, 1)
+            )
 
             # loss
             loss = self.criterion(pred, label) / self.training_config.accum_step
@@ -600,12 +599,12 @@ class DNASeqModelTrainer:
                 seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
                     self.local_rank, non_blocking=True
                 )
-                # pred_embedding shape [batch, num_trail (93), num_central_bin (896)]
+                # pred_embedding shape [batch, num_central_bin (896), num_trail (93)]
                 pred = self.inference_model(
                     seq_embedding.permute(0, 2, 1),
                     self.model_config.use_head,
                     data_parallel_training=True if self.world_size > 1 else False,
-                ).permute(0, 2, 1)
+                )
 
                 # loss
                 if log_loss:
@@ -809,12 +808,12 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
                 self.local_rank, non_blocking=True
             )
-            # pred org shape [batch, num_trail (93), num_central_bin (896)]
+            # pred shape [batch, num_central_bin (896), num_trail (93)]
             pred = self.model_engine(
                 seq_embedding.permute(0, 2, 1),
                 self.model_config.use_head,
                 data_parallel_training=True if self.world_size > 1 else False,
-            ).permute(0, 2, 1)
+            )
 
             # loss
             loss = self.criterion(pred, label) / self.training_config.accum_step

@@ -9,7 +9,6 @@ use_autocast: False  # whether to use autocast, if using FlashAttention, always 
 conv_dna_param:  # parameters for the convolutional DNA layer
   out_channels: 512  # number of output channels for the conv layer
   kernel_size: 15  # kernel size for the conv layer
-  pool_size: 2  # pooling size for the conv layer
 
 res_tower_param:  # parameters for the residual tower
   filters_init: 608 # initial number of output channels
@@ -41,5 +40,7 @@ final_joined_conv_param:
   dropout: 0.1  # dropout rate for the final conv layer
 
 output_heads: # set up the prediction head name and trial number
-  human: 87 
+  human:
+    track_num: 87
+    task: regression # choose from `regression` or `classification`
 use_head: human # the head use for forward pass

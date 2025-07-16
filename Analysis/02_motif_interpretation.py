@@ -130,7 +130,7 @@ def process_region_chunk(args):
         with torch.no_grad():
             pred_res = model(
                 test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), myconfig.model.use_head, False
-            ).permute(0, 2, 1)
+            )
             pred_res_trial = pred_res.detach().cpu().numpy()[0, :, trial_dim]
             del pred_res
 
@@ -182,7 +182,7 @@ def process_region_chunk(args):
                     attribution = dl_model.attribute(
                         inputs=input_tensor,
                         baselines=baseline_tensor,
-                        target=(trial_dim, bin),
+                        target=(bin, trial_dim),
                     )
                     if not torch.isfinite(attribution).all():
                         logger.warning(f"NAN occur in {identifier}, bin num {bin}")
@@ -221,7 +221,7 @@ def process_region_chunk(args):
             # we only look at the contribution from the ref genome
             # [batch, N, 4] -> [batch, N] -> [N] -> [bin_num, window_size] -> [bin_num]
             with torch.no_grad():
-                signal = (all_attribution.permute(0, 2, 1) * test_seq_onehot).sum(dim=-1).mean(dim=0)
+                signal = (all_attribution * test_seq_onehot).sum(dim=-1).mean(dim=0)
                 signal = signal.reshape(-1, myconfig.data.preprocess.window_size)[trim:-trim]
                 signal = signal.mean(dim=-1).detach()
 

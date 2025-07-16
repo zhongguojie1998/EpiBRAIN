@@ -13,17 +13,21 @@
 # limitations under the License.
 # =========================================================================
 
-import copy
-import math
-from pathlib import Path
-
-import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
-from model.config_borzoi import BorzoiConfig
-from model.pytorch_borzoi_transformer import Attention, FlashAttention
-from model.pytorch_borzoi_utils import Residual, TargetLengthCrop, compute_channel_sizes
+from model.model_building_block import (
+    Attention,
+    FlashAttention,
+    Residual,
+    TargetLengthCrop,
+)
+from model.model_config import BorzoiConfig
+from model.model_utils import (
+    compute_channel_sizes,
+    conditional_recursive_he_normal_init,
+    lecun_normal_init,
+    other_init,
+)
 from transformers import PreTrainedModel
 
 ## these for AnnotatedBorzoi
@@ -33,45 +37,6 @@ from transformers import PreTrainedModel
 # torch.backends.cudnn.deterministic = True
 
 # torch.set_float32_matmul_precision('high')
-
-
-def lecun_normal_init(layer):
-    if isinstance(layer, nn.Conv1d):
-        fan_in = layer.in_channels * layer.kernel_size[0]
-        std = math.sqrt(1.0 / fan_in)
-        nn.init.normal_(layer.weight, mean=0, std=std)
-    elif isinstance(layer, nn.Linear):
-        fan_in = layer.in_features
-        std = math.sqrt(1.0 / fan_in)
-        nn.init.normal_(layer.weight, mean=0, std=std)
-    # bias are set to 0 for all layers in TF
-    if isinstance(layer, (nn.Linear, nn.Conv1d)) and layer.bias is not None:
-        layer.bias.data.zero_()
-
-
-def conditional_recursive_he_normal_init(layer):
-    # --- Stop Condition ---
-    # If the current module is one of the types we want to skip,
-    # we stop the recursion for this entire branch.
-    if isinstance(layer, (Attention, FlashAttention)):
-        return
-    # --- Initialization Logic for the current module ---
-    # Apply the appropriate initialization based on the module type.
-    if isinstance(layer, nn.Linear):
-        nn.init.kaiming_normal_(layer.weight, mode="fan_in", nonlinearity="relu")
-        if layer.bias is not None:
-            layer.bias.data.zero_()
-    # --- Recursive  ---
-    for child in layer.children():
-        conditional_recursive_he_normal_init(child)
-
-
-def other_init(layer):
-    # same as in TF
-    if isinstance(layer, (nn.LayerNorm, nn.BatchNorm1d)):
-        layer.bias.data.zero_()
-        layer.weight.data.fill_(1.0)
-
 
 class ConvDna(nn.Module):
     def __init__(self, out_channels=None, kernel_size=1, pool_size=1):
@@ -91,7 +56,12 @@ class ConvBlock(nn.Module):
         if conv_type == "separable":
             self.norm = nn.Identity()
             depthwise_conv = nn.Conv1d(
-                in_channels, out_channels, kernel_size=kernel_size, groups=in_channels, padding="same", bias=False
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                groups=in_channels,
+                padding="same",
+                bias=False,
             )
             pointwise_conv = nn.Conv1d(in_channels, out_channels, kernel_size=1)
             self.conv_layer = nn.Sequential(depthwise_conv, pointwise_conv)
@@ -126,7 +96,8 @@ class Borzoi(PreTrainedModel):
 
         # model settings
         ## initial convolutional layers
-        self.conv_dna = ConvDna(**config.conv_dna_param)
+        self.conv_dna = ConvDna(**config.conv_dna_param, pool_size=config.res_tower_param["pool_size"])
+
         self._max_pool = nn.MaxPool1d(kernel_size=config.res_tower_param["pool_size"], padding=0)
 
         res_tower_filters = [config.conv_dna_param["out_channels"]] + compute_channel_sizes(
@@ -257,9 +228,11 @@ class Borzoi(PreTrainedModel):
 
         ## create output heads given the config.output_heads
         self.prediction_head = nn.ModuleDict()
-        for head_name, track_num in config.output_heads.items():
+        for head_name, track_params in config.output_heads.items():
             self.prediction_head[head_name] = nn.Conv1d(
-                in_channels=config.final_joined_conv_param["out_channels"], out_channels=track_num, kernel_size=1
+                in_channels=config.final_joined_conv_param["out_channels"],
+                out_channels=track_params["track_num"],
+                kernel_size=1,
             )
         self.final_softplus = nn.Softplus()
 
@@ -303,7 +276,7 @@ class Borzoi(PreTrainedModel):
             data_parallel_training (bool, optional): If True, perform forward pass specific to DDP. Defaults to False.
 
         Returns:
-            torch.Tensor: Output tensor with shape (N, C, crop_bin_num), where C is the number of tracks.
+            torch.Tensor: Output tensor with shape (N, crop_bin_num, C), where C is the number of tracks.
         """
         with torch.amp.autocast("cuda", enabled=self.use_autocast):
             x = self.conv_dna(x)
@@ -339,6 +312,6 @@ class Borzoi(PreTrainedModel):
                 for head_name, head in self.prediction_head.items():
                     if head != use_head:
                         out += 0 * self.prediction_head[head_name](x.float()).sum()
-                return out
+                return out.permute(0, 2, 1)
             else:
-                return self.final_softplus(self.prediction_head[use_head](x.float()))
+                return self.final_softplus(self.prediction_head[use_head](x.float())).permute(0, 2, 1)
