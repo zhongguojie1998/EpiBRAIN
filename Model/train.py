@@ -18,7 +18,7 @@ from data.preprocess import preprocess
 from omegaconf import OmegaConf
 from torch.distributed.elastic.multiprocessing.errors import record
 from utils.config import load_config, write_deepspeed_config
-from utils.logging import LOGGER_PREFIX, LazyLogger, save_tensorboard_run_script, setup_logging
+from utils.logging import LOGGER_PREFIX, LazyLogger, setup_logging
 from utils.multi_gpu import find_free_port
 from utils.trainer import mp_main
 
@@ -151,12 +151,6 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
     if deepspeed:
         myconfig.training.deepspeed_config = f"{myconfig.logging.log_dir}/deepspeed_setup.json"
         write_deepspeed_config(myconfig, f"{myconfig.logging.log_dir}/deepspeed_setup.json")
-
-    ## write a tensorboard booting bash script
-    if myconfig.logging.use_tensorboard:
-        save_tensorboard_run_script(
-            log_dir=f"{myconfig.logging.log_dir}/tb", save_dir=f"{myconfig.logging.log_dir}"
-        )
     
     if only_config:
         exit(0)

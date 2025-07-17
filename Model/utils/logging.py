@@ -264,25 +264,3 @@ class timer:
         msg = f"{self.name} elapsed time: {interval:4f} seconds"
 
         self._write(msg)
-
-
-def save_tensorboard_run_script(log_dir, port=8890, save_dir="."):
-    script = f"""#! /bin/bash
-set -Eeuo pipefail
-
-# activate conda environment
-__conda_setup="$('conda' 'shell.bash' 'hook' 2> /dev/null)"
-eval "$__conda_setup"
-unset __conda_setup
-
-conda activate bican
-
-echo "Visualize on local machine use:"
-echo "ssh -L {port}:localhost:{port} $USER@$HOSTNAME"
-echo ""
-
-tensorboard --logdir {os.path.abspath(log_dir)} --port {port}
-    """
-
-    with open(f"{save_dir}/tensorboard.sh", "w") as f:
-        f.write(script)
