@@ -96,7 +96,9 @@ class Borzoi(PreTrainedModel):
 
         # model settings
         ## initial convolutional layers
-        self.conv_dna = ConvDna(**config.conv_dna_param, pool_size=config.res_tower_param["pool_size"])
+        if not config.conv_dna_param.get("pool_size"):
+            config.conv_dna_param["pool_size"] = config.res_tower_param["pool_size"]
+        self.conv_dna = ConvDna(**config.conv_dna_param)
 
         self._max_pool = nn.MaxPool1d(kernel_size=config.res_tower_param["pool_size"], padding=0)
 

@@ -953,20 +953,21 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
 
         else:
             trainer.data_rand_seed.value = trainer.current_epoch
+            save_pred_res = myconfig.logging.get("save_pred_res", True)
 
             if trainer.data_func["train"]["data_loader"] is not None:
                 with timer(f"[Train/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                    trainer.infer_step(log_loss=False, log_prefix="Train", save_pred=True)
+                    trainer.infer_step(log_loss=False, log_prefix="Train", save_pred=save_pred_res)
                 blocking_sync_wait(world_size)
 
             if trainer.data_func["valid"]["data_loader"] is not None:
                 with timer(f"[Valid/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                    trainer.infer_step(log_loss=False, log_prefix="Valid", save_pred=True)
+                    trainer.infer_step(log_loss=False, log_prefix="Valid", save_pred=save_pred_res)
                 blocking_sync_wait(world_size)
 
             if trainer.data_func["test"]["data_loader"] is not None:
                 with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                    trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=True)
+                    trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=save_pred_res)
                 blocking_sync_wait(world_size)
 
             # save the raw preds and write the metrics

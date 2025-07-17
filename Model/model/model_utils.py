@@ -119,13 +119,14 @@ def safe_state_dict_loader(org_model_state_dict, load_model_state_dict, partial_
 
 def setup_model(config, logger):
     from model.model import Borzoi  # Import moved here to avoid circular import
-    
+    from model.model_org import Borzoi as Borzoi_org  # Import moved here to avoid circular import
+
     model_config = config.model
     training_config = config.training
 
     # get our model skeleton
     if "borzoi" in model_config.model_name or "flashzoi" in model_config.model_name:
-        model_cls = Borzoi
+        model_cls = Borzoi if not model_config.get("org_imp", False) else Borzoi_org
     else:
         logger.error(f"Model {model_config.model_name} is not implemented yet.")
         exit(1)
@@ -141,7 +142,7 @@ def setup_model(config, logger):
         # in case we need to load the pretrained model and only want to load part of them
         partial_load = model_config.get("partial_load", None)
         partial_load = list(model.state_dict().keys()) if partial_load is None else partial_load
-        
+
         # load the pretrained state dict
         pretrained_model = model_cls.from_pretrained(model_config.model_name)
         org_model_state_dict = model.state_dict()
