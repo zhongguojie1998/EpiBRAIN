@@ -111,8 +111,8 @@ def main(exp_name, chk, splits, res_base, data_base, use_mp, n_processes):
         print(f"Plot metric (cell type level) for {split}")
 
         metric = pd.read_csv(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric.csv", index_col=0)
-        metric["cell_type"] = metric.index.str.rsplit("_", n=0).str[0]
-        metric["modality"] = metric.index.str.rsplit("_", n=0).str[-1]
+        metric["cell_type"] = metric.index.str.rsplit("_", n=1).str[0]
+        metric["modality"] = metric.index.str.rsplit("_", n=1).str[-1]
 
         # Calculate median values and create x-positions as before
         median_values = (

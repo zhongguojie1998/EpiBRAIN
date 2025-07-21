@@ -192,7 +192,7 @@ class LazyLogger:
         self._real_logger = None
         self._backup_logger = BaseLogger(
             name=f"{LOGGER_PREFIX}-Backup Error Logger",
-            level=logging.DEBUG,
+            level=logging.INFO,
             log_dir=None,
         )
 

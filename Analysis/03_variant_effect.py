@@ -25,12 +25,25 @@ from utils.config import load_config
 from utils.logging import BaseLogger
 
 
+def onehot_to_str(seq_onehot):
+    """Convert one-hot encoded tensor (L x 4) to DNA string"""
+    mapping = {(1, 0, 0, 0): "A", (0, 1, 0, 0): "C", (0, 0, 1, 0): "G", (0, 0, 0, 1): "T", (0, 0, 0, 0): "N"}
+
+    seq_str = ""
+    for vec in seq_onehot:
+        key = tuple((vec > 0.5).int().tolist())
+        seq_str += mapping.get(key, "N")  # default to "N" if no match
+    return seq_str
+
+
 def process_vcf_chunk(args):
     chunk_data, config_path, checkpoint_path, save_base, device = args
 
     # Load config
     myconfig = load_config(config_name=config_path)
     logger = BaseLogger(name=f"Variant Effect-{device}", level=logging.INFO)
+    data_config = pd.read_csv(f"{myconfig.data.preprocess.trial_summary_path}", index_col=0)
+    label_meta = pd.read_csv(f"{myconfig.data.storage_path}/label_meta.csv", index_col=1)
 
     # Setup model
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -51,18 +64,19 @@ def process_vcf_chunk(args):
             continue
 
         # get ref seq
+        # tokenizer is python indexed (from 0) but the vcf is natural indexed (from 1)
         token_dict = dna_tokenizer(
-            chr_name=chr_name, start=pos, end=pos + 1, return_augs=False, return_rela_idx=True
+            chr_name=chr_name, start=pos - 1, end=pos, return_augs=False, return_rela_idx=True
         )
         s_idx, e_idx = token_dict["rela_idx"]
         wt_seq_onehot = token_dict["one_hot"]
         real_start, real_end = token_dict["real_region"]
 
         # check ref
-        wt_nt_onehot = str_to_one_hot(ref)
-        if not torch.equal(wt_nt_onehot, wt_seq_onehot[s_idx:e_idx]):
+        wt_nt_fetched = onehot_to_str(wt_seq_onehot[s_idx:e_idx])
+        if not ref == wt_nt_fetched:
             logger.warning(
-                f"Ref info isn't consistent with genome. {chr_name}: {pos}, given {wt_nt_onehot}, fetched {wt_seq_onehot[s_idx:e_idx]}"
+                f"Ref info isn't consistent with genome. {chr_name}: {pos}, given {ref}, fetched {wt_nt_fetched}"
             )
             continue
 
@@ -71,6 +85,7 @@ def process_vcf_chunk(args):
         mut_seq_onehot = wt_seq_onehot.clone()
         mut_seq_onehot[s_idx:e_idx] = alt_nt_onehot
 
+        # get pred result
         with torch.no_grad():
             pred_res_wt = (
                 model(wt_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), myconfig.model.use_head, False)
@@ -87,8 +102,43 @@ def process_vcf_chunk(args):
                 .squeeze(0)
             )
 
+        # get label
+        os.makedirs(f"{save_base}/tmp/", exist_ok=True)
+        unmap_npy = f"{save_base}/tmp/{name_base}_mseqs_unmap.npy"
+        label_h5 = f"{save_base}/tmp/{name_base}_label.h5"
+
+        mseqs = [ModelSeq(chr_name, real_start, real_end, "test")]
+
+        mseqs_unmap = annotate_unmap(
+            mseqs,
+            myconfig.data.preprocess.unmap_bed,
+            myconfig.data.preprocess.context_length,
+            myconfig.data.preprocess.window_size,
+        )
+        np.save(unmap_npy, mseqs_unmap)
+
+        label_trial = {}
+        for i in data_config.index:
+            get_labels(
+                mseqs,
+                blacklist_bed=myconfig.data.preprocess.blacklist_bed,
+                pool_width=myconfig.data.preprocess.window_size,
+                kept_num_after_crop=myconfig.data.preprocess.n_window,
+                seqs_cov_file=label_h5,
+                genome_cov_file=data_config.loc[i, "file"],
+                umap_npy_path=unmap_npy,
+                **data_config.loc[i].drop(["exp", "file"]).to_dict(),
+            )
+            with h5py.File(label_h5, "r") as f:
+                label_trial[data_config.loc[i, "exp"]] = f["targets"][0]
+        labels = np.zeros((myconfig.data.preprocess.n_window, len(label_meta)))
+        for k,v in label_trial.items():
+            dim = label_meta.loc[k, "dim"]
+            labels[:, dim] = v
+
         with h5py.File(f"{save_base}/{name_base}.h5", "w") as f:
             data_group = f.create_group("data")
+            data_group.create_dataset("label", data=labels, compression="gzip")
             data_group.create_dataset("pred_wt", data=pred_res_wt, compression="gzip")
             data_group.create_dataset("pred_alt", data=pred_res_mut, compression="gzip")
             data_group.create_dataset("diff", data=pred_res_mut - pred_res_wt, compression="gzip")
