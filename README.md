@@ -55,6 +55,7 @@ pip install tensorboard  # better logging
 
 ```bash
 pip install matplotlib seaborn scikit-learn ipykernel 
+pip install cyvcf2   # for reading vcf files
 pip install captum   # for model interpretation
 pip install modisco  # for visualization
 ```
