@@ -1,11 +1,11 @@
 import os
 import sqlite3
-import subprocess
-import tempfile
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 import click
 import pandas as pd
+import rsidx
 from tqdm import tqdm
 
 refseq_map = {
@@ -57,69 +57,82 @@ def load_sum_stat(sum_stat_path):
     return df
 
 
-def query_vcf_with_rsidx(rsids, vcf_path, rsidx_path):
-    """Use rsidx command line to efficiently query VCF for rsIDs"""
-    if not rsids:
+def _query_rsid_chunk(args):
+    """Helper function to query a chunk of rsIDs using Python API"""
+    rsid_chunk, vcf_path, rsidx_path, chunk_id = args
+    
+    if not rsid_chunk:
+        return {}
+    
+    try:
+        vcf_variants = {}
+        
+        # Open database connection - rsidx API expects file paths, not file objects
+        with sqlite3.connect(rsidx_path) as dbconn:
+            # Use rsidx Python API to search - pass file path, not file object
+            for line in rsidx.search.search(rsid_chunk, dbconn, vcf_path):
+                if not line or line.startswith("#"):
+                    continue
+                
+                parts = line.strip().split("\t")
+                if len(parts) >= 5:
+                    chrom, pos, rsid, ref, alt_list = parts[:5]
+                    alts = alt_list.split(",")
+                    vcf_variants[rsid] = {"chr": chrom, "pos": int(pos), "ref": ref, "alts": alts}
+        
+        return vcf_variants
+        
+    except Exception as e:
+        print(f"Error in chunk {chunk_id} using Python API: {e}")
         return {}
 
+
+def query_vcf_with_rsidx(rsids, vcf_path, rsidx_path, n_processes=None, chunk_size=10000):
+    """Use rsidx Python API with multiprocessing to efficiently query VCF for rsIDs"""
+    if not rsids:
+        return {}
+    
     # Check if rsidx file exists
     if not os.path.exists(rsidx_path):
         print(f"Error: rsidx file not found: {rsidx_path}")
         print("Please generate the rsidx file first using:")
         print(f"  rsidx index {vcf_path} {rsidx_path}")
         exit(1)
-
-    # Write rsids to temporary file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as temp_file:
-        for rsid in rsids:
-            temp_file.write(f"{rsid}\n")
-        temp_file_path = temp_file.name
-
-    print(f"Querying {len(rsids)} rsIDs using rsidx...")
-
-    try:
-        # Use rsidx command line to query with file
-        cmd = ["rsidx", "search", vcf_path, rsidx_path, "--file", temp_file_path]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-
-        if result.returncode != 0:
-            print(f"Error: rsidx query failed: {result.stderr}")
-            print(f"Temporary file with rsIDs: {temp_file_path}")
-            print("Checking for problematic rsIDs...")
-
-            # Read and show first few lines of temp file for debugging
-            with open(temp_file_path, 'r') as f:
-                lines = f.readlines()[:10]
-                print(f"First 10 rsIDs in temp file:")
-                for i, line in enumerate(lines):
-                    print(f"  {i+1}: {line.strip()}")
-
-            print(f"Temp file preserved at: {temp_file_path}")
-            return {}
-
-        # Parse results
-        vcf_variants = {}
-        print("Parsing...")
-        for line in tqdm(result.stdout.strip().split("\n")):
-            if not line or line.startswith("#"):
-                continue
-
-            parts = line.split("\t")
-            if len(parts) >= 5:
-                chrom, pos, rsid, ref, alt_list = parts[:5]
-                # Handle multiple ALT alleles
-                alts = alt_list.split(",")
-                vcf_variants[rsid] = {"chr": chrom, "pos": int(pos), "ref": ref, "alts": alts}
-
-        print(f"rsidx query complete: found {len(vcf_variants)} variants")
-        return vcf_variants
-
-    finally:
-        # Clean up temporary file (only if no error occurred)
-        if result.returncode == 0:
-            os.unlink(temp_file_path)
-        # If there was an error, temp file is preserved for debugging
+    
+    # Determine number of processes
+    if n_processes is None:
+        n_processes = min(cpu_count(), 8)  # Cap at 8 to avoid overwhelming the system
+    
+    # Split rsIDs into chunks
+    rsid_chunks = []
+    for i in range(0, len(rsids), chunk_size):
+        chunk = rsids[i:i + chunk_size]
+        rsid_chunks.append((chunk, vcf_path, rsidx_path, i // chunk_size))
+    
+    print(f"Querying {len(rsids)} rsIDs using rsidx Python API with {n_processes} processes...")
+    print(f"Split into {len(rsid_chunks)} chunks of ~{chunk_size} rsIDs each")
+    
+    # Use multiprocessing to query chunks in parallel
+    vcf_variants = {}
+    
+    if len(rsid_chunks) == 1:
+        # Single chunk, no need for multiprocessing
+        result = _query_rsid_chunk(rsid_chunks[0])
+        vcf_variants.update(result)
+    else:
+        # Multiple chunks, use multiprocessing
+        with Pool(processes=min(n_processes, len(rsid_chunks))) as pool:
+            results = []
+            for result in tqdm(pool.imap(_query_rsid_chunk, rsid_chunks), 
+                             total=len(rsid_chunks), desc="Processing chunks"):
+                results.append(result)
+        
+        # Merge results from all chunks
+        for chunk_result in results:
+            vcf_variants.update(chunk_result)
+    
+    print(f"rsidx query complete: found {len(vcf_variants)} variants")
+    return vcf_variants
 
 
 def validate_and_match_alleles(sum_stat_variant, vcf_variant, allow_ref_alt_reverse):
@@ -159,20 +172,22 @@ def create_variant_index_key(chrom, pos, ref, alt):
     "--rsidx_file",
     help="Path to rsidx index file (.rsidx) (default to the same vcf naming with .rsidx in the end)",
 )
-@click.option("--output_dir", help="Output directory for logs (defaults to output file directory)")
+@click.option("--log_dir", help="Output directory for logs (defaults to output file directory)")
 @click.option("-e", "--experiment_name", help="Experiment name for log files (defaults to output file stem)")
 @click.option("-a", "--allow_ref_alt_reverse", is_flag=True, help="Whether to allow ref alt be reversed when fetching and checking from standard vcf file")
-def main(sum_stat_file, vcf_file, output_file, rsidx_file, output_dir, experiment_name, allow_ref_alt_reverse):
+@click.option("-p", "--n_processes", type=int, help="Number of processes for multiprocessing (default: auto-detect)")
+@click.option("-c", "--chunk_size", type=int, default=10000, help="Chunk size for multiprocessing (default: 10000)")
+def main(sum_stat_file, vcf_file, output_file, rsidx_file, log_dir, experiment_name, allow_ref_alt_reverse, n_processes, chunk_size):
     """Enrich GWAS summary statistics with genomic coordinates"""
 
     output_path = Path(output_file)
 
     # Setup output directory and experiment name
-    if output_dir is None:
-        output_dir = output_path.parent
+    if log_dir is None:
+        log_dir = output_path.parent
     else:
-        output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+        log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     if experiment_name is None:
         experiment_name = output_path.stem
@@ -181,7 +196,7 @@ def main(sum_stat_file, vcf_file, output_file, rsidx_file, output_dir, experimen
         rsidx_file = vcf_file + ".rsidx"
 
     # processing log
-    log_file = output_dir / f"log_{experiment_name}.gz"
+    log_file = log_dir / f"log_{experiment_name}.gz"
 
     print(f"Input: {sum_stat_file}")
     print(f"VCF: {vcf_file}")
@@ -200,7 +215,7 @@ def main(sum_stat_file, vcf_file, output_file, rsidx_file, output_dir, experimen
     print(f"Unique rsIDs: {len(legal_rsids)}")
 
     # Query VCF with rsidx
-    vcf_results = query_vcf_with_rsidx(legal_rsids, vcf_file, rsidx_file)
+    vcf_results = query_vcf_with_rsidx(legal_rsids, vcf_file, rsidx_file, n_processes, chunk_size)
 
     # Process all variants (including duplicates)
     print("Processing variants...")
