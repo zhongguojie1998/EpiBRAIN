@@ -22,6 +22,58 @@ def pick_tasks(h5_path, force=False):
             return pending_indices
 
 
+def parse_gpu_machines(gpu_machines_str):
+    """Parse GPU machine configuration from string format machine:gpu,machine:gpu,..."""
+    if not gpu_machines_str:
+        return {}
+    
+    machines = {}
+    for machine_config in gpu_machines_str.split(','):
+        if ':' not in machine_config:
+            raise ValueError(f"Invalid machine format: {machine_config}. Expected format: machine:gpu_count")
+        
+        machine, gpu_count = machine_config.strip().split(':', 1)
+        try:
+            machines[machine.strip()] = int(gpu_count.strip())
+        except ValueError:
+            raise ValueError(f"Invalid GPU count for machine {machine}: {gpu_count}")
+    
+    return machines
+
+
+def calculate_max_nprocs(gpu_machines, max_tasks_per_gpu=10):
+    """Calculate maximum number of processes based on GPU resources"""
+    if not gpu_machines:
+        return None
+    
+    total_gpus = sum(gpu_machines.values())
+    return total_gpus * max_tasks_per_gpu
+
+
+def assign_chunks_to_gpus(nprocs, gpu_machines):
+    """Assign chunk indices to GPU devices across machines"""
+    if not gpu_machines:
+        return None
+    
+    # Create list of all available GPUs
+    gpu_list = []
+    for machine, gpu_count in gpu_machines.items():
+        for gpu_id in range(gpu_count):
+            gpu_list.append({
+                'machine': machine,
+                'gpu_id': gpu_id,
+                'device': f'cuda:{gpu_id}'
+            })
+    
+    # Assign chunks to GPUs in round-robin fashion
+    chunk_gpu_mapping = {}
+    for chunk_id in range(nprocs):
+        gpu_info = gpu_list[chunk_id % len(gpu_list)]
+        chunk_gpu_mapping[chunk_id] = gpu_info
+    
+    return chunk_gpu_mapping
+
+
 def chunkify(lst, k):
     """Divide list into k roughly equal chunks"""
     if not lst:
@@ -76,6 +128,40 @@ def create_slurm_script(
     return script_path
 
 
+def create_machine_run_scripts(chunk_gpu_mapping, output_dir):
+    """Create run_all.sh scripts for each machine by grouping individual chunk scripts"""
+    machine_scripts = {}
+    
+    # Group chunks by machine
+    machines = {}
+    for chunk_id, gpu_info in chunk_gpu_mapping.items():
+        machine = gpu_info['machine']
+        if machine not in machines:
+            machines[machine] = []
+        machines[machine].append(chunk_id)
+    
+    # Create run script for each machine
+    for machine, chunk_ids in machines.items():
+        script_path = f"{output_dir}/run_all_{machine}.sh"
+        
+        with open(script_path, "w") as f:
+            f.write("#!/bin/bash\n")
+            f.write(f"# Run script for machine: {machine}\n")
+            f.write(f"# Total chunks: {len(chunk_ids)}\n\n")
+            
+            # Add each chunk script as background process
+            for chunk_id in chunk_ids:
+                f.write(f"{output_dir}/run_chunk_{chunk_id}.sh &\n")
+            
+            f.write("\nwait\n")
+            f.write(f'echo "All chunks completed on {machine}"\n')
+        
+        os.chmod(script_path, 0o755)
+        machine_scripts[machine] = script_path
+    
+    return machine_scripts
+
+
 @click.command()
 @click.option("-h5", "--hdf5_file", required=True, help="Path to HDF5 file")
 @click.option("-n", "--nprocs", type=int, required=True, help="Number of processes/jobs")
@@ -84,6 +170,8 @@ def create_slurm_script(
 @click.option("-c", "--compute_script", default="compute.py", help="Path to compute script")
 @click.option("--force", is_flag=True, help="Force recompute all tasks")
 @click.option("--device", default="cpu", help="Computing device (cpu/cuda)")
+@click.option("--gpu_machines", help="GPU machine configuration (format: machine1:gpu_count1,machine2:gpu_count2)")
+@click.option("--max_tasks_per_gpu", type=int, default=10, help="Maximum tasks per GPU (default: 10)")
 @click.option("--use_slurm", is_flag=True, help="Generate SLURM scripts")
 @click.option("--slurm_partition", default="nova", help="SLURM partition")
 @click.option("--slurm_time", default="0", help="SLURM time limit")
@@ -97,6 +185,8 @@ def main(
     compute_script,
     force,
     device,
+    gpu_machines,
+    max_tasks_per_gpu,
     use_slurm,
     slurm_partition,
     slurm_time,
@@ -119,19 +209,44 @@ def main(
         print("No tasks to process!")
         return
 
-    # Divide tasks into chunks
+    # Parse GPU machines if provided
+    gpu_machine_config = parse_gpu_machines(gpu_machines) if gpu_machines else {}
+    
+    # Calculate max nprocs based on GPU resources if CUDA
+    if device == "cuda" and gpu_machine_config:
+        max_nprocs = calculate_max_nprocs(gpu_machine_config, max_tasks_per_gpu)
+        if nprocs > max_nprocs:
+            print(f"Warning: nprocs ({nprocs}) exceeds GPU capacity ({max_nprocs})")
+            print(f"Capping nprocs to {max_nprocs}")
+            nprocs = max_nprocs
+        
+        print(f"GPU resource summary:")
+        total_gpus = sum(gpu_machine_config.values())
+        print(f"  Total GPUs: {total_gpus}")
+        print(f"  Max tasks per GPU: {max_tasks_per_gpu}")
+        print(f"  Max processes: {max_nprocs}")
+        print(f"  Using processes: {nprocs}")
+    
+    # Use original chunking logic
     chunks = chunkify(task_indices, nprocs)
     actual_chunks = [chunk for chunk in chunks if chunk]  # Remove empty chunks
-
+    
     print(f"Divided into {len(actual_chunks)} non-empty jobs")
-
-    # Save chunk information
+    
+    # Save chunk information (same as original)
     for idx, chunk in enumerate(actual_chunks):
         chunk_data = {"chunk_id": idx, "task_indices": chunk, "n_tasks": len(chunk)}
-
-        # Save chunk file
+        
         with open(f"{output_dir}/chunk_{idx}.json", "w") as fp:
             json.dump(chunk_data, fp, indent=2)
+    
+    # Assign chunks to GPUs if using CUDA
+    chunk_gpu_mapping = None
+    if device == "cuda" and gpu_machine_config:
+        chunk_gpu_mapping = assign_chunks_to_gpus(len(actual_chunks), gpu_machine_config)
+        print(f"GPU assignment:")
+        for chunk_id, gpu_info in chunk_gpu_mapping.items():
+            print(f"  Chunk {chunk_id} -> {gpu_info['machine']}:GPU{gpu_info['gpu_id']}")
 
     # Save overall job information
     job_info = {
@@ -143,12 +258,16 @@ def main(
         "device": device,
         "force_recompute": force,
     }
+    
+    if device == "cuda" and gpu_machine_config:
+        job_info["gpu_machines"] = gpu_machine_config
+        job_info["max_tasks_per_gpu"] = max_tasks_per_gpu
 
     with open(f"{output_dir}/job_info.json", "w") as fp:
         json.dump(job_info, fp, indent=2)
 
     if use_slurm:
-        # Generate SLURM scripts
+        # Generate SLURM scripts (unchanged for now)
         slurm_config = {
             "partition": slurm_partition,
             "time": slurm_time,
@@ -182,35 +301,53 @@ def main(
         print(f"Run: {submit_script} to submit all jobs")
 
     else:
-        # Generate simple shell scripts for local execution
+        # Generate individual chunk scripts (same as original)
         scripts = []
         for idx in range(len(actual_chunks)):
             script_path = f"{output_dir}/run_chunk_{idx}.sh"
+            
+            # Determine device for this chunk
+            if chunk_gpu_mapping and idx in chunk_gpu_mapping:
+                chunk_device = chunk_gpu_mapping[idx]['device']
+            else:
+                chunk_device = device
+            
             with open(script_path, "w") as f:
-                f.write(
-                    f"""#!/bin/bash
+                f.write(f"""#!/bin/bash
 {PYTHON} {compute_script} \\
   --hdf5_file {hdf5_file} \\
   --chunk_file {output_dir}/chunk_{idx}.json \\
   --model_path {model_path} \\
-  --device {device}
-"""
-                )
+  --device {chunk_device}
+""")
             os.chmod(script_path, 0o755)
             scripts.append(script_path)
 
         print(f"Generated {len(scripts)} shell scripts for local execution")
 
-        # Create run all script (like submit_all.sh for SLURM)
-        run_all_script = f"{output_dir}/run_all.sh"
-        with open(run_all_script, "w") as f:
-            f.write("#!/bin/bash\n\n")
-            for script in scripts:
-                f.write(f"{script} &\n")
-            f.write("\nwait\necho \"All chunks completed\"\n")
+        # Check if we have GPU machine configuration for machine-specific scripts
+        if device == "cuda" and gpu_machine_config and chunk_gpu_mapping:
+            # Generate machine-specific run scripts
+            machine_scripts = create_machine_run_scripts(chunk_gpu_mapping, output_dir)
+            
+            print(f"Generated machine-specific run scripts:")
+            for machine, script_path in machine_scripts.items():
+                machine_chunks = [chunk_id for chunk_id, gpu_info in chunk_gpu_mapping.items() 
+                                if gpu_info['machine'] == machine]
+                total_tasks = sum(len(actual_chunks[chunk_id]) for chunk_id in machine_chunks)
+                print(f"  {machine}: {script_path} ({len(machine_chunks)} chunks, {total_tasks} tasks)")
+            
+        else:
+            # Create single run all script (original logic)
+            run_all_script = f"{output_dir}/run_all.sh"
+            with open(run_all_script, "w") as f:
+                f.write("#!/bin/bash\n\n")
+                for script in scripts:
+                    f.write(f"{script} &\n")
+                f.write("\nwait\necho \"All chunks completed\"\n")
 
-        os.chmod(run_all_script, 0o755)
-        print(f"Run: {run_all_script} to execute all chunks in parallel")
+            os.chmod(run_all_script, 0o755)
+            print(f"Run: {run_all_script} to execute all chunks in parallel")
 
     print(f"\nTask distribution complete:")
     for i, chunk in enumerate(actual_chunks):
