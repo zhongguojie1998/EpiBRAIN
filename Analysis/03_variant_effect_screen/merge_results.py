@@ -136,12 +136,21 @@ def main(hdf5_file, chunk_dir, cleanup, force):
         variants_grp = f['variants']
         results_grp = f['results']
 
-        # Update status and results
-        for i, variant_idx in enumerate(tqdm(all_indices, desc="Updating main file")):
-            # Update status
-            variants_grp['status'][variant_idx] = 'computed'
-            # Store results
-            results_grp['variant_effects'][variant_idx, :] = all_results[i, :]
+        # Update status and results in batch for much better performance
+        print("Sorting indices for optimal HDF5 access...")
+        # Sort indices for better access pattern (contiguous reads/writes are faster)
+        sort_order = np.argsort(all_indices)
+        sorted_indices = all_indices[sort_order]
+        sorted_results = all_results[sort_order]
+        
+        print("Batch updating status...")
+        # Create status array
+        status_array = np.array(['computed'] * len(sorted_indices), dtype=h5py.string_dtype())
+        
+        print("Batch updating results...")
+        # Use fancy indexing for batch updates (much faster than individual updates)
+        variants_grp['status'][sorted_indices] = status_array
+        results_grp['variant_effects'][sorted_indices, :] = sorted_results
 
         # Update metadata
         f.attrs['last_merge_at'] = pd.Timestamp.now().isoformat()
