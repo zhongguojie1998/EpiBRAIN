@@ -6,6 +6,7 @@ import h5py
 import pandas as pd
 from tqdm import tqdm
 
+
 def load_enriched_sumstats(csv_path):
     """Load enriched summary statistics"""
     df = pd.read_csv(csv_path, sep="\t", compression="gzip" if csv_path.endswith(".gz") else None)
@@ -120,8 +121,8 @@ def main(enriched_sumstats, hdf5_file, label_meta, experiment_name, force):
 
     print(f"Existing variants in index: {len(existing_index)}")
 
-    # Separate new and existing variants
-    new_variants = []
+    # Separate new and existing variants using lists for better performance
+    new_variant_data = {"index_key": [], "rsid": [], "chr": [], "pos": [], "ref": [], "alt": [], "status": []}
     experiment_data = []
 
     for _, variant in tqdm(enriched_df.iterrows()):
@@ -138,32 +139,29 @@ def main(enriched_sumstats, hdf5_file, label_meta, experiment_name, force):
         )
 
         # Only add to main table if new
-        if index_key.encode() not in existing_index:
-            new_variants.append(
-                {
-                    "index_key": index_key,
-                    "rsid": variant["rsid"],
-                    "chr": variant["chr"],
-                    "pos": variant["pos"],
-                    "ref": variant["ref"],
-                    "alt": variant["alt"],
-                    "status": "pending",
-                }
-            )
+        if index_key not in existing_index:
+            new_variant_data["index_key"].append(index_key)
+            new_variant_data["rsid"].append(variant["rsid"])
+            new_variant_data["chr"].append(variant["chr"])
+            new_variant_data["pos"].append(variant["pos"])
+            new_variant_data["ref"].append(variant["ref"])
+            new_variant_data["alt"].append(variant["alt"])
+            new_variant_data["status"].append("pending")
 
-    print(f"New variants to add: {len(new_variants)}")
+    n_new_variants = len(new_variant_data["index_key"])
+    print(f"New variants to add: {n_new_variants}")
     print(f"Experiment data entries: {len(experiment_data)}")
 
     # Update HDF5
     with h5py.File(hdf5_file, "a") as f:
         # Add new variants to main table
-        if new_variants:
+        if new_variant_data["index_key"]:
             print("Adding new variants...")
             variants_grp = f["variants"]
             results_grp = f["results"]
 
             current_size = len(variants_grp["index_key"])
-            new_size = current_size + len(new_variants)
+            new_size = current_size + n_new_variants
 
             # Resize datasets
             for key in ["index_key", "rsid", "chr", "ref", "alt", "status"]:
@@ -171,16 +169,18 @@ def main(enriched_sumstats, hdf5_file, label_meta, experiment_name, force):
             variants_grp["pos"].resize((new_size,))
             results_grp["variant_effects"].resize((new_size, len(trial_names)))
 
-            # Add data
-            for i, variant in enumerate(new_variants):
-                idx = current_size + i
-                variants_grp["index_key"][idx] = variant["index_key"]
-                variants_grp["rsid"][idx] = variant["rsid"]
-                variants_grp["chr"][idx] = variant["chr"]
-                variants_grp["pos"][idx] = variant["pos"]
-                variants_grp["ref"][idx] = variant["ref"]
-                variants_grp["alt"][idx] = variant["alt"]
-                variants_grp["status"][idx] = variant["status"]
+            # Add data in batch - directly use the prepared lists (much faster)
+            start_idx = current_size
+            end_idx = current_size + n_new_variants
+
+            # Batch write all at once using pre-prepared lists
+            variants_grp["index_key"][start_idx:end_idx] = new_variant_data["index_key"]
+            variants_grp["rsid"][start_idx:end_idx] = new_variant_data["rsid"]
+            variants_grp["chr"][start_idx:end_idx] = new_variant_data["chr"]
+            variants_grp["pos"][start_idx:end_idx] = new_variant_data["pos"]
+            variants_grp["ref"][start_idx:end_idx] = new_variant_data["ref"]
+            variants_grp["alt"][start_idx:end_idx] = new_variant_data["alt"]
+            variants_grp["status"][start_idx:end_idx] = new_variant_data["status"]
 
         # Add experiment data
         if experiment_data:
@@ -211,7 +211,7 @@ def main(enriched_sumstats, hdf5_file, label_meta, experiment_name, force):
     print("=" * 60)
     print(f"Experiment: {experiment_name}")
     print(f"Total enriched variants: {len(enriched_df)}")
-    print(f"New variants added to main table: {len(new_variants)}")
+    print(f"New variants added to main table: {n_new_variants}")
     print(f"Experiment data entries: {len(experiment_data)}")
     print(f"HDF5 file: {hdf5_file}")
     print(f"Experiment data stored under: experiments/{experiment_name}")
