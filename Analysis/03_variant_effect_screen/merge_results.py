@@ -22,19 +22,24 @@ def validate_chunk_file(chunk_file):
     """Validate chunk file integrity"""
     try:
         with h5py.File(chunk_file, 'r') as f:
-            required_datasets = ['task_indices', 'results', 'successful_indices', 'successful_results']
-            required_attrs = ['chunk_id', 'total_variants', 'successful_computations', 'n_dims']
-            
+            required_datasets = [
+                "successful_indices",
+                "successful_results",
+                "error_indices",
+                "error_info",
+            ]
+            required_attrs = ['chunk_id', 'total_variants']
+
             for dataset in required_datasets:
                 if dataset not in f:
                     return False, f"Missing dataset: {dataset}"
-            
+
             for attr in required_attrs:
                 if attr not in f.attrs:
                     return False, f"Missing attribute: {attr}"
-            
+
             return True, "OK"
-            
+
     except Exception as e:
         return False, f"Error reading file: {e}"
 

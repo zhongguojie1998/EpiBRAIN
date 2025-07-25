@@ -1,4 +1,3 @@
-import json
 import os
 import pickle
 import sys
@@ -11,15 +10,24 @@ import h5py
 import numpy as np
 import pandas as pd
 import torch
+from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 ROOT = Path(__file__).parent.parent.parent
 sys.path.append(str(ROOT / "Model"))
-os.chdir(ROOT)
 
 from data.data_utils import STD_CHR
 from data.tokenizer import str_to_one_hot
+
+
+def onehot_to_str(seq_onehot):
+    mapping = {(1, 0, 0, 0): "A", (0, 1, 0, 0): "C", (0, 0, 1, 0): "G", (0, 0, 0, 1): "T", (0, 0, 0, 0): "N"}
+    seq_str = ""
+    for vec in seq_onehot:
+        key = tuple((vec > 0.5).int().tolist())
+        seq_str += mapping.get(key, "N")
+    return seq_str
 
 
 class ModelPackage:
@@ -36,190 +44,151 @@ class ModelPackage:
         self.__dict__.update(state)
 
 
-def onehot_to_str(seq_onehot):
-    """Convert one-hot encoded tensor (L x 4) to DNA string"""
-    mapping = {(1, 0, 0, 0): "A", (0, 1, 0, 0): "C", (0, 0, 1, 0): "G", (0, 0, 0, 1): "T", (0, 0, 0, 0): "N"}
+class VariantDataset(Dataset):
+    def __init__(self, h5_path, task_indices, dna_tokenizer):
+        self.task_indices = task_indices
+        self.dna_tokenizer = dna_tokenizer
 
-    seq_str = ""
-    for vec in seq_onehot:
-        key = tuple((vec > 0.5).int().tolist())
-        seq_str += mapping.get(key, "N")
-    return seq_str
+        with h5py.File(h5_path, "r") as f:
+            variants = f["variants"]
+            chrs = variants["chr"][task_indices]
+            poses = variants["pos"][task_indices]
+            refs = variants["ref"][task_indices]
+            alts = variants["alt"][task_indices]
 
+        if hasattr(chrs[0], "decode"):
+            chrs = [c.decode("utf-8") for c in chrs]
+        if hasattr(refs[0], "decode"):
+            refs = [r.decode("utf-8") for r in refs]
+        if hasattr(alts[0], "decode"):
+            alts = [a.decode("utf-8") for a in alts]
 
-def compute_variant_effect(model, dna_tokenizer, config, chr_name, pos, ref, alt, device="cpu"):
-    """Compute variant effect using the model"""
+        self.variants = list(zip(task_indices, chrs, poses, refs, alts))
 
-    if chr_name not in STD_CHR:
-        return None
+    def __len__(self):
+        return len(self.task_indices)
 
-    try:
-        # Get reference sequence (tokenizer is 0-indexed, VCF is 1-indexed)
-        token_dict = dna_tokenizer(
-            chr_name=chr_name, start=pos - 1, end=pos, return_augs=False, return_rela_idx=True
-        )
+    def __getitem__(self, idx):
+        task_index, chr_name, pos, ref, alt = self.variants[idx]
+        if chr_name not in STD_CHR:
+            return None, task_index, "invalid_chr"
 
-        s_idx, e_idx = token_dict["rela_idx"]
-        wt_seq_onehot = token_dict["one_hot"]
-
-        # Verify reference allele
-        wt_nt_fetched = onehot_to_str(wt_seq_onehot[s_idx:e_idx])
-        if ref != wt_nt_fetched:
-            print(f"Warning: Ref mismatch at {chr_name}:{pos}, expected {ref}, got {wt_nt_fetched}")
-            return None
-
-        # Create alternate sequence
-        alt_nt_onehot = str_to_one_hot(alt)
-        mut_seq_onehot = wt_seq_onehot.clone()
-        mut_seq_onehot[s_idx:e_idx] = alt_nt_onehot
-
-        # Get predictions
-        with torch.no_grad():
-            # Wild-type prediction
-            pred_res_wt = (
-                model(wt_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), config.model.use_head, False)
-                .detach()
-                .cpu()
-                .numpy()
-                .squeeze(0)
+        try:
+            token_dict = self.dna_tokenizer(
+                chr_name=chr_name, start=pos - 1, end=pos, return_augs=False, return_rela_idx=True
             )
+            s_idx, e_idx = token_dict["rela_idx"]
+            wt_seq_onehot = token_dict["one_hot"]
 
-            # Mutant prediction
-            pred_res_mut = (
-                model(mut_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), config.model.use_head, False)
-                .detach()
-                .cpu()
-                .numpy()
-                .squeeze(0)
-            )
+            wt_nt_fetched = onehot_to_str(wt_seq_onehot[s_idx:e_idx])
+            if ref != wt_nt_fetched:
+                return None, task_index, f"ref_mismatch(ref:{ref},get:{wt_nt_fetched})"
 
-        # Compute difference and sum across genomic positions (dim 0)
-        diff = pred_res_mut - pred_res_wt
-        variant_effect = np.sum(diff, axis=0)  # Sum across genomic positions
+            alt_nt_onehot = str_to_one_hot(alt)
+            mut_seq_onehot = wt_seq_onehot.clone()
+            mut_seq_onehot[s_idx:e_idx] = alt_nt_onehot
 
-        return variant_effect.astype(np.float32)
+            return (wt_seq_onehot, mut_seq_onehot), task_index, None
+        except Exception as e:
+            return None, task_index, str(e)
 
-    except Exception as e:
-        print(f"Error processing variant {chr_name}:{pos} {ref}>{alt}: {e}")
-        return None
+
+def collate_fn(batch):
+    wt_list, mut_list, task_ids, msgs, masks = [], [], [], [], []
+    for item, task_index, err in batch:
+        if item is not None:
+            wt_list.append(item[0])
+            mut_list.append(item[1])
+            masks.append(True)
+        else:
+            masks.append(False)
+        task_ids.append(task_index)
+        msgs.append(err)
+
+    if len(wt_list) == 0:
+        return None, None, np.array(task_ids), np.array(msgs),  np.array(masks)
+    return torch.stack(wt_list), torch.stack(mut_list), np.array(task_ids), np.array(msgs), np.array(masks)
 
 
 def load_label_meta_from_h5(h5_path):
-    """Load label metadata from HDF5 file"""
     with h5py.File(h5_path, "r") as f:
         return f.attrs["trial_names"]
 
 
 @click.command()
-@click.option("-h5", "--hdf5_file", required=True, help="Path to HDF5 file")
-@click.option("-c", "--chunk_file", type=str, required=True, help="Path to the chunk info json")
-@click.option("-m", "--model_path", required=True, help="Path to packaged model file")
-@click.option("--device", default="cpu", help="Computing device (cpu/cuda)")
-def main(hdf5_file, chunk_file, model_path, device):
-    """Compute variant effects for a chunk of tasks"""
+@click.option("-h5", "--hdf5_file", required=True)
+@click.option("-c", "--chunk_indices", type=str, required=True)
+@click.option("-m", "--model_path", required=True)
+@click.option("--device", default="cpu")
+@click.option("--batch_size", type=int, default=32)
+def main(hdf5_file, chunk_indices, model_path, device, batch_size):
 
-    # Load chunk information
-    chunk_id = int(Path(chunk_file).stem.split("_")[-1])
-    with open(chunk_file, "r") as f:
-        chunk_info = json.load(f)
-
-    task_indices = chunk_info["task_indices"]
-
+    task_indices = np.load(chunk_indices).tolist()
+    chunk_id = int(Path(chunk_indices).stem.split("_")[1])
     if not task_indices:
         print("No tasks to process in this chunk")
         return
-    else:
-        print(f"Processing {len(task_indices)} variants")
 
-    # Load model package and initialize once
     with open(model_path, "rb") as f:
         model_package = pickle.load(f)
-    
-    # Initialize model components once
+
     model = model_package.model.to(device)
     dna_tokenizer = model_package.dna_tokenizer
     config = model_package.config
 
-    # Load label metadata from HDF5 file
-    trials = load_label_meta_from_h5(hdf5_file)
-    n_dims = len(trials)
+    dataset = VariantDataset(hdf5_file, task_indices, dna_tokenizer)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8)
 
-    # Process variants
-    results = np.full((len(task_indices), n_dims), np.nan, dtype=np.float32)
-    successful_computations = 0
-
-    # First read all variant data (read-only, safe for concurrent access)
-    with h5py.File(hdf5_file, "r") as f:
-        variants_grp = f["variants"]
-
-        # Batch read variant data for better performance
-        task_indices = np.array(task_indices)
-        chrs = variants_grp["chr"][task_indices]  
-        positions = variants_grp["pos"][task_indices]
-        refs = variants_grp["ref"][task_indices]
-        alts = variants_grp["alt"][task_indices]
-        
-        # Convert bytes to strings if needed
-        if hasattr(chrs[0], 'decode'):
-            chrs = [c.decode("utf-8") for c in chrs]
-        if hasattr(refs[0], 'decode'):
-            refs = [r.decode("utf-8") for r in refs]
-        if hasattr(alts[0], 'decode'):
-            alts = [a.decode("utf-8") for a in alts]
-
-    # Compute all variants (no file access)
     print("Computing variant effects...")
-    forward_start_time = time.time()
-    
-    for i, (chr_name, pos, ref, alt) in enumerate(
-        tqdm(zip(chrs, positions, refs, alts), total=len(task_indices), desc="Computing effects")
-    ):
-        variant_effect = compute_variant_effect(model, dna_tokenizer, config, chr_name, pos, ref, alt, device)
+    start_time = time.time()
 
-        if variant_effect is not None:
-            results[i, :] = variant_effect
-            successful_computations += 1
-    
-    forward_total_time = time.time() - forward_start_time
-    print(f"Forward computation time: {forward_total_time:.2f} seconds")
-    print(f"Average time per variant: {forward_total_time/len(task_indices):.4f} seconds")
+    all_success_res = []
+    all_success = []
+    all_error = []
+    error_msgs = []
+    for wt_batch, mut_batch, task_ids, msgs, masks in tqdm(dataloader, desc="Computing effects"):
+        if wt_batch is None:
+            continue
 
-    # Write results to individual chunk file (no concurrency issues)
-    print("Storing results to chunk file...")
+        with torch.no_grad():
+            pred_wt = model(wt_batch.permute(0, 2, 1).to(device), config.model.use_head, False).detach().cpu().numpy()
+            pred_mut = model(mut_batch.permute(0, 2, 1).to(device), config.model.use_head, False).detach().cpu().numpy()
+            diffs = pred_mut - pred_wt
+            diffs = np.sum(diffs, axis=1)
+
+        all_success_res.append(diffs)
+        all_success.append(task_ids[masks])
+        all_error.append(task_ids[~masks])
+        error_msgs.append(msgs[~masks])
+
+    successful_results = np.vstack(all_success_res)
+    successful_indices = np.concatenate(all_success)
+    error_indices = np.concatenate(all_error)
+    error_info = np.concatenate(error_msgs)
+
+    total_time = time.time() - start_time
+    print(f"Finished in {total_time:.2f}s")
+
     chunk_results_dir = Path(hdf5_file).parent / "chunk_results"
     chunk_results_dir.mkdir(exist_ok=True)
-
     chunk_file = chunk_results_dir / f"chunk_{chunk_id}_results.h5"
 
-    # Store chunk results safely
     with h5py.File(chunk_file, "w") as f:
-        # Store metadata
         f.attrs["chunk_id"] = chunk_id
         f.attrs["total_variants"] = len(task_indices)
-        f.attrs["successful_computations"] = successful_computations
-        f.attrs["n_dims"] = n_dims
         f.attrs["completed_at"] = pd.Timestamp.now().isoformat()
-        f.attrs["forward_time_seconds"] = forward_total_time
-        f.attrs["avg_time_per_variant"] = forward_total_time / len(task_indices)
+        f.attrs["forward_time_seconds"] = total_time
 
-        # Store task indices and results
-        f.create_dataset("task_indices", data=np.array(task_indices, dtype="i8"))
-        f.create_dataset("results", data=results, compression="gzip")
-
-        # Store successful indices for quick filtering
-        successful_mask = ~np.all(np.isnan(results), axis=1)
-        successful_indices = np.array(task_indices)[successful_mask]
-        successful_results = results[successful_mask]
-
-        f.create_dataset("successful_indices", data=successful_indices, dtype="i8")
-        f.create_dataset("successful_results", data=successful_results, compression="gzip")
+        f.create_dataset("successful_indices", data=successful_indices, dtype="i8", compression="gzip")
+        f.create_dataset("successful_results", data=successful_results, dtype="f4", compression="gzip")
+        f.create_dataset("error_indices", data=error_indices, dtype="i8", compression="gzip")
+        f.create_dataset("error_info", data=error_info, dtype=h5py.string_dtype(), compression="gzip")
 
     print(f"Chunk results saved to: {chunk_file}")
-
     print(f"\nChunk {chunk_id} completed:")
     print(f"  Total variants: {len(task_indices)}")
-    print(f"  Successfully computed: {successful_computations}")
-    print(f"  Failed: {len(task_indices) - successful_computations}")
+    print(f"  Successfully computed: {len(successful_indices)}")
+    print(f"  Failed: {len(error_indices)}")
 
 
 if __name__ == "__main__":
