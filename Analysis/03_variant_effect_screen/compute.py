@@ -115,13 +115,40 @@ def load_label_meta_from_h5(h5_path):
         return f.attrs["trial_names"]
 
 
+def save_intermediate_results(chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, save_count):
+    """Save current batch results independently"""
+
+    # Concatenate current batch only
+    successful_results = np.vstack(all_success_res).astype(np.float32)
+    successful_indices = np.concatenate(all_success)
+    error_indices = np.concatenate(all_error)
+    error_info = np.concatenate(error_msgs)
+
+    # Save to independent intermediate file
+    intermediate_file = chunk_results_dir / f"chunk_{chunk_id}_part_{save_count}.h5"
+
+    with h5py.File(intermediate_file, "w") as f:
+        f.attrs["chunk_id"] = chunk_id
+        f.attrs["part_idx"] = save_count
+        f.attrs["part_nsample"] = len(successful_indices) + len(error_indices)
+        f.attrs["saved_at"] = pd.Timestamp.now().isoformat()
+
+        f.create_dataset("successful_indices", data=successful_indices, dtype="i8", compression="gzip")
+        f.create_dataset("successful_results", data=successful_results, dtype="f4", compression="gzip")
+        f.create_dataset("error_indices", data=error_indices, dtype="i8", compression="gzip")
+        f.create_dataset("error_info", data=error_info, dtype=h5py.string_dtype(), compression="gzip")
+
+    print(f"Part {save_count} saved: {successful_results.shape[0]} successful, {len(error_indices)} failed")
+
+
 @click.command()
 @click.option("-h5", "--hdf5_file", required=True)
 @click.option("-c", "--chunk_indices", type=str, required=True)
 @click.option("-m", "--model_path", required=True)
 @click.option("--device", default="cpu")
 @click.option("--batch_size", type=int, default=32)
-def main(hdf5_file, chunk_indices, model_path, device, batch_size):
+@click.option("--save_interval", type=int, default=20000, help="Save intermediate results every N samples")
+def main(hdf5_file, chunk_indices, model_path, device, batch_size, save_interval):
 
     task_indices = np.load(chunk_indices).tolist()
     chunk_id = int(Path(chunk_indices).stem.split("_")[1])
@@ -146,6 +173,14 @@ def main(hdf5_file, chunk_indices, model_path, device, batch_size):
     all_success = []
     all_error = []
     error_msgs = []
+
+    processed_count = 0
+    part_count = 0
+    
+    # Create intermediate results directory
+    chunk_results_dir = Path(hdf5_file).parent / "chunk_results"
+    chunk_results_dir.mkdir(exist_ok=True)
+    
     for wt_batch, mut_batch, task_ids, msgs, masks in tqdm(dataloader, desc="Computing effects"):
         if wt_batch is None:
             continue
@@ -160,35 +195,44 @@ def main(hdf5_file, chunk_indices, model_path, device, batch_size):
         all_success.append(task_ids[masks])
         all_error.append(task_ids[~masks])
         error_msgs.append(msgs[~masks])
+        
+        processed_count += len(task_ids)
+        
+        # Save intermediate results every save_interval samples and reset accumulators
+        if processed_count >= save_interval * (part_count + 1):
+            part_count += 1
+            print(f"\nSaving part {part_count} at {processed_count} samples...")
+            save_intermediate_results(
+                chunk_results_dir, chunk_id, all_success_res, all_success, 
+                all_error, error_msgs, part_count
+            )
+            # Reset accumulators for next part
+            all_success_res = []
+            all_success = []
+            all_error = []
+            error_msgs = []
 
-    successful_results = np.vstack(all_success_res)
-    successful_indices = np.concatenate(all_success)
-    error_indices = np.concatenate(all_error)
-    error_info = np.concatenate(error_msgs)
+    # Save any remaining data as the final part
+    if all_success_res:
+        part_count += 1
+        print(f"\nSaving final part {part_count}...")
+        save_intermediate_results(
+            chunk_results_dir, chunk_id, all_success_res, all_success, 
+            all_error, error_msgs, part_count
+        )
 
     total_time = time.time() - start_time
     print(f"Finished in {total_time:.2f}s")
 
-    chunk_results_dir = Path(hdf5_file).parent / "chunk_results"
-    chunk_results_dir.mkdir(exist_ok=True)
-    chunk_file = chunk_results_dir / f"chunk_{chunk_id}_results.h5"
+    # Create completion marker file
+    completion_file = chunk_results_dir / f"chunk_{chunk_id}_summary.txt"
+    with open(completion_file, "w") as f:
+        f.write(f"Chunk {chunk_id} completed at {pd.Timestamp.now().isoformat()}\n")
+        f.write(f"Total variants: {len(task_indices)}\n")
+        f.write(f"Processing time: {total_time:.2f}s\n")
+        f.write(f"Total parts saved: {part_count}\n")
 
-    with h5py.File(chunk_file, "w") as f:
-        f.attrs["chunk_id"] = chunk_id
-        f.attrs["total_variants"] = len(task_indices)
-        f.attrs["completed_at"] = pd.Timestamp.now().isoformat()
-        f.attrs["forward_time_seconds"] = total_time
-
-        f.create_dataset("successful_indices", data=successful_indices, dtype="i8", compression="gzip")
-        f.create_dataset("successful_results", data=successful_results, dtype="f4", compression="gzip")
-        f.create_dataset("error_indices", data=error_indices, dtype="i8", compression="gzip")
-        f.create_dataset("error_info", data=error_info, dtype=h5py.string_dtype(), compression="gzip")
-
-    print(f"Chunk results saved to: {chunk_file}")
-    print(f"\nChunk {chunk_id} completed:")
-    print(f"  Total variants: {len(task_indices)}")
-    print(f"  Successfully computed: {len(successful_indices)}")
-    print(f"  Failed: {len(error_indices)}")
+    print(f"Chunk {chunk_id} completed with {part_count} parts saved")
 
 
 if __name__ == "__main__":

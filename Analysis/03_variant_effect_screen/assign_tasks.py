@@ -94,6 +94,7 @@ def assign_tasks_to_compute(task_indices, compute_assignments):
     help="Compute configuration (format: machine:device_count:batch_size:device_type, device_type=gpu|cpu)",
 )
 @click.option("--force", is_flag=True, help="Force recompute all tasks")
+@click.option("--save_interval", type=int, default=20000, help="Save intermediate results every N samples")
 def main(
     hdf5_file,
     output_dir,
@@ -101,6 +102,7 @@ def main(
     compute_script,
     compute_config,
     force,
+    save_interval,
 ):
     """Distribute variant effect computation tasks"""
 
@@ -153,7 +155,8 @@ def main(
   --chunk_indices {output_dir}/chunk_{chunk_id}_indices.npy \\
   --model_path {model_path} \\
   --device {device} \\
-  --batch_size {batch_size}
+  --batch_size {batch_size} \\
+  --save_interval {save_interval}
 """
             )
         os.chmod(script_path, 0o755)

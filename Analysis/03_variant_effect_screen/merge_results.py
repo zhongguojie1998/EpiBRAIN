@@ -7,14 +7,17 @@ from tqdm import tqdm
 
 
 def collect_chunk_files(chunk_results_dir):
-    """Collect all chunk result files"""
+    """Collect all chunk result files (both final results and parts)"""
     chunk_dir = Path(chunk_results_dir)
     if not chunk_dir.exists():
         return []
     
-    chunk_files = list(chunk_dir.glob("chunk_*_results.h5"))
-    # Sort by chunk ID
-    chunk_files.sort(key=lambda x: int(x.stem.split('_')[1]))
+    chunk_files = list(chunk_dir.glob("chunk_*_part_*.h5"))
+    
+    # Sort by chunk ID (and part number for part files)
+    if chunk_files:
+        chunk_files.sort(key=lambda x: (int(x.stem.split('_')[1]), int(x.stem.split('_')[3])))
+    
     return chunk_files
 
 
@@ -28,7 +31,8 @@ def validate_chunk_file(chunk_file):
                 "error_indices",
                 "error_info",
             ]
-            required_attrs = ['chunk_id', 'total_variants']
+            # Check if it's a part file or final result file
+            required_attrs = ['chunk_id', 'part_idx', "part_nsample"]
 
             for dataset in required_datasets:
                 if dataset not in f:
@@ -115,13 +119,17 @@ def main(hdf5_file, chunk_dir, cleanup, force):
             all_results.append(successful_results)
             total_successful += len(successful_indices)
 
-            chunk_info.append({
-                'file': chunk_file.name,
-                'chunk_id': f.attrs['chunk_id'],
-                'total_variants': f.attrs['total_variants'],
-                'successful_computations': f.attrs['successful_computations'],
-                'completed_at': f.attrs.get('completed_at', 'unknown')
-            })
+            # Handle both part files and final result files
+            chunk_info_dict = {
+                "file": chunk_file.name,
+                "chunk_id": f.attrs["chunk_id"],
+                "part_idx": f.attrs["part_idx"],
+                "successful_computations": len(successful_indices),
+                "total_sample": f.attrs["part_nsample"],
+                "completed_at": f.attrs.get("completed_at", f.attrs.get("saved_at", "unknown")),
+            }
+
+            chunk_info.append(chunk_info_dict)
 
     if not all_results:
         print("No successful results to merge!")
@@ -147,11 +155,11 @@ def main(hdf5_file, chunk_dir, cleanup, force):
         sort_order = np.argsort(all_indices)
         sorted_indices = all_indices[sort_order]
         sorted_results = all_results[sort_order]
-        
+
         print("Batch updating status...")
         # Create status array
         status_array = np.array(['computed'] * len(sorted_indices), dtype=h5py.string_dtype())
-        
+
         print("Batch updating results...")
         # Use fancy indexing for batch updates (much faster than individual updates)
         variants_grp['status'][sorted_indices] = status_array
