@@ -42,7 +42,7 @@ def init_hdf5_structure(h5_path, label_meta_path):
         variants_grp.create_dataset("ref", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip")
         variants_grp.create_dataset("alt", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip")
         variants_grp.create_dataset(
-            "status", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip"
+            "finished", (0,), maxshape=(None,), dtype="bool", compression="gzip"
         )
 
         # Results table (compressed)
@@ -121,8 +121,11 @@ def main(enriched_sumstats, hdf5_file, label_meta, experiment_name, force):
 
     print(f"Existing variants in index: {len(existing_index)}")
 
+    # Sort by index_key for efficient binary search lookups later
+    enriched_df = enriched_df.sort_values('index_key')
+    
     # Separate new and existing variants using lists for better performance
-    new_variant_data = {"index_key": [], "rsid": [], "chr": [], "pos": [], "ref": [], "alt": [], "status": []}
+    new_variant_data = {"index_key": [], "rsid": [], "chr": [], "pos": [], "ref": [], "alt": [], "finished": []}
     experiment_data = []
 
     for _, variant in tqdm(enriched_df.iterrows()):
@@ -146,7 +149,7 @@ def main(enriched_sumstats, hdf5_file, label_meta, experiment_name, force):
             new_variant_data["pos"].append(variant["pos"])
             new_variant_data["ref"].append(variant["ref"])
             new_variant_data["alt"].append(variant["alt"])
-            new_variant_data["status"].append("pending")
+            new_variant_data["finished"].append(False)
 
     n_new_variants = len(new_variant_data["index_key"])
     print(f"New variants to add: {n_new_variants}")
@@ -164,9 +167,8 @@ def main(enriched_sumstats, hdf5_file, label_meta, experiment_name, force):
             new_size = current_size + n_new_variants
 
             # Resize datasets
-            for key in ["index_key", "rsid", "chr", "ref", "alt", "status"]:
+            for key in ["index_key", "rsid", "chr", "ref", "alt", "finished", "pos"]:
                 variants_grp[key].resize((new_size,))
-            variants_grp["pos"].resize((new_size,))
             results_grp["variant_effects"].resize((new_size, len(trial_names)))
 
             # Add data in batch - directly use the prepared lists (much faster)
@@ -180,7 +182,7 @@ def main(enriched_sumstats, hdf5_file, label_meta, experiment_name, force):
             variants_grp["pos"][start_idx:end_idx] = new_variant_data["pos"]
             variants_grp["ref"][start_idx:end_idx] = new_variant_data["ref"]
             variants_grp["alt"][start_idx:end_idx] = new_variant_data["alt"]
-            variants_grp["status"][start_idx:end_idx] = new_variant_data["status"]
+            variants_grp["finished"][start_idx:end_idx] = new_variant_data["finished"]
 
         # Add experiment data
         if experiment_data:

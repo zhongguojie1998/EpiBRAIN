@@ -15,9 +15,9 @@ def pick_tasks(h5_path, force=False):
             # Return all task indices
             return list(range(len(f["variants/index_key"])))
         else:
-            # Return indices where status is 'pending' using boolean indexing (faster)
-            statuses = f["variants/status"][:]
-            pending_mask = statuses == "pending".encode()
+            # Return indices where finished is False using boolean indexing
+            finished = f["variants/finished"][:]
+            pending_mask = ~finished
             return np.where(pending_mask)[0].tolist()
 
 

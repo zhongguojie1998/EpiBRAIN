@@ -157,12 +157,12 @@ def main(hdf5_file, chunk_dir, cleanup, force):
         sorted_results = all_results[sort_order]
 
         print("Batch updating status...")
-        # Create status array
-        status_array = np.array(['computed'] * len(sorted_indices), dtype=h5py.string_dtype())
+        # Create finished array
+        finished_array = np.array([True] * len(sorted_indices), dtype=bool)
 
         print("Batch updating results...")
         # Use fancy indexing for batch updates (much faster than individual updates)
-        variants_grp['status'][sorted_indices] = status_array
+        variants_grp['finished'][sorted_indices] = finished_array
         results_grp['variant_effects'][sorted_indices, :] = sorted_results
 
         # Update metadata

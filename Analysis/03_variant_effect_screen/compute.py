@@ -151,6 +151,7 @@ def save_intermediate_results(
 
 def get_model(checkpoint, device, config=None):
     if config is None:
+        print("Using Prebuilt Model")
         with open(checkpoint, "rb") as f:
             model_package = pickle.load(f)
 
@@ -159,6 +160,7 @@ def get_model(checkpoint, device, config=None):
         myconfig = model_package.config
 
     else:
+        print("Using Runtime Built Model")
         myconfig = load_config(config_name=config)
         logger = BaseLogger(name="Model packaging", level=logging.INFO)
 
@@ -185,14 +187,16 @@ def get_model(checkpoint, device, config=None):
 @click.option("-p", "--precision", type=click.Choice(["float32", "float64"]), default="float32", help="Numerical precision (float32 for speed, float64 for accuracy)")
 def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, save_interval, precision):
 
-    task_indices = np.load(chunk_indices).tolist()
+    # Sort task indices for optimal HDF5 access pattern
+    task_indices = np.load(chunk_indices)
+    task_indices = np.sort(task_indices).tolist()
     chunk_id = int(Path(chunk_indices).stem.split("_")[1])
     if not task_indices:
         print("No tasks to process in this chunk")
         return
 
     model, dna_tokenizer, config = get_model(model_path, device, config_path)
-    
+
     # Set model precision
     if precision == "float64":
         model = model.double()
@@ -229,7 +233,7 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             # Apply selected precision to inputs
             wt_input = dtype_fn(wt_batch.permute(0, 2, 1).to(device))
             mut_input = dtype_fn(mut_batch.permute(0, 2, 1).to(device))
-            
+
             pred_wt = model(wt_input, config.model.use_head, False).detach().cpu().numpy()
             pred_mut = model(mut_input, config.model.use_head, False).detach().cpu().numpy()
             diffs = pred_mut - pred_wt
