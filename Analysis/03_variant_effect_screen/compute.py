@@ -208,7 +208,7 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
         print("Using float32 precision for faster computation")
 
     dataset = VariantDataset(hdf5_file, task_indices, dna_tokenizer)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True, drop_last=False, persistent_workers=True)
 
     print("Computing variant effects...")
     start_time = time.time()
@@ -226,7 +226,7 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
     chunk_results_dir = Path(hdf5_file).parent / "chunk_results"
     chunk_results_dir.mkdir(exist_ok=True)
 
-    for wt_batch, mut_batch, task_ids, msgs, masks in tqdm(dataloader, desc="Computing effects"):
+    for wt_batch, mut_batch, task_ids, msgs, masks in dataloader:
         if wt_batch is None:
             continue
 
