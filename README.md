@@ -34,7 +34,7 @@ pip install pyfaidx==0.8.1.4  # reading genome data
 
 # model
 pip install "torch>=2.2.0" --index-url https://download.pytorch.org/whl/cu122 # need to first install torch to avoid automatic cpu version installation
-pip install "einops >= 0.5" "transformers >= 4.34.1" "intervaltree~=3.1.0" numpy pandas h5py torchmetrics peft
+pip install "einops >= 0.5" "transformers >= 4.34.1" "intervaltree~=3.1.0" numpy pandas h5py torchmetrics peft==0.15.2
 
 ## install flash attention
 pip install ninja # for fast compile
