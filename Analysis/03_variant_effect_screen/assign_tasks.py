@@ -95,6 +95,7 @@ def assign_tasks_to_compute(task_indices, compute_assignments):
 )
 @click.option("--force", is_flag=True, help="Force recompute all tasks")
 @click.option("--save_interval", type=int, default=20000, help="Save intermediate results every N samples")
+@click.option("-p", "--precision", type=click.Choice(["float32", "float64"]), default="float32", help="Numerical precision (float32 for speed, float64 for accuracy)")
 def main(
     hdf5_file,
     output_dir,
@@ -103,6 +104,7 @@ def main(
     compute_config,
     force,
     save_interval,
+    precision,
 ):
     """Distribute variant effect computation tasks"""
 
@@ -156,7 +158,8 @@ def main(
   --model_path {model_path} \\
   --device {device} \\
   --batch_size {batch_size} \\
-  --save_interval {save_interval}
+  --save_interval {save_interval} \\
+  --precision {precision}
 """
             )
         os.chmod(script_path, 0o755)
