@@ -30,7 +30,7 @@ conda activate bican
 conda install -c conda-forge -c bioconda pybigwig  # get label from bw files
 conda install -c conda-forge -c bioconda pysam  # reading genome data
 conda install -c bioconda bedtools  # process bed files
-pip install pyfaidx  # reading genome data
+pip install pyfaidx==0.8.1.4  # reading genome data
 
 # model
 pip install "torch>=2.2.0" --index-url https://download.pytorch.org/whl/cu122 # need to first install torch to avoid automatic cpu version installation
