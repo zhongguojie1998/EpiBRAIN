@@ -220,6 +220,7 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
 
     processed_count = 0
     part_count = 0
+    last_save_time = start_time
 
     # Create intermediate results directory
     chunk_results_dir = Path(hdf5_file).parent / "chunk_results"
@@ -249,10 +250,13 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
         # Save intermediate results every save_interval samples and reset accumulators
         if processed_count >= save_interval * (part_count + 1):
             part_count += 1
-            print(f"\nSaving part {part_count} at {processed_count} samples...")
+            current_time = time.time()
+            time_since_last_save = current_time - last_save_time
+            print(f"\nSaving part {part_count} at {processed_count} samples... (Time since last save: {time_since_last_save:.2f}s)")
             save_intermediate_results(
                 chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, part_count
             )
+            last_save_time = current_time
             # Reset accumulators for next part
             all_success_res = []
             all_success = []
@@ -262,7 +266,9 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
     # Save any remaining data as the final part
     if all_success_res:
         part_count += 1
-        print(f"\nSaving final part {part_count}...")
+        current_time = time.time()
+        time_since_last_save = current_time - last_save_time
+        print(f"\nSaving final part {part_count}... (Time since last save: {time_since_last_save:.2f}s)")
         save_intermediate_results(
             chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, part_count
         )

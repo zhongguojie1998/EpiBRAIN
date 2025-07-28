@@ -1,8 +1,6 @@
 import os
 import sys
 
-PYTHON = sys.executable
-
 import click
 import h5py
 import numpy as np
@@ -96,6 +94,7 @@ def assign_tasks_to_compute(task_indices, compute_assignments):
 @click.option("--force", is_flag=True, help="Force recompute all tasks")
 @click.option("--save_interval", type=int, default=20000, help="Save intermediate results every N samples")
 @click.option("-p", "--precision", type=click.Choice(["float32", "float64"]), default="float32", help="Numerical precision (float32 for speed, float64 for accuracy)")
+@click.option("--abs_path", is_flag=True, help="Use absolute paths for scripts and model")
 def main(
     hdf5_file,
     output_dir,
@@ -105,14 +104,20 @@ def main(
     force,
     save_interval,
     precision,
+    abs_path,
 ):
     """Distribute variant effect computation tasks"""
 
     os.makedirs(output_dir, exist_ok=True)
-    model_path = os.path.abspath(model_path)
-    compute_script = os.path.abspath(compute_script)
-    hdf5_file = os.path.abspath(hdf5_file)
-    output_dir = os.path.abspath(output_dir)
+    if abs_path:
+        # Convert paths to absolute paths
+        model_path = os.path.abspath(model_path)
+        compute_script = os.path.abspath(compute_script)
+        hdf5_file = os.path.abspath(hdf5_file)
+        output_dir = os.path.abspath(output_dir)
+        PYTHON = sys.executable
+    else:
+        PYTHON = "python"
 
     # Get task indices to process
     task_indices = pick_tasks(hdf5_file, force)
