@@ -157,7 +157,7 @@ def main(
         with open(script_path, "w") as f:
             f.write(
                 f"""#!/bin/bash
-{PYTHON} {compute_script} \\
+{PYTHON} -u {compute_script} \\
   --hdf5_file {hdf5_file} \\
   --chunk_indices {output_dir}/chunk_{chunk_id}_indices.npy \\
   --model_path {model_path} \\
