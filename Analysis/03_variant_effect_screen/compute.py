@@ -1,16 +1,17 @@
+import logging
 import os
 import pickle
 import sys
 import time
-from pathlib import Path
 import warnings
+from pathlib import Path
 
 import click
 import h5py
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
@@ -18,8 +19,13 @@ ROOT = Path(__file__).parent.parent.parent
 sys.path.append(str(ROOT / "Model"))
 
 from data.data_utils import STD_CHR
-from data.tokenizer import str_to_one_hot
+from data.tokenizer import FastaInterval, str_to_one_hot
+from model.model_utils import setup_model
+from utils.config import load_config
+from utils.logging import BaseLogger
 
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 def onehot_to_str(seq_onehot):
     mapping = {(1, 0, 0, 0): "A", (0, 1, 0, 0): "C", (0, 0, 1, 0): "G", (0, 0, 0, 1): "T", (0, 0, 0, 0): "N"}
@@ -106,7 +112,7 @@ def collate_fn(batch):
         msgs.append(err)
 
     if len(wt_list) == 0:
-        return None, None, np.array(task_ids), np.array(msgs),  np.array(masks)
+        return None, None, np.array(task_ids), np.array(msgs), np.array(masks)
     return torch.stack(wt_list), torch.stack(mut_list), np.array(task_ids), np.array(msgs), np.array(masks)
 
 
@@ -115,7 +121,9 @@ def load_label_meta_from_h5(h5_path):
         return f.attrs["trial_names"]
 
 
-def save_intermediate_results(chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, save_count):
+def save_intermediate_results(
+    chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, save_count
+):
     """Save current batch results independently"""
 
     # Concatenate current batch only
@@ -141,14 +149,41 @@ def save_intermediate_results(chunk_results_dir, chunk_id, all_success_res, all_
     print(f"Part {save_count} saved: {successful_results.shape[0]} successful, {len(error_indices)} failed")
 
 
+def get_model(checkpoint, device, config=None):
+    if config is None:
+        with open(checkpoint, "rb") as f:
+            model_package = pickle.load(f)
+
+        model = model_package.model.eval().to(device)
+        dna_tokenizer = model_package.dna_tokenizer
+        myconfig = model_package.config
+
+    else:
+        myconfig = load_config(config_name=config)
+        logger = BaseLogger(name="Model packaging", level=logging.INFO)
+
+        checkpoint_data = torch.load(checkpoint, map_location="cpu")
+        model = setup_model(myconfig, logger=logger)
+        model.load_state_dict(checkpoint_data["model_state_dict"])
+        model.eval().to(device)
+
+        dna_tokenizer = FastaInterval(
+            fasta_file=os.path.abspath(myconfig.data.refer_genom), context_length=myconfig.data.context_length
+        )
+
+    return model, dna_tokenizer, myconfig
+
+
 @click.command()
 @click.option("-h5", "--hdf5_file", required=True)
 @click.option("-c", "--chunk_indices", type=str, required=True)
 @click.option("-m", "--model_path", required=True)
+@click.option("--config_path", type=str, help="If provided, build the model in runtime, the model_path should be pointed to a chk")
 @click.option("--device", default="cpu")
 @click.option("--batch_size", type=int, default=32)
 @click.option("--save_interval", type=int, default=20000, help="Save intermediate results every N samples")
-def main(hdf5_file, chunk_indices, model_path, device, batch_size, save_interval):
+@click.option("-p", "--precision", type=click.Choice(["float32", "float64"]), default="float32", help="Numerical precision (float32 for speed, float64 for accuracy)")
+def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, save_interval, precision):
 
     task_indices = np.load(chunk_indices).tolist()
     chunk_id = int(Path(chunk_indices).stem.split("_")[1])
@@ -156,12 +191,17 @@ def main(hdf5_file, chunk_indices, model_path, device, batch_size, save_interval
         print("No tasks to process in this chunk")
         return
 
-    with open(model_path, "rb") as f:
-        model_package = pickle.load(f)
-
-    model = model_package.model.to(device)
-    dna_tokenizer = model_package.dna_tokenizer
-    config = model_package.config
+    model, dna_tokenizer, config = get_model(model_path, device, config_path)
+    
+    # Set model precision
+    if precision == "float64":
+        model = model.double()
+        dtype_fn = lambda x: x.double()
+        print("Using float64 precision for maximum accuracy")
+    else:
+        model = model.float()
+        dtype_fn = lambda x: x.float()
+        print("Using float32 precision for faster computation")
 
     dataset = VariantDataset(hdf5_file, task_indices, dna_tokenizer)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8)
@@ -176,18 +216,22 @@ def main(hdf5_file, chunk_indices, model_path, device, batch_size, save_interval
 
     processed_count = 0
     part_count = 0
-    
+
     # Create intermediate results directory
     chunk_results_dir = Path(hdf5_file).parent / "chunk_results"
     chunk_results_dir.mkdir(exist_ok=True)
-    
+
     for wt_batch, mut_batch, task_ids, msgs, masks in tqdm(dataloader, desc="Computing effects"):
         if wt_batch is None:
             continue
 
         with torch.no_grad():
-            pred_wt = model(wt_batch.permute(0, 2, 1).to(device), config.model.use_head, False).detach().cpu().numpy()
-            pred_mut = model(mut_batch.permute(0, 2, 1).to(device), config.model.use_head, False).detach().cpu().numpy()
+            # Apply selected precision to inputs
+            wt_input = dtype_fn(wt_batch.permute(0, 2, 1).to(device))
+            mut_input = dtype_fn(mut_batch.permute(0, 2, 1).to(device))
+            
+            pred_wt = model(wt_input, config.model.use_head, False).detach().cpu().numpy()
+            pred_mut = model(mut_input, config.model.use_head, False).detach().cpu().numpy()
             diffs = pred_mut - pred_wt
             diffs = np.sum(diffs, axis=1)
 
@@ -195,16 +239,15 @@ def main(hdf5_file, chunk_indices, model_path, device, batch_size, save_interval
         all_success.append(task_ids[masks])
         all_error.append(task_ids[~masks])
         error_msgs.append(msgs[~masks])
-        
+
         processed_count += len(task_ids)
-        
+
         # Save intermediate results every save_interval samples and reset accumulators
         if processed_count >= save_interval * (part_count + 1):
             part_count += 1
             print(f"\nSaving part {part_count} at {processed_count} samples...")
             save_intermediate_results(
-                chunk_results_dir, chunk_id, all_success_res, all_success, 
-                all_error, error_msgs, part_count
+                chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, part_count
             )
             # Reset accumulators for next part
             all_success_res = []
@@ -217,8 +260,7 @@ def main(hdf5_file, chunk_indices, model_path, device, batch_size, save_interval
         part_count += 1
         print(f"\nSaving final part {part_count}...")
         save_intermediate_results(
-            chunk_results_dir, chunk_id, all_success_res, all_success, 
-            all_error, error_msgs, part_count
+            chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, part_count
         )
 
     total_time = time.time() - start_time

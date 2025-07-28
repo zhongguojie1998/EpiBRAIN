@@ -232,10 +232,10 @@ class Borzoi(PreTrainedModel):
         with torch.amp.autocast("cuda", enabled=False):
             if data_parallel_training:
                 # we need this to get gradients for both heads if doing DDP training
-                out = self.prediction_head[use_head](x.float())
+                out = self.prediction_head[use_head](x)
                 for head_name, head in self.prediction_head.items():
                     if head != use_head:
-                        out += 0 * self.prediction_head[head_name](x.float()).sum()
+                        out += 0 * self.prediction_head[head_name](x).sum()
                 return out
             else:
-                return self.prediction_head[use_head](x.float())
+                return self.prediction_head[use_head](x)
