@@ -268,14 +268,13 @@ class Borzoi(PreTrainedModel):
         # Other initializations
         self.apply(other_init)
 
-    def forward(self, x, use_head="human", data_parallel_training=False):
+    def forward(self, x, use_head="human", **kwargs):
         """
         Performs the forward pass of the model.
 
         Args:
             x (torch.Tensor): Input DNA sequence tensor of shape (N, 4, L).
             use_head (str, optional): Indicate which prediction head to use. Defaults to human.
-            data_parallel_training (bool, optional): If True, perform forward pass specific to DDP. Defaults to False.
 
         Returns:
             torch.Tensor: Output tensor with shape (N, crop_bin_num, C), where C is the number of tracks.
@@ -308,12 +307,15 @@ class Borzoi(PreTrainedModel):
 
         # disable autocast for more precision in final layer
         with torch.amp.autocast("cuda", enabled=False):
-            if data_parallel_training:
-                # we need this to get gradients for both heads if doing DDP training
-                out = self.final_softplus(self.prediction_head[use_head](x.float()))
-                for head_name, head in self.prediction_head.items():
-                    if head != use_head:
-                        out += 0 * self.prediction_head[head_name](x.float()).sum()
-                return out.permute(0, 2, 1)
-            else:
-                return self.final_softplus(self.prediction_head[use_head](x.float())).permute(0, 2, 1)
+            return self.final_softplus(self.prediction_head[use_head](x.float())).permute(0, 2, 1)
+
+            # DDP training code (commented out for future use)
+            # if data_parallel_training:
+            #     # we need this to get gradients for both heads if doing DDP training
+            #     out = self.final_softplus(self.prediction_head[use_head](x.float()))
+            #     for head_name, head in self.prediction_head.items():
+            #         if head != use_head:
+            #             out += 0 * self.prediction_head[head_name](x.float()).sum()
+            #     return out.permute(0, 2, 1)
+            # else:
+            #     return self.final_softplus(self.prediction_head[use_head](x.float())).permute(0, 2, 1)

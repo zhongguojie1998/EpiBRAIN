@@ -285,38 +285,108 @@ class ConvDna(nn.Module):
 
 class PredictionHead(nn.Module):
 
-    def __init__(self, in_features, task, track_num, class_num=None):
+    def __init__(self, in_features, task, track_num=None, celltype_num=None, modality_num=None, celltype_hidden_dim=None, share_modality=False, class_num=None):
         super().__init__()
         self.task = task
-        if task == "classification":
-            out_channels = track_num * class_num
-        elif task == "regression":
-            out_channels = track_num
-            self.scale = nn.Parameter(torch.ones(out_channels))
+        self.share_modality = share_modality
+
+        # Parameter validation and initialization
+        self._validate_and_init_params(in_features, track_num, celltype_num, modality_num, class_num, celltype_hidden_dim)
+
+        # Build the prediction layers
+        self._build_layers(in_features)
+
+    def _validate_and_init_params(self, in_features, track_num, celltype_num, modality_num, class_num, celltype_hidden_dim):
+        """Validate parameters and determine final configuration"""
+
+        if track_num is not None and (celltype_num is not None or modality_num is not None):
+            print("track_num provided along with celltype_num/modality_num. Using track_num only.")
+            self.track_num = track_num
+            self.celltype_num = None
+            self.modality_num = None
+            self.share_modality = False  # Force to False for backward compatibility
+        elif track_num is not None:
+            # Legacy mode: direct track_num
+            self.track_num = track_num
+            self.celltype_num = None
+            self.modality_num = None
+            self.share_modality = False
         else:
-            raise NotImplementedError("Not supported prediction task")
-        self.linear = nn.Linear(in_features, out_channels)
-        self.track_num = track_num
+            # New mode: cell type * modality
+            if celltype_num is None or modality_num is None:
+                raise ValueError("Must provide either track_num or both celltype_num and modality_num")
+            if self.share_modality and celltype_hidden_dim is None:
+                self.celltype_hidden_dim = in_features // 2
+                print(
+                    f"Using shared modality but cell type hidden dim is not provided, default to half of the in features ({self.celltype_hidden_dim})"
+                )
+            else:
+                self.celltype_hidden_dim = celltype_hidden_dim
+            self.celltype_num = celltype_num
+            self.modality_num = modality_num
+            self.track_num = celltype_num * modality_num
+
         self.class_num = class_num
+
+        # Calculate output channels
+        if "classification" in self.task:
+            if class_num is None:
+                raise ValueError("class_num must be provided for classification task")
+            self.out_channels = self.track_num * class_num
+        elif "regression" in self.task:
+            self.out_channels = self.track_num
+        else:
+            raise NotImplementedError(f"Task '{self.task}' not supported")
+
+    def _build_layers(self, in_features):
+        """Build the prediction layers based on configuration"""
+        if self.share_modality:
+            # Vectorized shared modality head architecture
+            self.cell_encoder = nn.Linear(in_features, self.celltype_hidden_dim * self.celltype_num)
+
+            if "regression" in self.task:
+                self.modality_head = nn.Linear(self.celltype_hidden_dim, self.modality_num)
+                self.scale = nn.Parameter(torch.ones(self.track_num))
+            else:  # classification
+                self.modality_head = nn.Linear(self.celltype_hidden_dim, self.modality_num * self.class_num)
+        else:
+            # Direct linear layer
+            self.linear = nn.Linear(in_features, self.out_channels)
+            if "regression" in self.task:
+                self.scale = nn.Parameter(torch.ones(self.out_channels))
 
     def forward(self, x):
         """
         x: [B, L, in_features]
-        targets:
-          - classification: LongTensor [B, L, T] with values in [0..C-1]
-          - regression: FloatTensor    [B, L, T]
-        returns:
-          - out: tensor of shape
-              * classification: [B, L, T, C]
-              * regression:     [B, L, T]
+        returns: [B, L, track_num] for regression or [B, L, track_num, class_num] for classification
         """
         B, L, _ = x.shape
-        pred = self.linear(x)  # [B, L, T*C] or [B, L, T]
 
-        if self.task == "classification":
-            pred = pred.view(B, L, self.track_num, self.class_num)
+        if self.share_modality:
+            # Vectorized shared modality architecture - minimal reshaping!
+            
+            # Step 1: Get all cell type embeddings 
+            cell_embs = self.cell_encoder(x)  # [B, L, celltype_hidden_dim * celltype_num]
+            cell_embs = cell_embs.view(B, L, self.celltype_num, self.celltype_hidden_dim)  # [B, L, C, H]
+            
+            # Step 2: Apply modality head 
+            mod_preds = self.modality_head(cell_embs)  # [B, L, C, M] or [B, L, C, M*K]
+            
+            if "regression" in self.task:
+                # Flatten and apply scale directly  
+                pred = F.softplus(mod_preds.view(B, L, -1)) * F.softplus(self.scale)  # [B, L, C*M]
+                
+            else:  # classification
+                # Direct reshape: [B, L, C, M*K] -> [B, L, C*M, K]
+                pred = mod_preds.view(B, L, -1, self.class_num)  # [B, L, C*M, K]
 
-        else:  # regression
-            pred = F.softplus(pred) * F.softplus(self.scale)
-        
+        else:
+            # Direct linear prediction
+            pred = self.linear(x)  # [B, L, out_channels]
+
+            if "classification" in self.task:
+                pred = pred.view(B, L, self.track_num, self.class_num)
+            else:  # regression
+                pred = F.softplus(pred) * F.softplus(self.scale)
+
         return pred
