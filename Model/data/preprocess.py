@@ -401,7 +401,6 @@ def preprocess(
 
     # start to aggregate the preprocessed data
     os.makedirs(f"{storage_path}/data", exist_ok=True)
-    trial_files = pd.read_csv(trial_summary_path)
 
     if preload_data:
         if force_restart or not os.path.exists(f"{storage_path}/data/all_label.pt"):
@@ -410,7 +409,6 @@ def preprocess(
             aggregate_data(
                 storage_path=storage_path,
                 preload_data=True,
-                ref_order=trial_files["exp"].tolist(),
                 task=data,
                 precision=precision,
             )
@@ -426,7 +424,6 @@ def preprocess(
             aggregate_data(
                 storage_path=storage_path,
                 preload_data=False,
-                ref_order=trial_files["exp"].tolist(),
                 task=data[data["generate"]],
                 precision=precision,
             )

@@ -2,6 +2,7 @@
 
 import collections
 import heapq
+import itertools
 import math
 import os
 import subprocess
@@ -14,6 +15,7 @@ import pandas as pd
 import pyBigWig
 import pysam
 import torch
+from tqdm import tqdm
 from utils.logging import LOGGER_PREFIX, LazyLogger
 
 logger = LazyLogger(f"{LOGGER_PREFIX}-Data Preprocess")
@@ -724,16 +726,12 @@ class CovFace:
             self.cov_open.close()
 
 
-def aggregate_data(storage_path, preload_data, ref_order, task=None, precision="float32"):
-    """Aggregate the label data from multiple files into a single file."""
+# TODO: the current implementation is based on regression task, we may need an extra function for classification task
+def aggregate_data(storage_path, preload_data, task=None, precision="float32"):
+    """Aggregate the label data from multiple files into file designed for model training."""
 
     separate_label_file = [
         f"{storage_path}/labels/{i}" for i in os.listdir(f"{storage_path}/labels") if i.endswith(".h5")
-    ]
-    separate_label_file = [
-        f"{storage_path}/labels/{i}.h5"
-        for i in ref_order
-        if f"{storage_path}/labels/{i}.h5" in separate_label_file
     ]
     if not separate_label_file:
         logger.error("No label files found in the specified directory.")
@@ -741,15 +739,26 @@ def aggregate_data(storage_path, preload_data, ref_order, task=None, precision="
     else:
         logger.info(f"Found {len(separate_label_file)} label files to aggregate.")
 
+    # prepare label meta
+    label_meta = pd.DataFrame({"file": separate_label_file})
+    label_meta["trial"] = label_meta["file"].str.split("/").str[-1].str.split(".").str[0]
+    label_meta[["cell_type", "modality"]] = label_meta["trial"].str.rsplit("_", n=1, expand=True)
+    ## in model, we generate all modalities for each cell type, we save the dims with label info in the label_meta index
+    unique_cell_types = sorted(label_meta['cell_type'].unique())
+    unique_modalities = sorted(label_meta['modality'].unique())
+    full_info = pd.DataFrame()
+    for p, (i,j) in enumerate(itertools.product(unique_cell_types, unique_modalities)):
+        full_info.loc[p, ["cell_type", "modality"]] = [i, j]
+    label_meta = full_info.merge(label_meta, on=["cell_type", "modality"], how="left").dropna()
+    label_meta.index.name = "dim"
+    label_meta = label_meta[["trial", "cell_type", "modality", "file"]]
+    label_meta.to_csv(f"{storage_path}/label_meta.csv", index=True)
+
     # get all the label data
     label_data = []
-    label_meta = pd.DataFrame()
-    for dim, label_file in enumerate(separate_label_file):
+    for label_file in tqdm(label_meta["file"]):
         with h5py.File(label_file, "r") as f:
             label_data.append(f["targets"][:])
-        label_meta.loc[dim, "trial"] = label_file.split("/")[-1].split(".")[0]
-    label_meta.index.name = "dim"
-    label_meta.to_csv(f"{storage_path}/label_meta.csv", index=True)
 
     label_data = np.stack(label_data, axis=-1)
     try:
@@ -759,9 +768,9 @@ def aggregate_data(storage_path, preload_data, ref_order, task=None, precision="
         precision = getattr(torch, "float32")
     label_data = torch.tensor(label_data, dtype=precision)
 
+    # TODO: we need to add gene level mask here to enable RNA gene expression count loss
     if preload_data:
         # save the aggregated data
-        # TODO: if the data is too large (if we add the pre tokenization step), save it in chunks given how many GPUs are used, so that each dataset will only load the data for one GPU
         for dataset_type, tmp in task.groupby(3):
             torch.save({"label": label_data[tmp.index]}, f"{storage_path}/data/{dataset_type}.pt")
         torch.save(label_data, f"{storage_path}/data/all_label.pt")
@@ -770,4 +779,4 @@ def aggregate_data(storage_path, preload_data, ref_order, task=None, precision="
         # save per data point separately
         for i in task.index:
             chrom, start, end = task.loc[i, [0, 1, 2]]
-            torch.save(label_data[i].clone(), f"{storage_path}/data/{chrom}_{start}_{end}.pt")
+            torch.save({"label": label_data[i].clone()}, f"{storage_path}/data/{chrom}_{start}_{end}.pt")

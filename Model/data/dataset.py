@@ -64,7 +64,7 @@ class GenomeIntervalDataset(Dataset):
         if self.preload_data:
             label = self.label[ind]
         else:
-            label = torch.load(f"{self.storage_path}/data/{chrom}_{start}_{end}.pt")
+            label = torch.load(f"{self.storage_path}/data/{chrom}_{start}_{end}.pt")["label"]
 
         token_dict = self.tokenizer(
             chrom, start, end, return_augs=self.return_augs, seed=self.external_rand_seed.value + ind
