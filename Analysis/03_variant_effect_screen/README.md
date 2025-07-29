@@ -1,6 +1,5 @@
 # Large Scale Variant Effect Screen Pipeline
 
-
 ## Pipeline Overview
 
 Run the following scripts in sequence:
@@ -255,4 +254,29 @@ python Analysis/03_variant_effect_screen/merge_results.py -h5 ./Data/source/GWAS
 # Merged 69 chunks
 # Updated 1188594 variants
 # Main HDF5 file: ./Data/source/GWAS_Var/res_file.h5
+```
+
+## Get results
+
+```python
+import numpy as np
+import h5py
+
+exp_name = "schizophrenia"
+
+with h5py.File("./Data/source/GWAS_Var/res_file.h5", "r") as f:
+    tracks = f.attrs["trial_names"]
+    exp_index = f["experiments/{exp_name}/index_key"][:]
+    exp_zscore = f["experiments/{exp_name}/z_score"][:]
+    exp_reverse_map = f["experiments/{exp_name}/reverse_map"][:]
+    all_variant_index = f["variants/index_key"][:]
+
+all_variant_to_pos = {val: idx for idx, val in enumerate(all_variant_index)}
+positions = [all_variant_to_pos[val] for val in exp_index]
+sorted_positions = sorted(positions)
+
+with h5py.File("./Data/source/GWAS_Var/res_file.h5", "r") as f:
+    exp_var_score = f["results/variant_effects"][sorted_positions, :]
+
+final_score = exp_var_score * (1 - 2 * exp_reverse_map).reshape(-1, 1)
 ```
