@@ -210,7 +210,7 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
     dataset = VariantDataset(hdf5_file, task_indices, dna_tokenizer)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True, drop_last=False, persistent_workers=True)
 
-    print("Computing variant effects...")
+    print(f"Computing variant effects for chunk {chunk_id}...")
     start_time = time.time()
 
     all_success_res = []

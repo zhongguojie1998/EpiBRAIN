@@ -224,3 +224,35 @@ Consolidates distributed computation results into main HDF5 file.
 - `-c, --chunk_dir`: Directory containing chunk results (default: auto-detect)
 - `--cleanup`: Remove chunk files after successful merge
 - `--force`: Force merge even if some chunks failed validation
+
+
+### Example
+
+```bash
+python Analysis/03_variant_effect_screen/merge_results.py -h5 ./Data/source/GWAS_Var/res_file.h5
+
+# Main HDF5 file: ./Data/source/GWAS_Var/res_file.h5
+# Chunk results directory: ./Data/source/GWAS_Var/chunk_results
+# Found 69 chunk files
+# Validating chunk files...
+# Validating: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 69/69 [00:00<00:00, 79.87it/s]
+# Valid chunks: 69
+# Invalid chunks: 0
+# Collecting results from valid chunks...
+# Loading chunks: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 69/69 [00:09<00:00,  7.40it/s]
+# Merging results...
+# Total successful computations: 1188594
+# Result matrix shape: (1188594, 194)
+# Updating main HDF5 file...
+# Sorting indices for optimal HDF5 access...
+# Batch updating status...
+# Batch updating results...
+# Merge report saved: ./Data/source/GWAS_Var/merge_report_20250729_143048.csv
+# 
+# ============================================================
+# MERGE COMPLETED SUCCESSFULLY
+# ============================================================
+# Merged 69 chunks
+# Updated 1188594 variants
+# Main HDF5 file: ./Data/source/GWAS_Var/res_file.h5
+```
