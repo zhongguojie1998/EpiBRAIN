@@ -43,5 +43,11 @@ variants['CHR'] = variants['CHR'].astype(str).str.replace('chr', '').astype(int)
 # %%
 # get the chrom positions in hg19
 variants_hg19 = query_vcf_with_rsidx(variants['SNP'].values,
-                                     '')
+                                     '../Data/Ref/hg19/dbSNP/GCF_000001405.40.gz',
+                                     '../Data/Ref/hg19/dbSNP/GCF_000001405.40.rsidx',
+                                     n_processes=10)
+# save to pickle file
+import pickle
+with open('sldp.variants.hg19.pkl', 'wb') as f:
+    pickle.dump(variants_hg19, f)
 # %%
