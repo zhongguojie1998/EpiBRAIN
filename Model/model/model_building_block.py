@@ -254,18 +254,14 @@ class ConvBlock(nn.Module):
         if self.res_link:
             if self.channel_diff > 0:
                 # zeros shape: [B, channel_diff, L]
-                zeros = x.new_zeros(
-                    x.size(0),
-                    self.channel_diff,
-                    *x.shape[2:]
-                )
+                zeros = x.new_zeros(x.size(0), self.channel_diff, *x.shape[2:])
                 x_skipped = torch.cat([x, zeros], dim=1)  # -> (B, C_out, L)
             else:
                 # if out_channels <= in_channels
                 x_skipped = x[:, : self.out_channels, ...]
-            
+
             out += x_skipped
-            
+
         return out
 
 
@@ -285,108 +281,213 @@ class ConvDna(nn.Module):
 
 class PredictionHead(nn.Module):
 
-    def __init__(self, in_features, task, track_num=None, celltype_num=None, modality_num=None, celltype_hidden_dim=None, share_modality=False, class_num=None):
+    def __init__(self, in_features, heads_config=None, **kwargs):
+        """
+        Initialize PredictionHead with multiple output heads.
+        
+        Args:
+            in_features (int): Input feature dimension
+            heads_config (dict): Configuration for all prediction heads
+            
+        Expected heads_config format:
+        {
+            # Shared parameters (optional)
+            'use_cell_encoder': bool,           # Whether to use shared celltype encoder (default: False)
+            'celltype_hidden_dim': int,         # Hidden dim for celltype embedding (default: in_features//2)
+            
+            # Individual head configs
+            'head_name': {
+                'task': str,                    # Required: 'regression' or 'classification'
+                
+                # For use_cell_encoder=True:
+                'celltype_num': int,            # Required: number of cell types (must be same across heads)
+                'modality_num': int,            # Required: number of modalities (can differ between heads)
+                'class_num': int,               # Required for classification: number of classes
+                
+                # For use_cell_encoder=False:
+                'track_num': int,               # Required: total number of output tracks
+                'class_num': int,               # Required for classification: number of classes
+            }
+        }
+        """
         super().__init__()
-        self.task = task
-        self.share_modality = share_modality
 
-        # Parameter validation and initialization
-        self._validate_and_init_params(in_features, track_num, celltype_num, modality_num, class_num, celltype_hidden_dim)
+        self.in_features = in_features
 
-        # Build the prediction layers
-        self._build_layers(in_features)
+        self._extract_and_validate_params(heads_config)
+        self._setup_cell_encoder()
+        self._setup_heads()
 
-    def _validate_and_init_params(self, in_features, track_num, celltype_num, modality_num, class_num, celltype_hidden_dim):
-        """Validate parameters and determine final configuration"""
+    def _extract_and_validate_params(self, config):
+        """Extract shared params and validate head configs"""
+        if not config:
+            raise ValueError("heads_config cannot be empty")
 
-        if track_num is not None and (celltype_num is not None or modality_num is not None):
-            print("track_num provided along with celltype_num/modality_num. Using track_num only.")
-            self.track_num = track_num
-            self.celltype_num = None
-            self.modality_num = None
-            self.share_modality = False  # Force to False for backward compatibility
-        elif track_num is not None:
-            # Legacy mode: direct track_num
-            self.track_num = track_num
-            self.celltype_num = None
-            self.modality_num = None
-            self.share_modality = False
+        config = config.copy()
+
+        # Step 1: Pop shared parameters
+        self.use_cell_encoder = config.pop("use_cell_encoder", False)
+        self.celltype_hidden_dim = config.pop("celltype_hidden_dim", None)
+
+        # Set default celltype_hidden_dim if needed
+        if self.use_cell_encoder and self.celltype_hidden_dim is None:
+            self.celltype_hidden_dim = self.in_features // 2
+            print(f"celltype_hidden_dim not provided, defaulting to {self.celltype_hidden_dim}")
+
+        # Step 2: Validate and store head configs
+        self.heads_config = {}
+        celltype_nums = []
+
+        for head_name, head_config in config.items():
+            if "task" not in head_config:
+                raise ValueError(f"Head {head_name}: invalid config, must be dict with 'task' field")
+
+            # If use_cell_encoder, validate celltype_num exists and collect for consistency check
+            if self.use_cell_encoder:
+                if "celltype_num" not in head_config:
+                    raise ValueError(f"Head {head_name}: celltype_num required when use_cell_encoder=True")
+                celltype_nums.append(head_config["celltype_num"])
+
+            self.heads_config[head_name] = head_config
+
+        # Step 3: Validate celltype_num consistency if using cell encoder
+        if self.use_cell_encoder:
+            if len(set(celltype_nums)) > 1:
+                raise ValueError(
+                    f"All heads must have same celltype_num when use_cell_encoder=True. Got: {set(celltype_nums)}"
+                )
+            self.shared_celltype_num = celltype_nums[0]
+
+    def _setup_cell_encoder(self):
+        """Setup shared celltype encoder if needed"""
+        if self.use_cell_encoder:
+            self.shared_cell_encoder = nn.Linear(
+                self.in_features, self.celltype_hidden_dim * self.shared_celltype_num
+            )
         else:
-            # New mode: cell type * modality
-            if celltype_num is None or modality_num is None:
-                raise ValueError("Must provide either track_num or both celltype_num and modality_num")
-            if self.share_modality and celltype_hidden_dim is None:
-                self.celltype_hidden_dim = in_features // 2
-                print(
-                    f"Using shared modality but cell type hidden dim is not provided, default to half of the in features ({self.celltype_hidden_dim})"
+            self.shared_cell_encoder = None
+
+    def _validate_head_config(self, head_name, config):
+        """Validate single head config and calculate derived params"""
+        task = config["task"]
+        if task not in ["regression", "classification"]:
+            raise ValueError(f"Head {head_name}: unsupported task '{task}', must be 'regression' or 'classification'")
+        track_num = config.get("track_num")
+        celltype_num = config.get("celltype_num")
+        modality_num = config.get("modality_num")
+        class_num = config.get("class_num")
+
+        head_config = {"task": task}
+
+        # Determine track configuration
+        if self.use_cell_encoder:
+            if modality_num is None:
+                raise ValueError(f"Head {head_name}: modality_num required when use_cell_encoder=True")
+            head_config.update(
+                {
+                    "celltype_num": celltype_num,
+                    "modality_num": modality_num,
+                    "track_num": celltype_num * modality_num,
+                }
+            )
+        else:
+            if track_num is not None:
+                if celltype_num is not None or modality_num is not None:
+                    print(
+                        f"Head {head_name}: track_num provided along with celltype_num/modality_num. Using track_num only."
+                    )
+                head_config.update(
+                    {
+                        "track_num": track_num,
+                        "celltype_num": None,
+                        "modality_num": None,
+                    }
                 )
             else:
-                self.celltype_hidden_dim = celltype_hidden_dim
-            self.celltype_num = celltype_num
-            self.modality_num = modality_num
-            self.track_num = celltype_num * modality_num
+                raise ValueError(f"Head {head_name}: Must provide track_num when use_cell_encoder=False")
 
-        self.class_num = class_num
+        head_config["class_num"] = class_num
 
         # Calculate output channels
-        if "classification" in self.task:
+        if task == "classification":
             if class_num is None:
-                raise ValueError("class_num must be provided for classification task")
-            self.out_channels = self.track_num * class_num
-        elif "regression" in self.task:
-            self.out_channels = self.track_num
+                raise ValueError(f"Head {head_name}: class_num required for classification task")
+            head_config["out_channels"] = head_config["track_num"] * class_num
+        elif task == "regression":
+            head_config["out_channels"] = head_config["track_num"]
         else:
-            raise NotImplementedError(f"Task '{self.task}' not supported")
+            raise ValueError(
+                f"Head {head_name}: unsupported task '{task}', must be 'regression' or 'classification'"
+            )
 
-    def _build_layers(self, in_features):
-        """Build the prediction layers based on configuration"""
-        if self.share_modality:
-            # Vectorized shared modality head architecture
-            self.cell_encoder = nn.Linear(in_features, self.celltype_hidden_dim * self.celltype_num)
+        return head_config
 
-            if "regression" in self.task:
-                self.modality_head = nn.Linear(self.celltype_hidden_dim, self.modality_num)
-                self.scale = nn.Parameter(torch.ones(self.track_num))
-            else:  # classification
-                self.modality_head = nn.Linear(self.celltype_hidden_dim, self.modality_num * self.class_num)
-        else:
-            # Direct linear layer
-            self.linear = nn.Linear(in_features, self.out_channels)
-            if "regression" in self.task:
-                self.scale = nn.Parameter(torch.ones(self.out_channels))
+    def _setup_heads(self):
+        """Build all prediction heads based on configurations"""
+        self.heads = nn.ModuleDict()
+        self.head_configs = {}
+
+        for head_name, config in self.heads_config.items():
+            head_config = self._validate_head_config(head_name, config)
+            self.head_configs[head_name] = head_config
+
+            if self.use_cell_encoder:
+                # Use shared cell encoder, only build modality head
+                if head_config["task"] == "regression":
+                    self.heads[head_name] = nn.Linear(self.celltype_hidden_dim, head_config["modality_num"])
+                    self.register_parameter(f'{head_name}_scale', nn.Parameter(torch.ones(head_config["track_num"])))
+                else:  # classification
+                    self.heads[head_name] = nn.Linear(
+                        self.celltype_hidden_dim, head_config["modality_num"] * head_config["class_num"]
+                    )
+            else:
+                # Direct linear layer
+                self.heads[head_name] = nn.Linear(self.in_features, head_config["out_channels"])
+                if head_config["task"] == "regression":
+                    self.register_parameter(
+                        f"{head_name}_scale", nn.Parameter(torch.ones(head_config["out_channels"]))
+                    )
 
     def forward(self, x):
         """
         x: [B, L, in_features]
-        returns: [B, L, track_num] for regression or [B, L, track_num, class_num] for classification
+        returns: dict of {head_name: prediction} where prediction is
+                [B, L, track_num] for regression or [B, L, track_num, class_num] for classification
         """
         B, L, _ = x.shape
 
-        if self.share_modality:
-            # Vectorized shared modality architecture - minimal reshaping!
-            
-            # Step 1: Get all cell type embeddings 
-            cell_embs = self.cell_encoder(x)  # [B, L, celltype_hidden_dim * celltype_num]
-            cell_embs = cell_embs.view(B, L, self.celltype_num, self.celltype_hidden_dim)  # [B, L, C, H]
-            
-            # Step 2: Apply modality head 
-            mod_preds = self.modality_head(cell_embs)  # [B, L, C, M] or [B, L, C, M*K]
-            
-            if "regression" in self.task:
-                # Flatten and apply scale directly  
-                pred = F.softplus(mod_preds.view(B, L, -1)) * F.softplus(self.scale)  # [B, L, C*M]
-                
-            else:  # classification
-                # Direct reshape: [B, L, C, M*K] -> [B, L, C*M, K]
-                pred = mod_preds.view(B, L, -1, self.class_num)  # [B, L, C*M, K]
+        # Compute shared cell embeddings if needed
+        if self.use_cell_encoder:
+            shared_cell_embs = self.shared_cell_encoder(x)  # [B, L, celltype_hidden_dim * celltype_num]
+            shared_cell_embs = shared_cell_embs.view(
+                B, L, self.shared_celltype_num, self.celltype_hidden_dim
+            )  # [B, L, C, H]
 
-        else:
-            # Direct linear prediction
-            pred = self.linear(x)  # [B, L, out_channels]
+        # Compute predictions for all heads
+        outputs = {}
+        for head_name, head_config in self.head_configs.items():
+            head_layer = self.heads[head_name]
 
-            if "classification" in self.task:
-                pred = pred.view(B, L, self.track_num, self.class_num)
-            else:  # regression
-                pred = F.softplus(pred) * F.softplus(self.scale)
+            if self.use_cell_encoder:
+                # Use shared cell embeddings
+                mod_preds = head_layer(shared_cell_embs)  # [B, L, C, M] or [B, L, C, M*K]
 
-        return pred
+                if head_config["task"] == "regression":
+                    scale = getattr(self, f"{head_name}_scale")
+                    pred = F.softplus(mod_preds.view(B, L, -1)) * F.softplus(scale)  # [B, L, C*M]
+                else:  # classification
+                    pred = mod_preds.view(B, L, -1, head_config["class_num"])  # [B, L, C*M, K]
+            else:
+                # Direct linear prediction
+                pred = head_layer(x)  # [B, L, out_channels]
+
+                if "classification" in head_config["task"]:
+                    pred = pred.view(B, L, head_config["track_num"], head_config["class_num"])
+                else:  # regression
+                    scale = getattr(self, f"{head_name}_scale")
+                    pred = F.softplus(pred) * F.softplus(scale)
+
+            outputs[head_name] = pred
+
+        return outputs
+    

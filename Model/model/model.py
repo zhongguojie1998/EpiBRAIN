@@ -153,12 +153,11 @@ class Borzoi(PreTrainedModel):
             nn.GELU(approximate="tanh"),
         )
 
-        ## create output heads given the config.output_heads
-        self.prediction_head = nn.ModuleDict()
-        for head_name, track_params in config.output_heads.items():
-            self.prediction_head[head_name] = PredictionHead(
-                in_features=config.final_joined_conv_param["out_channels"], **track_params
-            )
+        ## create unified prediction head with all output heads
+        self.prediction_head = PredictionHead(
+            in_features=config.final_joined_conv_param["out_channels"],
+            heads_config=config.output_heads
+        )
 
     def _init_weights(self, module):
         # this is for loading from hugging face parameter
@@ -201,16 +200,21 @@ class Borzoi(PreTrainedModel):
 
         return x
 
-    def forward(self, x, use_head="human", **kwargs):
+    def forward(self, x, use_head=None, **kwargs):
         """
         Performs the forward pass of the model.
 
         Args:
             x (torch.Tensor): Input DNA sequence tensor of shape (N, 4, L).
-            use_head (str, optional): Indicate which prediction head to use. Defaults to human.
+            use_head (str or list or None, optional): 
+                - None: return all heads as dict
+                - str: return single head result directly (not wrapped in dict)
+                - list: return specified heads as dict
 
         Returns:
-            torch.Tensor: Output tensor with shape (N, C, crop_bin_num), where C is the number of tracks.
+            torch.Tensor or dict: 
+                - If use_head is str: Output tensor with shape (N, C, crop_bin_num)
+                - If use_head is None or list: Dict of {head_name: output_tensor}
         """
         with torch.amp.autocast("cuda", enabled=self.use_autocast):
             x, intermediates = self.sequence_encoder(x)
@@ -229,15 +233,18 @@ class Borzoi(PreTrainedModel):
 
         # disable autocast for more precision in final layer
         with torch.amp.autocast("cuda", enabled=False):
-            return self.prediction_head[use_head](x)
+            # Get all predictions from unified prediction head
+            all_outputs = self.prediction_head(x)
             
-            # DDP training code (commented out for future use)
-            # if data_parallel_training:
-            #     # we need this to get gradients for all heads if doing DDP training
-            #     out = self.prediction_head[use_head](x)
-            #     for head_name, head in self.prediction_head.items():
-            #         if head != use_head:
-            #             out += 0 * self.prediction_head[head_name](x).sum()
-            #     return out
-            # else:
-            #     return self.prediction_head[use_head](x)
+            # Return based on use_head parameter
+            if use_head is None:
+                # Return all heads
+                return all_outputs
+            elif isinstance(use_head, str):
+                # Return single head directly (not wrapped in dict)
+                return all_outputs[use_head]
+            elif isinstance(use_head, (list, tuple)):
+                # Return specified heads as dict
+                return {head_name: all_outputs[head_name] for head_name in use_head}
+            else:
+                raise ValueError(f"use_head must be None, str, or list/tuple, got {type(use_head)}")

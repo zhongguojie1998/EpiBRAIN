@@ -268,13 +268,13 @@ class Borzoi(PreTrainedModel):
         # Other initializations
         self.apply(other_init)
 
-    def forward(self, x, use_head="human", **kwargs):
+    def forward(self, x, use_head="regression", **kwargs):
         """
         Performs the forward pass of the model.
 
         Args:
             x (torch.Tensor): Input DNA sequence tensor of shape (N, 4, L).
-            use_head (str, optional): Indicate which prediction head to use. Defaults to human.
+            use_head (str, optional): Indicate which prediction head to use. Defaults to regression.
 
         Returns:
             torch.Tensor: Output tensor with shape (N, crop_bin_num, C), where C is the number of tracks.
@@ -307,6 +307,23 @@ class Borzoi(PreTrainedModel):
 
         # disable autocast for more precision in final layer
         with torch.amp.autocast("cuda", enabled=False):
+
+            # Get all predictions from unified prediction head
+            all_outputs = self.prediction_head(x)
+
+            # Return based on use_head parameter
+            if use_head is None:
+                # Return all heads
+                return all_outputs
+            elif isinstance(use_head, str):
+                # Return single head directly (not wrapped in dict)
+                return all_outputs[use_head]
+            elif isinstance(use_head, (list, tuple)):
+                # Return specified heads as dict
+                return {head_name: all_outputs[head_name] for head_name in use_head}
+            else:
+                raise ValueError(f"use_head must be None, str, or list/tuple, got {type(use_head)}")
+            
             return self.final_softplus(self.prediction_head[use_head](x.float())).permute(0, 2, 1)
 
             # DDP training code (commented out for future use)

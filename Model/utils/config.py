@@ -56,12 +56,14 @@ def load_config(config_dir: str = ".", config_name: str = "default", overrides: 
         "`model.bins_to_return` should be same as `data.preprocess.n_window`",
         check="equal",
     )
-    input_check(
-        config.model.use_head,
-        config.model.output_heads.keys(),
-        "Predict head (`model.use_head`) should be registered (`model.output_heads`)",
-        check="within",
-    )
+    # Check each training head is registered in model output_heads
+    for head in config.training.use_head:
+        input_check(
+            head,
+            config.model.output_heads.keys(),
+            f"Training head `{head}` in `training.use_head` should be registered in `model.output_heads`",
+            check="within",
+        )
     if config.training.test_only:
         input_check(
             config.training.get("load_checkpoint", None),
