@@ -119,14 +119,13 @@ def safe_state_dict_loader(org_model_state_dict, load_model_state_dict, partial_
 
 def setup_model(config, logger):
     from model.model import Borzoi  # Import moved here to avoid circular import
-    from model.model_org import Borzoi as Borzoi_org  # Import moved here to avoid circular import
 
     model_config = config.model
     training_config = config.training
 
     # get our model skeleton
     if "borzoi" in model_config.model_name or "flashzoi" in model_config.model_name:
-        model_cls = Borzoi if not model_config.get("org_imp", False) else Borzoi_org
+        model_cls = Borzoi
     else:
         logger.error(f"Model {model_config.model_name} is not implemented yet.")
         exit(1)
