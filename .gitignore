@@ -26,3 +26,5 @@ hostfile
 
 # slurm output
 *.out
+
+SLDP/
