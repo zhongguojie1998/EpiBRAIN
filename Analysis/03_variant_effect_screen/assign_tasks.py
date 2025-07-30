@@ -93,7 +93,14 @@ def assign_tasks_to_compute(task_indices, compute_assignments):
 )
 @click.option("--force", is_flag=True, help="Force recompute all tasks")
 @click.option("--save_interval", type=int, default=20000, help="Save intermediate results every N samples")
-@click.option("-p", "--precision", type=click.Choice(["float32", "float64"]), default="float32", help="Numerical precision (float32 for speed, float64 for accuracy)")
+@click.option(
+    "-p",
+    "--precision",
+    type=click.Choice(["float32", "float64"]),
+    default="float32",
+    help="Numerical precision (float32 for speed, float64 for accuracy)",
+)
+@click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
 @click.option("--abs_path", is_flag=True, help="Use absolute paths for scripts and model")
 def main(
     hdf5_file,
@@ -104,6 +111,7 @@ def main(
     force,
     save_interval,
     precision,
+    use_head,
     abs_path,
 ):
     """Distribute variant effect computation tasks"""
@@ -164,7 +172,8 @@ def main(
   --device {device} \\
   --batch_size {batch_size} \\
   --save_interval {save_interval} \\
-  --precision {precision}
+  --precision {precision} \\
+  --use_head {use_head}
 """
             )
         os.chmod(script_path, 0o755)

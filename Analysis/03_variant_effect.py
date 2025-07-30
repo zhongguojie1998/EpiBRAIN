@@ -37,7 +37,7 @@ def onehot_to_str(seq_onehot):
 
 
 def process_vcf_chunk(args):
-    chunk_data, config_path, checkpoint_path, save_base, device = args
+    chunk_data, config_path, checkpoint_path, save_base, device, use_head = args
 
     # Load config
     myconfig = load_config(config_name=config_path)
@@ -88,14 +88,14 @@ def process_vcf_chunk(args):
         # get pred result
         with torch.no_grad():
             pred_res_wt = (
-                model(wt_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), myconfig.model.use_head, False)
+                model(wt_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), use_head)
                 .detach()
                 .cpu()
                 .numpy()
                 .squeeze(0)
             )
             pred_res_mut = (
-                model(mut_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), myconfig.model.use_head, False)
+                model(mut_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), use_head)
                 .detach()
                 .cpu()
                 .numpy()
@@ -166,7 +166,8 @@ def process_vcf_chunk(args):
     default="gpu",
 )
 @click.option("--num_processes", type=int, default=4, help="Number of subprocess to use for parallel processing")
-def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, processor, num_processes):
+@click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
+def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, processor, num_processes, use_head):
     LOG_BASE = os.path.abspath(log_base)
     CHK_BASE = os.path.abspath(chk_base)
     RES_BASE = os.path.abspath(res_base)
@@ -247,6 +248,7 @@ def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, proces
             f"{CHK_BASE}/{exp_name}/chk_epoch_{chk}.pt",
             f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/var_eff",
             f"cuda:{process_id}" if processor == "gpu" else "cpu",
+            use_head,
         )
         process_args.append(args)
 

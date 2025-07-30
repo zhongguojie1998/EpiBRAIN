@@ -48,6 +48,7 @@ def process_region_chunk(args):
         force_restart,
         save_raw,
         prefix,
+        use_head,
     ) = args
 
     save_base = f"{res_base}/{exp_name}/analysis_{chk}/raw_data"
@@ -129,7 +130,7 @@ def process_region_chunk(args):
         ## pred
         with torch.no_grad():
             pred_res = model(
-                test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), myconfig.model.use_head, False
+                test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), use_head
             )
             pred_res_trial = pred_res.detach().cpu().numpy()[0, :, trial_dim]
             del pred_res
@@ -316,6 +317,7 @@ def process_region_chunk(args):
     default="gpu",
 )
 @click.option("--num_processes", type=int, default=4, help="Number of subprocess to use for parallel processing")
+@click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
 def main(
     region_bed,
     exp_name,
@@ -329,6 +331,7 @@ def main(
     save_raw,
     processor,
     num_processes,
+    use_head,
 ):
     LOG_BASE = os.path.abspath(log_base)
     CHK_BASE = os.path.abspath(chk_base)
@@ -420,6 +423,7 @@ def main(
             force_restart,
             save_raw,
             prefix,
+            use_head,
         )
         process_args.append(args)
 

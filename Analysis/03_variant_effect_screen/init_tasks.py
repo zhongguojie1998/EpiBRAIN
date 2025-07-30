@@ -23,13 +23,12 @@ def load_enriched_sumstats(csv_path):
 def init_hdf5_structure(h5_path, label_meta_path):
     """Initialize HDF5 with optimized structure"""
     label_meta = pd.read_csv(label_meta_path)
-    label_meta = label_meta.sort_values("dim")
     trial_names = label_meta["trial"].tolist()
 
     with h5py.File(h5_path, "w") as f:
         # Metadata
-        f.attrs["trial_names"] = trial_names
-        f.attrs["n_dims"] = len(trial_names)
+        f.attrs["trial_names"] = label_meta["trial"].tolist()
+        f.attrs["trial_dims"] = label_meta["dim"].tolist()
 
         # Main variants table (compressed)
         variants_grp = f.create_group("variants")

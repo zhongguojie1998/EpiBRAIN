@@ -118,7 +118,7 @@ def collate_fn(batch):
 
 def load_label_meta_from_h5(h5_path):
     with h5py.File(h5_path, "r") as f:
-        return f.attrs["trial_names"]
+        return f.attrs["trial_dims"]
 
 
 def save_intermediate_results(
@@ -185,7 +185,8 @@ def get_model(checkpoint, device, config=None):
 @click.option("--batch_size", type=int, default=32)
 @click.option("--save_interval", type=int, default=20000, help="Save intermediate results every N samples")
 @click.option("-p", "--precision", type=click.Choice(["float32", "float64"]), default="float32", help="Numerical precision (float32 for speed, float64 for accuracy)")
-def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, save_interval, precision):
+@click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
+def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, save_interval, precision, use_head):
 
     # Sort task indices for optimal HDF5 access pattern
     task_indices = np.load(chunk_indices)
@@ -209,6 +210,7 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
 
     dataset = VariantDataset(hdf5_file, task_indices, dna_tokenizer)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True, drop_last=False, persistent_workers=True)
+    trial_dims = load_label_meta_from_h5(hdf5_file)
 
     print(f"Computing variant effects for chunk {chunk_id}...")
     start_time = time.time()
@@ -235,8 +237,8 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             wt_input = dtype_fn(wt_batch.permute(0, 2, 1).to(device))
             mut_input = dtype_fn(mut_batch.permute(0, 2, 1).to(device))
 
-            pred_wt = model(wt_input, config.model.use_head, False).detach().cpu().numpy()
-            pred_mut = model(mut_input, config.model.use_head, False).detach().cpu().numpy()
+            pred_wt = model(wt_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
+            pred_mut = model(mut_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
             diffs = pred_mut - pred_wt
             diffs = np.sum(diffs, axis=1)
 
