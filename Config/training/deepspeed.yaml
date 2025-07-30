@@ -24,6 +24,10 @@ accum_step: 1 # gradient accumulation step (effective batchsize=world_size * bat
 clip_grad_norm: 0.15 # gradient clipping norm, 0.15 as in borzoi
 seed: 42  # random seed for reproduciblility
 
+## model head setup
+use_head: # list of heads to use for training
+  - regression
+
 ## loss setup
 loss: poisson_mn # the name of the loss function (now support: poisson, poisson_mn)
 loss_params:

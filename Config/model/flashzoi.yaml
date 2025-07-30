@@ -41,8 +41,10 @@ final_joined_conv_param:
   out_channels: 1920  # number of output channels for the final conv layer
   dropout: 0.1  # dropout rate for the final conv layer
 
+# new output head setting for the model
 output_heads: # set up the prediction head name and trial number
-  human:
+  use_cell_encoder: False  # whether to use shared cell encoder for the output heads, if True, the output will be calculated as celltype embedding then shared task output, else, directly output separate celltype * modality
+  celltype_hidden_dim: 960  # the dimension of the cell type embedding, if use_cell_encoder is True, this will be used to calculate the cell type embedding
+  regression:
     track_num: 87
     task: regression # choose from `regression` or `classification`
-use_head: human # the head use for forward pass
