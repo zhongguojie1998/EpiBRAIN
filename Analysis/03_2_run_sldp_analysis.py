@@ -14,6 +14,36 @@ from concurrent.futures import ProcessPoolExecutor
 import subprocess
 from pyliftover import LiftOver
 
+
+# Define helper functions for parallel processing
+def run_sldp_preprocessing(output_dir, track):
+    # Check if output already exists
+    if os.path.exists(f'{output_dir}/{track}/22.RV.gz'):
+        cmd = f'ls -lsh {output_dir}/{track}/22.RV.gz'
+    else:
+        cmd = f'/share/vault/Users/gz2294/miniconda3/envs/GenoSCOPE/bin/python SLDP/sldp/preprocessannot \
+                    --sannot-chr {output_dir}/{track}/ \
+                    --bfile-chr SLDP/example/plink_files/1000G.EUR.QC.hm3_noMHC. \
+                    --print-snps SLDP/example/1000G_hm3_noMHC.rsid \
+                    --ld-blocks SLDP/example/pickrell_ldblocks.hg19.eur.bed'
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+def run_sldp(output_dir, track):
+    # Check if output already exists
+    if os.path.exists(f'{output_dir}/{track}.gwresults'):
+        cmd = f'ls -lsh {output_dir}/{track}.gwresults'
+    else:
+        cmd = f'/share/vault/Users/gz2294/miniconda3/envs/GenoSCOPE/bin/python SLDP/sldp/sldp \
+                    --pss-chr {output_dir}/gwas.KG3.95/ \
+                    --sannot-chr {output_dir}/{track}/ \
+                    --background-sannot-chr SLDP/example/maf5/ \
+                    --outfile-stem {output_dir}/{track} \
+                    --ld-blocks SLDP/example/pickrell_ldblocks.hg19.eur.bed \
+                    --svd-stem SLDP/example/svds_95percent/ \
+                    --bfile-reg-chr SLDP/example/plink_files/1000G.EUR.QC.hm3_noMHC. \
+                    --seed 0'
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
 def main():
     parser = argparse.ArgumentParser(description='Run SLDP analysis on HDF5 input file')
     parser.add_argument('input_file', help='Path to input HDF5 file')
@@ -55,11 +85,11 @@ def main():
     variants = pd.DataFrame({'CHR': res['variants/chr'],
                              'BP': res['variants/pos'],
                              'SNP': res['variants/rsid'], 
-                             'A1': res['variants/ref'],
-                             'A2': res['variants/alt'],})
+                             'A1': res['variants/alt'],
+                             'A2': res['variants/ref'],})
     sum_stats = pd.DataFrame({'SNP': res['variants/rsid'],
-                              'A1': res['variants/ref'],
-                              'A2': res['variants/alt'],
+                              'A1': res['variants/alt'],
+                              'A2': res['variants/ref'],
                               'Z': res['experiments/schizophrenia/z_score'],
                               'N': res['experiments/schizophrenia/n_sample']})
     
@@ -113,39 +143,10 @@ def main():
     # Write summary statistics
     sum_stats.loc[track_effects.index].to_csv(f'{output_dir}/gwas.sumstats.gz', sep='\t', header=True, index=False, compression='gzip')
     
-    # Define helper functions for parallel processing
-    def run_sldp_preprocessing(track):
-        # Check if output already exists
-        if os.path.exists(f'{output_dir}/{track}/22.RV.gz'):
-            cmd = f'ls -lsh {output_dir}/{track}/22.RV.gz'
-        else:
-            cmd = f'/share/vault/Users/gz2294/miniconda3/envs/GenoSCOPE/bin/python SLDP/sldp/preprocessannot \
-                        --sannot-chr {output_dir}/{track}/ \
-                        --bfile-chr SLDP/example/plink_files/1000G.EUR.QC.hm3_noMHC. \
-                        --print-snps SLDP/example/1000G_hm3_noMHC.rsid \
-                        --ld-blocks SLDP/example/pickrell_ldblocks.hg19.eur.bed'
-        return subprocess.run(cmd, shell=True, capture_output=True, text=True)
-
-    def run_sldp(track):
-        # Check if output already exists
-        if os.path.exists(f'{output_dir}/{track}.gwresults'):
-            cmd = f'ls -lsh {output_dir}/{track}.gwresults'
-        else:
-            cmd = f'/share/vault/Users/gz2294/miniconda3/envs/GenoSCOPE/bin/python SLDP/sldp/sldp \
-                        --pss-chr {output_dir}/gwas.KG3.95/ \
-                        --sannot-chr {output_dir}/{track}/ \
-                        --background-sannot-chr SLDP/example/maf5/ \
-                        --outfile-stem {output_dir}/{track} \
-                        --ld-blocks SLDP/example/pickrell_ldblocks.hg19.eur.bed \
-                        --svd-stem SLDP/example/svds_95percent/ \
-                        --bfile-reg-chr SLDP/example/plink_files/1000G.EUR.QC.hm3_noMHC. \
-                        --seed 0'
-        return subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    
     # Run SLDP preprocessing in parallel
     print("Running SLDP preprocessing...")
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(run_sldp_preprocessing, track) for track in variant_effects.columns]
+        futures = [executor.submit(run_sldp_preprocessing, output_dir, track) for track in variant_effects.columns]
         for i, future in enumerate(futures):
             result = future.result()
             if result.returncode != 0:
@@ -165,7 +166,7 @@ def main():
     # Run SLDP analysis in parallel
     print("Running SLDP analysis...")
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(run_sldp, track) for track in variant_effects.columns]
+        futures = [executor.submit(run_sldp, output_dir, track) for track in variant_effects.columns]
         for future in futures:
             result = future.result()
             if result.returncode != 0:
