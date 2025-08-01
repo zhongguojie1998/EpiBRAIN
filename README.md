@@ -68,6 +68,7 @@ The configuration can have the following fields:
 
 - `exp` (required): the name of the trial, **please name it in `{celltype}_{modality}` style**
 - `file` (required): the path to the raw bigwig file
+- `task` (required): the final target is regression or classification task
 - `sum_stat` (optional, default: sum): in each bin, how to aggregate the raw reads into a summary
 - `baseline_pct` (optional, default: 0.5): set the nan/blacklist region value to this quantile of all values
 - `umap_pct` (optional, default: 0.5): set the umap region value to this quantile of all values
