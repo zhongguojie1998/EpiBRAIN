@@ -2,7 +2,6 @@
 
 import collections
 import heapq
-import itertools
 import math
 import os
 import subprocess
@@ -727,7 +726,7 @@ class CovFace:
 
 
 # TODO: the current implementation is based on regression task, we may need an extra function for classification task
-def aggregate_data(storage_path, preload_data, task=None, precision="float32"):
+def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
     """Aggregate the label data from multiple files into file designed for model training."""
 
     separate_label_file = [
@@ -739,44 +738,48 @@ def aggregate_data(storage_path, preload_data, task=None, precision="float32"):
     else:
         logger.info(f"Found {len(separate_label_file)} label files to aggregate.")
 
-    # prepare label meta
+    # prepare raw label meta
     label_meta = pd.DataFrame({"file": separate_label_file})
     label_meta["trial"] = label_meta["file"].str.split("/").str[-1].str.split(".").str[0]
+    label_meta["task"] = label_meta["file"].str.split("/").str[-1].str.split("_").str[0]
     label_meta[["cell_type", "modality"]] = label_meta["trial"].str.rsplit("_", n=1, expand=True)
-    ## in model, we generate all modalities for each cell type, we save the dims with label info in the label_meta index
-    unique_cell_types = sorted(label_meta['cell_type'].unique())
-    unique_modalities = sorted(label_meta['modality'].unique())
-    full_info = pd.DataFrame()
-    for p, (i,j) in enumerate(itertools.product(unique_cell_types, unique_modalities)):
-        full_info.loc[p, ["cell_type", "modality"]] = [i, j]
-    label_meta = full_info.merge(label_meta, on=["cell_type", "modality"], how="left").dropna()
-    label_meta.index.name = "dim"
-    label_meta = label_meta[["trial", "cell_type", "modality", "file"]]
-    label_meta.to_csv(f"{storage_path}/label_meta.csv", index=True)
+    label_meta = label_meta.sort_values(["task", "trial"])
+    label_meta = label_meta[["trial", "cell_type", "modality", "task", "file"]]
+    label_meta.to_csv(f"{storage_path}/raw_label_meta.csv", index=False)
 
     # get all the label data
-    label_data = []
-    for label_file in tqdm(label_meta["file"]):
-        with h5py.File(label_file, "r") as f:
-            label_data.append(f["targets"][:])
+    os.makedirs(f"{storage_path}/data", exist_ok=True)
+    label_dict = {}
+    for task_type in label_meta["task"].unique():
+        label_data = []
+        for label_file in tqdm(label_meta.loc[label_meta["task"] == task_type, "file"]):
+            with h5py.File(label_file, "r") as f:
+                label_data.append(f["targets"][:])
 
-    label_data = np.stack(label_data, axis=-1)
-    try:
-        precision = getattr(torch, precision)
-    except AttributeError:
-        logger.warning(f"Specified precision {precision} is not accept, save as float32")
-        precision = getattr(torch, "float32")
-    label_data = torch.tensor(label_data, dtype=precision)
+        label_data = np.stack(label_data, axis=-1)
+        try:
+            precision = getattr(torch, precision)
+        except AttributeError:
+            logger.warning(f"Specified precision {precision} is not accept, save as float32")
+            precision = getattr(torch, "float32")
+        label_data = torch.tensor(label_data, dtype=precision)
+        label_dict[task_type] = label_data
 
     # TODO: we need to add gene level mask here to enable RNA gene expression count loss
     if preload_data:
         # save the aggregated data
-        for dataset_type, tmp in task.groupby(3):
-            torch.save({"label": label_data[tmp.index]}, f"{storage_path}/data/{dataset_type}.pt")
-        torch.save(label_data, f"{storage_path}/data/all_label.pt")
+        for dataset_type, tmp in todo.groupby(3):
+            save_dict = {}
+            for task_type, task_label_data in label_dict.items():
+                save_dict[task_type] = task_label_data[tmp.index]
+            torch.save({"label": save_dict}, f"{storage_path}/data/{dataset_type}.pt")
+        torch.save(label_dict, f"{storage_path}/data/all_label.pt")
 
     else:
         # save per data point separately
-        for i in task.index:
-            chrom, start, end = task.loc[i, [0, 1, 2]]
-            torch.save({"label": label_data[i].clone()}, f"{storage_path}/data/{chrom}_{start}_{end}.pt")
+        for i in todo.index:
+            chrom, start, end = todo.loc[i, [0, 1, 2]]
+            save_dict = {}
+            for task_type, task_label_data in label_dict.items():
+                save_dict[task_type] = task_label_data[i].clone()
+            torch.save({"label": save_dict}, f"{storage_path}/data/{chrom}_{start}_{end}.pt")

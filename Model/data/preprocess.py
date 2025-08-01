@@ -58,7 +58,8 @@ def get_trail_value_mp(
 
     exp = trial["exp"]
     genome_cov_file = trial["file"]
-    seqs_cov_file = f"{storage_path}/labels/{exp}.h5"
+    task = trial["task"]
+    seqs_cov_file = f"{storage_path}/labels/{task}_{exp}.h5"
 
     # for data transformation
     sum_stat = trial.get("sum_stat", "sum")
@@ -310,9 +311,10 @@ def preprocess(
             assert "file" in trial_files.columns
             assert "exp" in trial_files.columns
             assert "sum_stat" in trial_files.columns
+            assert "task" in trial_files.columns
         except FileNotFoundError or AssertionError:
             logger.error(
-                "The trial files should be provided in a summary csv file, with at least the file path (`file`), the trial name (`exp`) and summary statistics (`sum_stat`) provided."
+                "The trial files should be provided in a summary csv file, with at least the file path (`file`), the trial name (`exp`), summary statistics (`sum_stat`) and corresponding task (`task`, regression or classification) provided."
             )
             exit(1)
         logger.info(f"Found {len(trial_files)} trial files. Start generate labels.")
@@ -400,8 +402,6 @@ def preprocess(
         logger.info(f"Preprocess data already exists at {storage_path}. Skipping preprocess step.")
 
     # start to aggregate the preprocessed data
-    os.makedirs(f"{storage_path}/data", exist_ok=True)
-
     if preload_data:
         if force_restart or not os.path.exists(f"{storage_path}/data/all_label.pt"):
             logger.info("Start to aggregate data")
@@ -424,7 +424,7 @@ def preprocess(
             aggregate_data(
                 storage_path=storage_path,
                 preload_data=False,
-                task=data[data["generate"]],
+                todo=data[data["generate"]],
                 precision=precision,
             )
             logger.info("Finish aggregation")

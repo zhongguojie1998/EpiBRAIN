@@ -22,6 +22,7 @@ class GenomeIntervalDataset(Dataset):
         return_augs=True,
         return_token_dict=False,
         external_rand_seed=mp.Value("i", 0),
+        load_task=set("regression"),
         **kwargs,
     ):
         super().__init__()
@@ -35,12 +36,13 @@ class GenomeIntervalDataset(Dataset):
         df = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
         df.columns = ["chr", "start", "end", "split"]
         self.df = df[df["split"] == dataset_type].reset_index(drop=True)
-        self.label_meta = pd.read_csv(f"{storage_path}/label_meta.csv", index_col=0)
+        self.load_task = list(load_task)
 
         # load label
         self.preload_data = preload_data
         if preload_data:
-            self.label = torch.load(f"{storage_path}/data/{dataset_type}.pt")["label"][self.df.index]
+            all_label = torch.load(f"{storage_path}/data/{dataset_type}.pt")["label"]
+            self.all_label = {k: v[self.df.index] for k, v in all_label.items()}
 
         # get tokenizer
         self.tokenizer = FastaInterval(
@@ -61,27 +63,55 @@ class GenomeIntervalDataset(Dataset):
     def __getitem__(self, ind):
         interval = self.df.iloc[ind, [0, 1, 2]]
         chrom, start, end = interval
-        if self.preload_data:
-            label = self.label[ind]
-        else:
-            label = torch.load(f"{self.storage_path}/data/{chrom}_{start}_{end}.pt")["label"]
 
         token_dict = self.tokenizer(
             chrom, start, end, return_augs=self.return_augs, seed=self.external_rand_seed.value + ind
         )
         one_hot = token_dict["one_hot"]
-
-        if self.return_augs:
-            # here, if reverse, the sequence is still 5'->3', which means the corresponding label should be reversed
-            if token_dict["rand_reverse"]:
-                label = torch.flip(label, dims=[0])
-
         if one_hot.shape[0] != self.context_length:
             raise ValueError(
                 f"Context length not match (expecting {self.context_length}, {one_hot.shape[0]} observed). Chr {chrom}, start {start}, end {end}, aug shift {token_dict.get('rand_shift')}"
             )
 
+        if self.preload_data:
+            label = {k: v[ind] for k, v in all_label.items() if k in self.load_task}
+        else:
+            all_label = torch.load(f"{self.storage_path}/data/{chrom}_{start}_{end}.pt")["label"]
+            label = {k: v for k, v in all_label.items() if k in self.load_task}
+
+        if self.return_augs:
+            # here, if reverse, the sequence is still 5'->3', which means the corresponding label should be reversed
+            if token_dict["rand_reverse"]:
+                label = {k: torch.flip(v, dims=[0]) for k, v in label.items()}
+
         return one_hot if not self.return_token_dict else token_dict, label, ind
+
+
+def collate_fn(batch):
+    """
+    Custom collate function to handle dictionary labels.
+    """
+    sequences, labels, indices = zip(*batch)
+    
+    # Stack sequences and indices
+    sequences = torch.stack(sequences)
+    indices = torch.tensor(indices)
+    
+    # Handle dictionary labels
+    if isinstance(labels[0], dict):
+        # Get all task keys from the first sample
+        task_keys = labels[0].keys()
+        batched_labels = {}
+        
+        for task_key in task_keys:
+            # Stack labels for this task across the batch
+            task_labels = [label[task_key] for label in labels]
+            batched_labels[task_key] = torch.stack(task_labels)
+        
+        return sequences, batched_labels, indices
+    else:
+        # Fallback for non-dictionary labels
+        return sequences, torch.stack(labels), indices
 
 
 class DumySampler:
