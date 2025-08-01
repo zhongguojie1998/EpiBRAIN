@@ -35,6 +35,115 @@ def compute_channel_sizes(
     return sizes
 
 
+def std_pred_head_config(config):
+    """
+    Expected config format:
+    {
+        # Shared parameters (optional)
+        'use_cell_encoder': bool,           # Whether to use shared celltype encoder (default: False)
+        'celltype_hidden_dim': int,         # Hidden dim for celltype embedding (default: in_features//2)
+
+        # Individual head configs
+        'head_name': {
+            'task': str,                    # Required: 'regression' or 'classification'
+
+            # For use_cell_encoder=True:
+            'celltype_num': int,            # Required: number of cell types (must be same across heads)
+            'modality_num': int,            # Required: number of modalities (can differ between heads)
+            'class_num': int,               # Required for classification: number of classes
+
+            # For use_cell_encoder=False:
+            'track_num': int,               # Required: total number of output tracks
+            'class_num': int,               # Required for classification: number of classes
+        }
+    }
+    """
+
+    config = config.copy()
+
+    # Step 1: Pop shared parameters
+    use_cell_encoder = config.pop("use_cell_encoder", False)
+    celltype_hidden_dim = config.pop("celltype_hidden_dim", None)
+
+    if use_cell_encoder and celltype_hidden_dim is None:
+        raise ValueError("celltype_hidden_dim not provided")
+
+    # Step 2: Validate and store head configs
+    head_configs = {}
+    celltype_nums = []
+
+    for head_name, head_config in config.items():
+        # validate task
+        task = head_config.get("task", None)
+        if task not in ["regression", "classification"]:
+            raise ValueError(
+                f"Head {head_name}: unsupported task '{task}', must be 'regression' or 'classification'"
+            )
+
+        # get the required fields
+        track_num = head_config.get("track_num")
+        celltype_num = head_config.get("celltype_num")
+        modality_num = head_config.get("modality_num")
+        class_num = head_config.get("class_num")
+
+        std_head_config = {"task": task}
+
+        # Determine track configuration
+        if use_cell_encoder:
+            if (celltype_num is None) or (modality_num is None):
+                raise ValueError(
+                    f"Head {head_name}: celltype_num/modality_num required when use_cell_encoder=True"
+                )
+            std_head_config.update(
+                {
+                    "celltype_num": celltype_num,
+                    "modality_num": modality_num,
+                    "track_num": celltype_num * modality_num,
+                }
+            )
+            celltype_nums.append(celltype_num)
+        else:
+            if track_num is not None:
+                if celltype_num is not None or modality_num is not None:
+                    print(
+                        f"Head {head_name}: track_num provided along with celltype_num/modality_num. Using track_num only."
+                    )
+                std_head_config.update(
+                    {
+                        "track_num": track_num,
+                        "celltype_num": None,
+                        "modality_num": None,
+                    }
+                )
+            else:
+                raise ValueError(f"Head {head_name}: Must provide track_num when use_cell_encoder=False")
+
+        std_head_config["class_num"] = class_num
+
+        # Calculate output channels
+        if task == "classification":
+            if class_num is None:
+                raise ValueError(f"Head {head_name}: class_num required for classification task")
+            std_head_config["out_channels"] = std_head_config["track_num"] * class_num
+        elif task == "regression":
+            std_head_config["out_channels"] = std_head_config["track_num"]
+        else:
+            raise ValueError(
+                f"Head {head_name}: unsupported task '{task}', must be 'regression' or 'classification'"
+            )
+
+        head_configs[head_name] = std_head_config
+
+    # Step 3: Validate celltype_num consistency if using cell encoder
+    if use_cell_encoder:
+        if len(set(celltype_nums)) != 1:
+            raise ValueError(
+                f"All heads must have same celltype_num when use_cell_encoder=True. Got: {set(celltype_nums)}"
+            )
+
+    return head_configs, use_cell_encoder, celltype_hidden_dim
+
+
 # model init utils
 def lecun_normal_init(layer):
     if isinstance(layer, nn.Conv1d):

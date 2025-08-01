@@ -281,82 +281,17 @@ class ConvDna(nn.Module):
 
 class PredictionHead(nn.Module):
 
-    def __init__(self, in_features, heads_config=None, **kwargs):
-        """
-        Initialize PredictionHead with multiple output heads.
-        
-        Args:
-            in_features (int): Input feature dimension
-            heads_config (dict): Configuration for all prediction heads
-            
-        Expected heads_config format:
-        {
-            # Shared parameters (optional)
-            'use_cell_encoder': bool,           # Whether to use shared celltype encoder (default: False)
-            'celltype_hidden_dim': int,         # Hidden dim for celltype embedding (default: in_features//2)
-            
-            # Individual head configs
-            'head_name': {
-                'task': str,                    # Required: 'regression' or 'classification'
-                
-                # For use_cell_encoder=True:
-                'celltype_num': int,            # Required: number of cell types (must be same across heads)
-                'modality_num': int,            # Required: number of modalities (can differ between heads)
-                'class_num': int,               # Required for classification: number of classes
-                
-                # For use_cell_encoder=False:
-                'track_num': int,               # Required: total number of output tracks
-                'class_num': int,               # Required for classification: number of classes
-            }
-        }
-        """
+    def __init__(self, in_features, heads_config=None, use_cell_encoder=False, celltype_hidden_dim=None, **kwargs):
         super().__init__()
 
         self.in_features = in_features
+        self.use_cell_encoder = use_cell_encoder
+        self.celltype_hidden_dim = celltype_hidden_dim
+        self.heads_config = heads_config
+        self.shared_celltype_num = [v["celltype_num"] for v in heads_config.values()][0]
 
-        self._extract_and_validate_params(heads_config)
         self._setup_cell_encoder()
         self._setup_heads()
-
-    def _extract_and_validate_params(self, config):
-        """Extract shared params and validate head configs"""
-        if not config:
-            raise ValueError("heads_config cannot be empty")
-
-        config = config.copy()
-
-        # Step 1: Pop shared parameters
-        self.use_cell_encoder = config.pop("use_cell_encoder", False)
-        self.celltype_hidden_dim = config.pop("celltype_hidden_dim", None)
-
-        # Set default celltype_hidden_dim if needed
-        if self.use_cell_encoder and self.celltype_hidden_dim is None:
-            self.celltype_hidden_dim = self.in_features // 2
-            print(f"celltype_hidden_dim not provided, defaulting to {self.celltype_hidden_dim}")
-
-        # Step 2: Validate and store head configs
-        self.heads_config = {}
-        celltype_nums = []
-
-        for head_name, head_config in config.items():
-            if "task" not in head_config:
-                raise ValueError(f"Head {head_name}: invalid config, must be dict with 'task' field")
-
-            # If use_cell_encoder, validate celltype_num exists and collect for consistency check
-            if self.use_cell_encoder:
-                if "celltype_num" not in head_config:
-                    raise ValueError(f"Head {head_name}: celltype_num required when use_cell_encoder=True")
-                celltype_nums.append(head_config["celltype_num"])
-
-            self.heads_config[head_name] = head_config
-
-        # Step 3: Validate celltype_num consistency if using cell encoder
-        if self.use_cell_encoder:
-            if len(set(celltype_nums)) > 1:
-                raise ValueError(
-                    f"All heads must have same celltype_num when use_cell_encoder=True. Got: {set(celltype_nums)}"
-                )
-            self.shared_celltype_num = celltype_nums[0]
 
     def _setup_cell_encoder(self):
         """Setup shared celltype encoder if needed"""
@@ -367,68 +302,12 @@ class PredictionHead(nn.Module):
         else:
             self.shared_cell_encoder = None
 
-    def _validate_head_config(self, head_name, config):
-        """Validate single head config and calculate derived params"""
-        task = config["task"]
-        if task not in ["regression", "classification"]:
-            raise ValueError(f"Head {head_name}: unsupported task '{task}', must be 'regression' or 'classification'")
-        track_num = config.get("track_num")
-        celltype_num = config.get("celltype_num")
-        modality_num = config.get("modality_num")
-        class_num = config.get("class_num")
-
-        head_config = {"task": task}
-
-        # Determine track configuration
-        if self.use_cell_encoder:
-            if modality_num is None:
-                raise ValueError(f"Head {head_name}: modality_num required when use_cell_encoder=True")
-            head_config.update(
-                {
-                    "celltype_num": celltype_num,
-                    "modality_num": modality_num,
-                    "track_num": celltype_num * modality_num,
-                }
-            )
-        else:
-            if track_num is not None:
-                if celltype_num is not None or modality_num is not None:
-                    print(
-                        f"Head {head_name}: track_num provided along with celltype_num/modality_num. Using track_num only."
-                    )
-                head_config.update(
-                    {
-                        "track_num": track_num,
-                        "celltype_num": None,
-                        "modality_num": None,
-                    }
-                )
-            else:
-                raise ValueError(f"Head {head_name}: Must provide track_num when use_cell_encoder=False")
-
-        head_config["class_num"] = class_num
-
-        # Calculate output channels
-        if task == "classification":
-            if class_num is None:
-                raise ValueError(f"Head {head_name}: class_num required for classification task")
-            head_config["out_channels"] = head_config["track_num"] * class_num
-        elif task == "regression":
-            head_config["out_channels"] = head_config["track_num"]
-        else:
-            raise ValueError(
-                f"Head {head_name}: unsupported task '{task}', must be 'regression' or 'classification'"
-            )
-
-        return head_config
-
     def _setup_heads(self):
         """Build all prediction heads based on configurations"""
         self.heads = nn.ModuleDict()
         self.head_configs = {}
 
-        for head_name, config in self.heads_config.items():
-            head_config = self._validate_head_config(head_name, config)
+        for head_name, head_config in self.heads_config.items():
             self.head_configs[head_name] = head_config
 
             if self.use_cell_encoder:
@@ -490,4 +369,3 @@ class PredictionHead(nn.Module):
             outputs[head_name] = pred
 
         return outputs
-    

@@ -15,6 +15,7 @@ from model.model_utils import (
     conditional_recursive_he_normal_init,
     lecun_normal_init,
     other_init,
+    std_pred_head_config,
 )
 from transformers import PreTrainedModel
 
@@ -154,9 +155,10 @@ class Borzoi(PreTrainedModel):
         )
 
         ## create unified prediction head with all output heads
+        heads_config, use_cell_encoder, celltype_hidden_dim = std_pred_head_config(config.output_heads)
         self.prediction_head = PredictionHead(
-            in_features=config.final_joined_conv_param["out_channels"],
-            heads_config=config.output_heads
+            in_features=config.final_joined_conv_param["out_channels"], heads_config=heads_config,
+            use_cell_encoder=use_cell_encoder, celltype_hidden_dim=celltype_hidden_dim
         )
 
     def _init_weights(self, module):
@@ -235,7 +237,7 @@ class Borzoi(PreTrainedModel):
         with torch.amp.autocast("cuda", enabled=False):
             # Get all predictions from unified prediction head
             all_outputs = self.prediction_head(x)
-            
+
             # Return based on use_head parameter
             if use_head is None:
                 # Return all heads
