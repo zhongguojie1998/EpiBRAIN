@@ -1,11 +1,13 @@
 import copy
 import glob
+import itertools
 import json
 import logging
 import multiprocessing as mp
 import os
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.distributed.algorithms.ddp_comm_hooks.powerSGD_hook as PowerSGD
 import torch.optim as optim
@@ -18,12 +20,12 @@ torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 
 
-from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSampler
-from model.model_utils import setup_model
+from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSampler, collate_fn
+from model.model_utils import setup_model, std_pred_head_config
 from utils.logging import LOGGER_PREFIX, TrainingLogger, timer
 from utils.loss import LOSS_DICT
-from utils.scheduler import SCHEDULER_DICT
 from utils.multi_gpu import blocking_sync_wait, cleanup, deepspeed_setup, global_aggregate, setup, torchrun_setup
+from utils.scheduler import SCHEDULER_DICT
 
 
 def create_optimizer_grouped_parameters(model, use_groups=True):
@@ -76,17 +78,24 @@ def aggregate_test_res(trainer, prefix="Test"):
     if not file_list:
         trainer.logger.warning(f"{prefix} res aggregation failed (cannot find any pred file), skip")
     else:
-        all_labels = []
-        all_preds = []
+        all_labels = {}
+        all_preds = {}
         all_inds = []
         for file_path in file_list:
             data = torch.load(file_path, map_location="cpu")
-            all_labels.append(data["label"])
-            all_preds.append(data["pred"])
-            all_inds.append(data["index"])
 
-        all_labels = torch.cat(all_labels, dim=0)
-        all_preds = torch.cat(all_preds, dim=0)
+            all_inds.append(data["index"])
+            for k, v in data["label"].items():
+                if k not in all_labels:
+                    all_labels[k] = []
+                all_labels[k].append(v)
+            for k, v in data["pred"].items():
+                if k not in all_preds:
+                    all_preds[k] = []
+                all_preds[k].append(v)
+
+        all_labels = {k: torch.cat(v, dim=0) for k, v in all_labels.items()}
+        all_preds = {k: torch.cat(v, dim=0) for k, v in all_preds.items()}
         all_inds = torch.cat(all_inds, dim=0)
 
         torch.save(
@@ -98,33 +107,42 @@ def aggregate_test_res(trainer, prefix="Test"):
             os.remove(file_path)
 
 
-def get_metric_collection(prefix: str = "Valid/", num_outputs=1):
-    collection = tm.MetricCollection(
-        {
-            "MSE": tm.MeanSquaredError(num_outputs=num_outputs),
-            "MAE": tm.MeanAbsoluteError(num_outputs=num_outputs),
-            "PearsonR": tm.PearsonCorrCoef(num_outputs=num_outputs),
+def get_metric_collection(prefix: str = "Valid/", config={}):
+
+    metric_factories = {
+        "regression": {
+            "MSE": lambda **kw: tm.MeanSquaredError(**kw),
+            "MAE": lambda **kw: tm.MeanAbsoluteError(**kw),
+            "PearsonR": lambda **kw: tm.PearsonCorrCoef(**kw),
         },
-        prefix=prefix,
-    )
-    return collection
+        "classification": {
+            "Accuracy": lambda **kw: tm.Accuracy(task="multiclass", **kw),
+            "F1Score": lambda **kw: tm.F1Score(task="multiclass", average="macro", **kw),
+            "Precision": lambda **kw: tm.Precision(task="multiclass", average="macro", **kw),
+            "Recall": lambda **kw: tm.Recall(task="multiclass", average="macro", **kw),
+        },
+    }
 
+    metrics_dict = {}
+    for head_name, head_cfg in config.items():
+        task = head_cfg.get("task_type")
+        trials = head_cfg["label_meta"]["trial"].to_list()
+        cls_num = head_cfg.get("class_num")
 
-def construct_logging_metric_dict(trainer):
-    metric_dict = {}
-    for k, v in trainer.metrics.items():
-        if isinstance(v, torch.Tensor):
-            v = v.cpu()
-            # check if it's the metrics log
-            if "MSE" in k or "MAE" in k or "PearsonR" in k:
-                for dim, value in enumerate(v):
-                    trial_name = trainer.label_meta.loc[dim, "trial"]
-                    metric_dict[f"{k}/{trial_name}"] = value
-            else:
-                metric_dict[k] = v.nanmean().item()
-        else:
-            metric_dict[k] = v
-    return metric_dict
+        if task not in metric_factories:
+            raise ValueError(f"Unknown task_type '{task}' for head '{head_name}'")
+
+        init_kwargs = {}
+        if task == "classification":
+            if cls_num is None:
+                raise ValueError(f"class_num is required for classification head '{head_name}'")
+            init_kwargs["num_classes"] = cls_num
+
+        for trial, (metric_name, factory) in itertools.product(trials, metric_factories[task].items()):
+            key = f"{trial}/{head_name}/{metric_name}"
+            metrics_dict[key] = factory(**init_kwargs)
+
+    return tm.MetricCollection(metrics_dict, prefix=prefix), {k: v.keys() for k, v in metric_factories.items()}
 
 
 class DNASeqModelTrainer:
@@ -149,13 +167,14 @@ class DNASeqModelTrainer:
         self.world_size = world_size
         self.should_log = (self.world_size > 1 and self.rank == 0) or self.world_size == 1
 
+        # set up model and data, make sure the logic aligned
+        self.model_data_align()
+
         # get the training settings
         self.current_epoch = 0
         self.current_step = 0  # based on update step
         self.best_valid_loss = torch.inf
         self.metrics = {}
-
-        self.trial_num = self.model_config.output_heads[self.model_config.use_head]["track_num"]
 
         # set up data
         self.data_split = self.config.data.used_dataset
@@ -193,6 +212,58 @@ class DNASeqModelTrainer:
             else:
                 self.logger.info("Start Fine-tuning")
 
+    def model_data_align(self):
+
+        # get the model setting
+        heads_config, use_cell_encoder, _ = std_pred_head_config(self.model_config.output_heads)
+
+        # get the data setting
+        raw_label_meta = pd.read_csv(f"{self.dataset_config.storage_path}/raw_label_meta.csv")
+
+        # assign data config to each head
+        self.head_data_setting = {}
+        for head_name, head_config in heads_config.items():
+            if head_name not in self.training_config.use_head:
+                continue
+
+            task = head_config["task"]
+            assert task in raw_label_meta["task"].to_list(), f"Task {task} not found in label meta"
+
+            task_label_meta = raw_label_meta[raw_label_meta["task"] == task].reset_index(drop=True).copy()
+
+            if not use_cell_encoder:
+                assert (
+                    len(task_label_meta) == head_config["track_num"]
+                ), f"Model setting track number of head {head_name}, task {task} mismatch with label meta"
+            else:
+                unique_cell_types = sorted(
+                    raw_label_meta["cell_type"].unique()
+                )  # here we use all cell types from all tasks because cell type embedding is shared across all tasks
+                assert (
+                    unique_cell_types == head_config["celltype_num"]
+                ), "Model setting cell type number mismatch all the cell types in label meta"
+                unique_modalities = sorted(task_label_meta["modality"].unique())
+                assert (
+                    len(unique_modalities) == head_config["modality_num"]
+                ), f"Model setting modality number, task {task} mismatch modalities in label meta"
+
+                ## in model, we generate all modalities for each cell type, we save the dims with label info in the label_meta index
+                full_info = pd.DataFrame()
+                for p, (i, j) in enumerate(itertools.product(unique_cell_types, unique_modalities)):
+                    full_info.loc[p, ["cell_type", "modality"]] = [i, j]
+                task_label_meta = full_info.merge(
+                    task_label_meta, on=["cell_type", "modality"], how="left"
+                ).dropna()
+                task_label_meta = task_label_meta[["trial", "cell_type", "modality", "task", "file"]]
+
+            task_label_meta.index.name = "dim"
+            self.head_data_setting[head_name] = {
+                "label_meta": task_label_meta,
+                "task_type": task,
+                "class_num": head_config["class_num"],
+            }
+            task_label_meta.to_csv(f"{self.logging_config.log_dir}/{task}_label_meta.csv", index=True)
+
     def get_dataset(self):
 
         self.logger.info("Loading datasets...")
@@ -206,11 +277,11 @@ class DNASeqModelTrainer:
                     # for valid and test, we disable the data augumentation
                     config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
                 self.data_func[split]["dataset"] = GenomeIntervalDataset(
-                    split, **config, external_rand_seed=self.data_rand_seed
+                    split,
+                    **config,
+                    external_rand_seed=self.data_rand_seed,
+                    load_task=set([v["task_type"] for v in self.head_data_setting.values()]),
                 )
-
-                assert self.trial_num == self.data_func[split]["dataset"].label_meta.shape[0]
-                self.label_meta = self.data_func[split]["dataset"].label_meta
 
             except Exception as e:
                 if split == "train" and not self.training_config.test_only:
@@ -265,6 +336,7 @@ class DNASeqModelTrainer:
                     sampler=sampler,
                     shuffle=False,  # set shuffle in sampler, dataloader should be set as False
                     drop_last=split == "train",
+                    collate_fn=collate_fn,
                     **self.training_config.dataloader_params,
                 )
                 if dataset is not None
@@ -345,13 +417,64 @@ class DNASeqModelTrainer:
             self.current_lr = self.checkpoint["lr"]
 
     def get_loss(self):
-        loss_class = LOSS_DICT.get(self.training_config.loss)
+        # Loss configuration format: {"loss_name": {"loss_weight": float, "loss_head": str, "params": dict}}
+        loss_config = self.training_config.loss
 
-        if loss_class is None:
-            self.logger.error(f"Loss {self.training_config.loss} is not implemented yet.")
-            exit(1)
+        self.loss_config = {}
+        loss_heads = set()
 
-        self.criterion = loss_class(**self.training_config.get("loss_params", {}))
+        for loss_name, loss_info in loss_config.items():
+            loss_class = LOSS_DICT.get(loss_name)
+            if loss_class is None:
+                self.logger.error(f"Loss {loss_name} is not implemented yet.")
+                exit(1)
+
+            loss_head = loss_info["loss_head"]
+            loss_heads.add(loss_head)
+
+            self.loss_config[loss_name] = {
+                "criterion": loss_class(**loss_info.get("params", {})),
+                "weight": loss_info["loss_weight"],
+                "head": loss_head,
+            }
+
+        # Check if loss_head matches use_head
+        if loss_heads != set(self.training_config.use_head):
+            raise ValueError(f"Loss heads {loss_heads} do not match use_head {set(self.training_config.use_head)}")
+
+    def compute_loss(self, pred, label):
+        loss_dict = {}
+        total_loss = 0.0
+
+        for loss_name, loss_info in self.loss_config.items():
+            head_name = loss_info["head"]
+            criterion = loss_info["criterion"]
+            weight = loss_info["weight"]
+
+            # Get head data setting to find label indices and task type
+            head_data = self.head_data_setting[head_name]
+            task_type = head_data["task_type"]
+            label_meta = head_data["label_meta"]
+
+            # Extract prediction subset for this head
+            # pred[head_name] shape: [batch, seq_len, total_tracks]
+            # We need to slice the tracks dimension based on label_meta.index
+            pred_subset = pred[head_name][:, :, label_meta.index.tolist(), ...]
+
+            # Get corresponding labels
+            task_label = label[task_type].to(self.local_rank, non_blocking=True)
+
+            # Compute loss
+            loss_value = criterion(pred_subset, task_label)
+            loss_dict[loss_name] = loss_value.detach().cpu().item()
+
+            # Add to total loss with weight
+            total_loss += weight * loss_value
+
+        # Add total loss to dict for unified handling
+        loss_dict["total_loss"] = total_loss.detach().cpu().item()
+
+        return total_loss, loss_dict
 
     @property
     def inference_model(self):
@@ -368,13 +491,14 @@ class DNASeqModelTrainer:
         nan_detected = False
 
         if self.logging_config.use_tensorboard:
-            self.logger.metric(
-                f"Train/rank[{self.rank}]_loss",
-                report_loss,
-                step=self.current_step,
-                log_also=False,
-                diagnose=self.logging_config.diagnose,
-            )
+            for k, v in report_loss.items():
+                self.logger.metric(
+                    f"Train/rank[{self.rank}]_{k}",
+                    v,
+                    step=self.current_step,
+                    log_also=False,
+                    diagnose=self.logging_config.diagnose,
+                )
             self.logger.metric("Train/lr", self.current_lr, step=self.current_step, log_also=False)
 
             # we can only log these info in tensorboard
@@ -437,9 +561,8 @@ class DNASeqModelTrainer:
                 self.logger.metric("grads_norm/total", grads_norm, self.current_step, log_also=False)
                 self.logger.metric("weights_norm/total", weights_norm, self.current_step, log_also=False)
         else:
-            self.logger.info(
-                f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | Loss: {report_loss:.6f} | lr: {self.current_lr}"
-            )
+            for k, v in report_loss.items():
+                self.logger.info(f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | {k}: {v:.6f}")
 
         if should_exit_on_nan and nan_detected:
             self.logger.error("NaN detected in model weight/gradients. Exiting after this step.")
@@ -501,10 +624,12 @@ class DNASeqModelTrainer:
         self.model.train()
 
         # for loss log
-        batch_loss = 0
+        nan_termination = False
+        # for loss tracking
+        batch_loss_dict = {}
         batch_count = 0
         epoch_loss_list = []
-        nan_termination = False
+
         # for other metric log
         # tm_metrics = get_metric_collection(prefix="Train/", num_outputs=self.trial_num).to(self.local_rank)
         # tm_metrics.reset()
@@ -514,22 +639,26 @@ class DNASeqModelTrainer:
         for i, (seq_embedding, label, ind) in enumerate(dataloader):
 
             # seq_embedding shape [batch, L, 4]
-            # label shape [batch, num_central_bin, num_trail]
-            seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
-                self.local_rank, non_blocking=True
-            )
-            # [batch, num_central_bin, num_trail]
+            # label is now a dictionary {task_type: tensor}
+            seq_embedding = seq_embedding.to(self.local_rank, non_blocking=True)
+            # pred is now a dictionary {head_name: tensor}
             pred = self.model(
                 seq_embedding.permute(0, 2, 1),
-                self.model_config.use_head,
+                self.training_config.use_head,
                 data_parallel_training=True if self.world_size > 1 else False,
             )
 
-            # loss
-            loss = self.criterion(pred, label) / self.training_config.accum_step
-            batch_loss += loss.detach().cpu().item() * self.training_config.accum_step
+            # loss - use new compute_loss function
+            total_loss, loss_dict = self.compute_loss(pred, label)
+            loss = total_loss / self.training_config.accum_step
+
+            # log loss
+            for k, v in loss_dict.items():
+                if k not in batch_loss_dict:
+                    batch_loss_dict[k] = 0.0
+                batch_loss_dict[k] += v
             batch_count += 1
-            epoch_loss_list.append(batch_loss)
+            epoch_loss_list.append(loss.detach().cpu().item() * self.training_config.accum_step)
 
             # metrics
             # tm_metrics.update(pred.reshape(-1, self.trial_num).double(), label.reshape(-1, self.trial_num).double())
@@ -546,18 +675,15 @@ class DNASeqModelTrainer:
                 # log training status
                 ## in the training loop, we only look at the local loss
                 if self.current_step % self.logging_config.report_every == 0:
-                    # report_loss = batch_loss / (i + 1)
-                    report_loss = batch_loss / batch_count
+                    report_loss = {k: v / batch_count for k, v in batch_loss_dict.items()}
 
                     nan_termination = self._log_training_metrics(report_loss, should_exit_on_nan=True)
 
-                    batch_loss = 0
+                    batch_loss_dict = {}
                     batch_count = 0
 
                 # model step
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.training_config.clip_grad_norm
-                )
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.training_config.clip_grad_norm)
                 self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
@@ -583,11 +709,13 @@ class DNASeqModelTrainer:
         if log_loss:
             running_loss_local = torch.tensor(0.0, device=self.local_rank)
         if save_pred:
-            preds = []
-            labels = []
+            preds = {}
+            labels = {}
             inds = []
 
-        tm_metrics = get_metric_collection(prefix=f"{log_prefix}/", num_outputs=self.trial_num).to(self.local_rank)
+        tm_metrics, metric_name_dict = get_metric_collection(prefix=f"{log_prefix}/", config=self.head_data_setting).to(
+            self.local_rank
+        )
         tm_metrics.reset()
 
         dataloader = self.data_func[log_prefix.lower()]["data_loader"]
@@ -595,31 +723,48 @@ class DNASeqModelTrainer:
         with torch.no_grad():
             for i, (seq_embedding, label, ind) in enumerate(dataloader):
                 # seq_embedding shape [batch, L, 4]
-                # label shape [batch, num_central_bin (896), num_trail (93)]
-                seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
-                    self.local_rank, non_blocking=True
-                )
-                # pred_embedding shape [batch, num_central_bin (896), num_trail (93)]
+                # label is now a dictionary {task_type: tensor}
+                seq_embedding = seq_embedding.to(self.local_rank, non_blocking=True)
+                # pred is now a dictionary {head_name: tensor}
                 pred = self.inference_model(
                     seq_embedding.permute(0, 2, 1),
-                    self.model_config.use_head,
+                    self.training_config.use_head,
                     data_parallel_training=True if self.world_size > 1 else False,
                 )
 
-                # loss
+                # loss - use new compute_loss function
                 if log_loss:
-                    loss = self.criterion(pred, label)
-                    running_loss_local += loss.detach()
+                    total_loss, loss_dict = self.compute_loss(pred, label)
+                    running_loss_local += total_loss.detach()
                 # pred
                 if save_pred:
-                    preds.append(pred.detach().cpu())
-                    labels.append(label.detach().cpu())
+                    for k, v in pred.items():
+                        if k not in preds:
+                            preds[k] = []
+                        preds[k].append(v.detach().cpu())
+                    for k, v in label.items():
+                        if k not in labels:
+                            labels[k] = []
+                        labels[k].append(v.detach().cpu())
                     inds.append(ind)
 
                 # metrics
-                tm_metrics.update(
-                    pred.reshape(-1, self.trial_num).double(), label.reshape(-1, self.trial_num).double()
-                )
+                for head_name, head_data in self.head_data_setting.items():
+                    task_type = head_data["task_type"]
+                    label_meta = head_data["label_meta"].reset_index().set_index("trial")
+                    for trial in label_meta.index:
+                        dim = label_meta.loc[trial, "dim"]
+                        label_subset = label[task_type][:, :, dim].to(self.local_rank, non_blocking=True)
+                        pred_subset = pred[head_name][:, :, dim, ...]
+                        B, L = pred_subset.shape[:2]
+                        # Update metrics for this head
+                        for metric_name in metric_name_dict[task_type]:
+                            key = f"{trial}/{head_name}/{metric_name}"
+
+                            tm_metrics[key].update(
+                                pred_subset.reshape(B * L, -1).double(),
+                                label_subset.reshape(B * L, -1).double(),
+                            )
 
         # get and write the metric logs
         self.metrics.update(tm_metrics.compute())
@@ -636,8 +781,8 @@ class DNASeqModelTrainer:
             # we have to pre save all the res and later aggregate them
             torch.save(
                 {
-                    "label": torch.cat(labels, dim=0),
-                    "pred": torch.cat(preds, dim=0),
+                    "label": {k: torch.cat(v, dim=0) for k, v in labels.items()},
+                    "pred": {k: torch.cat(v, dim=0) for k, v in preds.items()},
                     "index": torch.cat(inds, dim=0),
                 },
                 f"{self.logging_config.res_dir}/{log_prefix}_preds_rank_{self.rank}_epoch_{self.current_epoch}.pt",
@@ -666,13 +811,14 @@ class DeepspeedTrainer(DNASeqModelTrainer):
         self.world_size = world_size
         self.should_log = (self.world_size > 1 and self.rank == 0) or self.world_size == 1
 
+        # set up model and data, make sure the logic aligned
+        self.model_data_align()
+
         # get the training settings
         self.current_epoch = 0
         self.current_step = 0  # based on update step
         self.best_valid_loss = torch.inf
         self.metrics = {}
-
-        self.trial_num = self.model_config.output_heads[self.model_config.use_head]["track_num"]
 
         # set up data
         self.data_split = ["train", "valid", "test"]
@@ -794,32 +940,37 @@ class DeepspeedTrainer(DNASeqModelTrainer):
         self.model_engine.train()
 
         # for loss log
-        batch_loss = 0
+        nan_termination = False
+        # for loss tracking
+        batch_loss_dict = {}
         batch_count = 0
         epoch_loss_list = []
-        nan_termination = False
 
         dataloader = self.data_func["train"]["data_loader"]
 
         for i, (seq_embedding, label, ind) in enumerate(dataloader):
 
             # seq_embedding shape [batch, L, 4]
-            # label shape [batch, num_central_bin (896), num_trail (93)]
-            seq_embedding, label = seq_embedding.to(self.local_rank, non_blocking=True), label.to(
-                self.local_rank, non_blocking=True
-            )
-            # pred shape [batch, num_central_bin (896), num_trail (93)]
+            # label is now a dictionary {task_type: tensor}
+            seq_embedding = seq_embedding.to(self.local_rank, non_blocking=True)
+            # pred is now a dictionary {head_name: tensor}
             pred = self.model_engine(
                 seq_embedding.permute(0, 2, 1),
-                self.model_config.use_head,
+                self.training_config.use_head,
                 data_parallel_training=True if self.world_size > 1 else False,
             )
 
-            # loss
-            loss = self.criterion(pred, label) / self.training_config.accum_step
-            batch_loss += loss.detach().cpu().item() * self.training_config.accum_step
+            # loss - use new compute_loss function
+            total_loss, loss_dict = self.compute_loss(pred, label)
+            loss = total_loss / self.training_config.accum_step
+
+            # log loss
+            for k, v in loss_dict.items():
+                if k not in batch_loss_dict:
+                    batch_loss_dict[k] = 0.0
+                batch_loss_dict[k] += v
             batch_count += 1
-            epoch_loss_list.append(batch_loss)
+            epoch_loss_list.append(loss.detach().cpu().item() * self.training_config.accum_step)
 
             self.model_engine.backward(loss)
 
@@ -828,12 +979,11 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             should_update = ((i + 1) % self.training_config.accum_step == 0) or (i + 1 == len(dataloader))
 
             if self.current_step % self.logging_config.report_every == 0 and should_update:
-                # report_loss = batch_loss / (i + 1)
-                report_loss = batch_loss / batch_count
+                report_loss = {k: v / batch_count for k, v in batch_loss_dict.items()}
 
                 nan_termination = self._log_training_metrics(report_loss, should_exit_on_nan=True)
 
-                batch_loss = 0
+                batch_loss_dict = {}
                 batch_count = 0
 
             # model optimize
@@ -850,6 +1000,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         self.current_epoch += 1
         self.metrics.update({f"Train/epoch_avg_loss": np.mean(epoch_loss_list)})
+
 
 # this function also support single GPU training
 def mp_main(rank, world_size, myconfig, local_rank=None):
@@ -933,7 +1084,7 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                 # write the metrics
                 ## if we use tensorboard, the metrics will be written into tb (initialized when creating the training logger)
                 if trainer.should_log:
-                    metric_dict = construct_logging_metric_dict(trainer)
+                    metric_dict = trainer.metrics
                     if myconfig.logging.use_tensorboard:
                         for k, v in metric_dict.items():
                             trainer.logger.metric(k, v, step=trainer.current_step, log_also=False)
@@ -976,7 +1127,7 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
                 aggregate_test_res(trainer, "Valid")
                 aggregate_test_res(trainer, "Test")
 
-                metric_dict = construct_logging_metric_dict(trainer)
+                metric_dict = trainer.metrics
                 if myconfig.logging.use_tensorboard:
                     for k, v in metric_dict.items():
                         trainer.logger.metric(k, v, step=trainer.current_step, log_also=False)
