@@ -740,10 +740,10 @@ def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
 
     # prepare raw label meta
     label_meta = pd.DataFrame({"file": separate_label_file})
-    label_meta["trial"] = label_meta["file"].str.split("/").str[-1].str.split(".").str[0]
+    label_meta["trial"] = label_meta["file"].str.split("/").str[-1].str.split(".").str[0].str.split("_", n=1).str[-1]
     label_meta["task"] = label_meta["file"].str.split("/").str[-1].str.split("_").str[0]
     label_meta[["cell_type", "modality"]] = label_meta["trial"].str.rsplit("_", n=1, expand=True)
-    label_meta = label_meta.sort_values(["task", "trial"])
+    label_meta = label_meta.sort_values(["task", "cell_type", "modality"])
     label_meta = label_meta[["trial", "cell_type", "modality", "task", "file"]]
     label_meta.to_csv(f"{storage_path}/raw_label_meta.csv", index=False)
 

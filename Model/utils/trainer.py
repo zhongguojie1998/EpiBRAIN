@@ -256,6 +256,7 @@ class DNASeqModelTrainer:
                 ).dropna()
                 task_label_meta = task_label_meta[["trial", "cell_type", "modality", "task", "file"]]
 
+            task_label_meta["label_dim"] = range(len(task_label_meta))
             task_label_meta.index.name = "dim"
             self.head_data_setting[head_name] = {
                 "label_meta": task_label_meta,
@@ -458,14 +459,22 @@ class DNASeqModelTrainer:
 
             # Extract prediction subset for this head
             # pred[head_name] shape: [batch, seq_len, total_tracks]
-            # We need to slice the tracks dimension based on label_meta.index
-            pred_subset = pred[head_name][:, :, label_meta.index.tolist(), ...]
-
+            task_pred = pred[head_name]
             # Get corresponding labels
             task_label = label[task_type].to(self.local_rank, non_blocking=True)
 
             # Compute loss
-            loss_value = criterion(pred_subset, task_label)
+            if "cross_cell" in loss_name:
+                loss_value = 0
+                for _, cell_data in label_meta.groupby("modality"):
+                    pred_subset = task_pred[:, :, cell_data.index.tolist(), ...]
+                    label_subset = task_label[:, :, cell_data["label_index"].tolist()]
+                    loss_value += criterion(pred_subset, label_subset)
+            else:
+                # We need to slice the tracks dimension based on label_meta
+                pred_subset = task_pred[:, :, label_meta.index.tolist(), ...]
+                loss_value = criterion(pred_subset, task_label)
+
             loss_dict[loss_name] = loss_value.detach().cpu().item()
 
             # Add to total loss with weight

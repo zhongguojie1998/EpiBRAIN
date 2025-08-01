@@ -113,5 +113,31 @@ class PoissonMultinomialLoss(nn.Module):
         else:
             return loss
 
+class CrossCellMultinomialLoss(nn.Module):
 
-LOSS_DICT = {"poisson": nn.PoissonNLLLoss, "poisson_mn": PoissonMultinomialLoss}
+    def __init__(self, eps: float = 1e-7, reduction: str = "mean", **kwargs):
+        super().__init__(**kwargs)
+        self.eps = eps
+        self.reduction = reduction
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        # y_pred: B x L x T, y_true: B x L x T
+        y_true += self.eps
+        y_pred += self.eps
+
+        # normalize to sum to one, then log transform pred
+        pl_pred = torch.log(y_pred) - torch.log(y_pred.mean(dim=-1, keepdim=True))  # B x L x T
+        p_true = y_true / y_true.mean(dim=-1, keepdim=True)  # B x L x T
+        # multinomial loss
+        multinomial_dot = -p_true * pl_pred  # B x L x T
+        loss = torch.sum(multinomial_dot, dim=-1)  # B x L
+
+        if self.reduction == "mean":
+            return torch.mean(loss)
+        elif self.reduction == "sum":
+            return torch.sum(loss)
+        else:
+            return loss
+
+
+LOSS_DICT = {"poisson": nn.PoissonNLLLoss, "poisson_mn": PoissonMultinomialLoss, "cross_cell_mn": CrossCellMultinomialLoss}
