@@ -35,12 +35,15 @@ use_head: # list of heads to use for training
 #   eps: 1e-7
 #   reduction: mean
 
-loss: poisson_mn # the name of the loss function (now support: poisson, poisson_mn)
-loss_params:
-  total_weight: 1
-  weight_range: 1
-  eps: 1e-7
-  reduction: mean
+loss: 
+  poisson_mn: # the name of the loss function (now support: poisson, poisson_mn)
+    loss_head: regression # the head to use for the loss
+    loss_weight: 1.0 # the weight of the loss
+    params:
+      total_weight: 1
+      weight_range: 1
+      eps: 1e-7
+      reduction: mean
 
 ## optimizer setup
 add_opt_group: True # whether to use optimizer parameter groups
