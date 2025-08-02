@@ -115,13 +115,12 @@ class PoissonMultinomialLoss(nn.Module):
 
 class CrossCellMultinomialLoss(nn.Module):
 
-    def __init__(self, eps: float = 1e-7, reduction: str = "mean", **kwargs):
+    def __init__(self, eps: float = 1e-7, reduction: str = "mean", total_weight: float = 0.2, rescale: bool = False, **kwargs):
         super().__init__(**kwargs)
         self.eps = eps
         self.reduction = reduction
-        # TODO: add this to config
-        self.total_weight = 0.2
-        self.rescale = False
+        self.total_weight = total_weight
+        self.rescale = rescale
 
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         # sum across lengths

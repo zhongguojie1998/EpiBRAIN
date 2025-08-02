@@ -48,6 +48,7 @@ loss:
     loss_head: regression # the head to use for the loss
     loss_weight: 1.0 # the weight of the loss
     params:
+      total_weight: 1
       eps: 1e-7
       reduction: mean
 
