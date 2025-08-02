@@ -740,7 +740,9 @@ def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
 
     # prepare raw label meta
     label_meta = pd.DataFrame({"file": separate_label_file})
-    label_meta["trial"] = label_meta["file"].str.split("/").str[-1].str.split(".").str[0].str.split("_", n=1).str[-1]
+    label_meta["trial"] = (
+        label_meta["file"].str.split("/").str[-1].str.split(".").str[0].str.split("_", n=1).str[-1]
+    )
     label_meta["task"] = label_meta["file"].str.split("/").str[-1].str.split("_").str[0]
     label_meta[["cell_type", "modality"]] = label_meta["trial"].str.rsplit("_", n=1, expand=True)
     label_meta = label_meta.sort_values(["task", "cell_type", "modality"])
@@ -752,7 +754,9 @@ def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
     label_dict = {}
     for task_type in label_meta["task"].unique():
         label_data = []
-        for label_file in tqdm(label_meta.loc[label_meta["task"] == task_type, "file"]):
+        for label_file in tqdm(
+            label_meta.loc[label_meta["task"] == task_type, "file"], desc=f"Loading {task_type} label data"
+        ):
             with h5py.File(label_file, "r") as f:
                 label_data.append(f["targets"][:])
 
@@ -768,7 +772,7 @@ def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
     # TODO: we need to add gene level mask here to enable RNA gene expression count loss
     if preload_data:
         # save the aggregated data
-        for dataset_type, tmp in todo.groupby(3):
+        for dataset_type, tmp in tqdm(todo.groupby(3), desc="Saving label"):
             save_dict = {}
             for task_type, task_label_data in label_dict.items():
                 save_dict[task_type] = task_label_data[tmp.index]
@@ -777,7 +781,7 @@ def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
 
     else:
         # save per data point separately
-        for i in todo.index:
+        for i in tqdm(todo.index, desc="Saving label"):
             chrom, start, end = todo.loc[i, [0, 1, 2]]
             save_dict = {}
             for task_type, task_label_data in label_dict.items():
