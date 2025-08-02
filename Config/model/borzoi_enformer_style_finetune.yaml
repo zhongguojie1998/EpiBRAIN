@@ -20,7 +20,7 @@ finetune_param:
       - to_q
       - to_v
     modules_to_save:  # other layers requiring optimization
-      - prediction_head.human
+      - prediction_head.regression
     r: 8  # lora rank
 
 # finetune_method: finetune_layers 

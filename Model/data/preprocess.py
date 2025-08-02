@@ -310,11 +310,10 @@ def preprocess(
             trial_files = pd.read_csv(trial_summary_path)
             assert "file" in trial_files.columns
             assert "exp" in trial_files.columns
-            assert "sum_stat" in trial_files.columns
             assert "task" in trial_files.columns
         except FileNotFoundError or AssertionError:
             logger.error(
-                "The trial files should be provided in a summary csv file, with at least the file path (`file`), the trial name (`exp`), summary statistics (`sum_stat`) and corresponding task (`task`, regression or classification) provided."
+                "The trial files should be provided in a summary csv file, with at least the file path (`file`), the trial name (`exp`) and corresponding task (`task`, regression or classification) provided."
             )
             exit(1)
         logger.info(f"Found {len(trial_files)} trial files. Start generate labels.")

@@ -36,12 +36,18 @@ use_head: # list of heads to use for training
 #   reduction: mean
 
 loss: 
-  poisson_mn: # the name of the loss function (now support: poisson, poisson_mn)
+  poisson_mn: # the name of the loss function (now support: poisson, poisson_mn, cross_cell_mn)
     loss_head: regression # the head to use for the loss
     loss_weight: 1.0 # the weight of the loss
     params:
       total_weight: 1
       weight_range: 1
+      eps: 1e-7
+      reduction: mean
+  cross_cell_mn:
+    loss_head: regression # the head to use for the loss
+    loss_weight: 1.0 # the weight of the loss
+    params:
       eps: 1e-7
       reduction: mean
 

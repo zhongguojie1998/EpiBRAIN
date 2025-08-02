@@ -47,4 +47,6 @@ output_heads: # set up the prediction head name and trial number
   celltype_hidden_dim: 960  # the dimension of the cell type embedding, if use_cell_encoder is True, this will be used to calculate the cell type embedding
   regression:
     track_num: 87
+    celltype_num: null
+    modality_num: null
     task: regression # choose from `regression` or `classification`
