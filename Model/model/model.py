@@ -17,6 +17,7 @@ from model.model_utils import (
     other_init,
     std_pred_head_config,
 )
+from omegaconf.listconfig import ListConfig
 from transformers import PreTrainedModel
 
 
@@ -157,8 +158,10 @@ class Borzoi(PreTrainedModel):
         ## create unified prediction head with all output heads
         heads_config, use_cell_encoder, celltype_hidden_dim = std_pred_head_config(config.output_heads)
         self.prediction_head = PredictionHead(
-            in_features=config.final_joined_conv_param["out_channels"], heads_config=heads_config,
-            use_cell_encoder=use_cell_encoder, celltype_hidden_dim=celltype_hidden_dim
+            in_features=config.final_joined_conv_param["out_channels"],
+            heads_config=heads_config,
+            use_cell_encoder=use_cell_encoder,
+            celltype_hidden_dim=celltype_hidden_dim,
         )
 
     def _init_weights(self, module):
@@ -208,13 +211,13 @@ class Borzoi(PreTrainedModel):
 
         Args:
             x (torch.Tensor): Input DNA sequence tensor of shape (N, 4, L).
-            use_head (str or list or None, optional): 
+            use_head (str or list or None, optional):
                 - None: return all heads as dict
                 - str: return single head result directly (not wrapped in dict)
                 - list: return specified heads as dict
 
         Returns:
-            torch.Tensor or dict: 
+            torch.Tensor or dict:
                 - If use_head is str: Output tensor with shape (N, C, crop_bin_num)
                 - If use_head is None or list: Dict of {head_name: output_tensor}
         """
@@ -245,7 +248,7 @@ class Borzoi(PreTrainedModel):
             elif isinstance(use_head, str):
                 # Return single head directly (not wrapped in dict)
                 return all_outputs[use_head]
-            elif isinstance(use_head, (list, tuple)):
+            elif isinstance(use_head, (list, tuple, ListConfig)):
                 # Return specified heads as dict
                 return {head_name: all_outputs[head_name] for head_name in use_head}
             else:

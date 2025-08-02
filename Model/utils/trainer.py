@@ -234,18 +234,18 @@ class DNASeqModelTrainer:
             if not use_cell_encoder:
                 assert (
                     len(task_label_meta) == head_config["track_num"]
-                ), f"Model setting track number of head {head_name}, task {task} mismatch with label meta"
+                ), f"Model setting track number of head {head_name}, task {task} ({head_config['track_num']}) mismatch with label meta ({len(task_label_meta)})"
             else:
                 unique_cell_types = sorted(
                     raw_label_meta["cell_type"].unique()
                 )  # here we use all cell types from all tasks because cell type embedding is shared across all tasks
                 assert (
-                    unique_cell_types == head_config["celltype_num"]
-                ), "Model setting cell type number mismatch all the cell types in label meta"
+                    len(unique_cell_types) == head_config["celltype_num"]
+                ), f"Model setting cell type number ({head_config['celltype_num']}) mismatch all the cell types in label meta ({unique_cell_types})"
                 unique_modalities = sorted(task_label_meta["modality"].unique())
                 assert (
                     len(unique_modalities) == head_config["modality_num"]
-                ), f"Model setting modality number, task {task} mismatch modalities in label meta"
+                ), f"Model setting modality number, task {task} ({head_config['modality_num']}) mismatch modalities in label meta ({len(unique_modalities)})"
 
                 ## in model, we generate all modalities for each cell type, we save the dims with label info in the label_meta index
                 full_info = pd.DataFrame()
@@ -468,7 +468,7 @@ class DNASeqModelTrainer:
                 loss_value = 0
                 for _, cell_data in label_meta.groupby("modality"):
                     pred_subset = task_pred[:, :, cell_data.index.tolist(), ...]
-                    label_subset = task_label[:, :, cell_data["label_index"].tolist()]
+                    label_subset = task_label[:, :, cell_data["label_dim"].tolist()]
                     loss_value += criterion(pred_subset, label_subset)
             else:
                 # We need to slice the tracks dimension based on label_meta
@@ -722,9 +722,9 @@ class DNASeqModelTrainer:
             labels = {}
             inds = []
 
-        tm_metrics, metric_name_dict = get_metric_collection(prefix=f"{log_prefix}/", config=self.head_data_setting).to(
-            self.local_rank
-        )
+        tm_metrics, metric_name_dict = get_metric_collection(
+            prefix=f"{log_prefix}/", config=self.head_data_setting
+        ).to(self.local_rank)
         tm_metrics.reset()
 
         dataloader = self.data_func[log_prefix.lower()]["data_loader"]

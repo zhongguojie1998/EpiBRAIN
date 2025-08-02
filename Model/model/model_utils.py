@@ -290,4 +290,6 @@ def setup_model(config, logger):
         f"Trainable params: {trainable_para_num} || All params: {total_para_num} || Trainable%: {trainable_para_num / total_para_num:.4f}"
     )
 
+    logger.debug(model)
+
     return model
