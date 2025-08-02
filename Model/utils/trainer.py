@@ -724,7 +724,8 @@ class DNASeqModelTrainer:
 
         tm_metrics, metric_name_dict = get_metric_collection(
             prefix=f"{log_prefix}/", config=self.head_data_setting
-        ).to(self.local_rank)
+        )
+        tm_metrics.to(self.local_rank)
         tm_metrics.reset()
 
         dataloader = self.data_func[log_prefix.lower()]["data_loader"]
