@@ -20,6 +20,46 @@ def load_enriched_sumstats(csv_path):
     return df
 
 
+def load_enriched_sumstats_from_filelist(filelist_path):
+    """Load enriched summary statistics from multiple files listed in filelist TSV"""
+    if not os.path.exists(filelist_path):
+        raise FileNotFoundError(f"Filelist not found: {filelist_path}")
+    
+    # Read filelist as TSV: file_path, experiment_name (optional)
+    filelist_df = pd.read_csv(filelist_path, sep='\t', header=None, names=['file_path', 'experiment_name'])
+    
+    # Fill missing experiment names with file stem
+    filelist_df['experiment_name'] = filelist_df.apply(
+        lambda row: row['experiment_name'] if pd.notna(row['experiment_name']) 
+        else Path(row['file_path']).stem.replace('.tsv', '').replace('.csv', ''),
+        axis=1
+    )
+    
+    print(f"Loading {len(filelist_df)} files from filelist...")
+    
+    df_dict = {}
+    for _, row in tqdm(filelist_df.iterrows(), desc="Loading files", total=len(filelist_df)):
+        file_path = row['file_path']
+        exp_name = row['experiment_name']
+        
+        if not os.path.exists(file_path):
+            print(f"Warning: File not found, skipping: {file_path}")
+            continue
+        
+        try:
+            df = load_enriched_sumstats(file_path)
+            df_dict[exp_name] = df
+            print(f"  Loaded {len(df)} variants from {file_path} as experiment '{exp_name}'")
+        except Exception as e:
+            print(f"Error loading {file_path}: {e}")
+            continue
+    
+    if not df_dict:
+        raise ValueError("No valid files could be loaded from filelist")
+    
+    return df_dict
+
+
 def init_hdf5_structure(h5_path, label_meta_path):
     """Initialize HDF5 with optimized structure"""
     label_meta = pd.read_csv(label_meta_path)
@@ -73,33 +113,55 @@ def load_existing_index(h5_path):
             return index_lookup
 
         variants_grp = f["variants"]
-        index_lookup = set(variants_grp["index_key"])
+        all_keys = variants_grp["index_key"]
+
+        print("Hashing existing index keys for fast lookup...")
+        index_lookup = set(all_keys)
 
     return index_lookup
 
 
 @click.command()
 @click.option(
-    "-s", "--enriched_sumstats", required=True, help="Path to enriched summary statistics CSV/CSV.GZ file"
+    "-s", "--enriched_sumstats", help="Path to enriched summary statistics CSV/CSV.GZ file"
+)
+@click.option(
+    "-f", "--filelist", help="Path to file containing list of enriched summary statistics files (one per line)"
 )
 @click.option("-h5", "--hdf5_file", required=True, help="Path to HDF5 storage file")
 @click.option("-l", "--label_meta", required=True, help="Path to label_meta.csv")
 @click.option("-e", "--experiment_name", required=True, help="Unique experiment name")
 @click.option("--force", is_flag=True, help="Force recreate HDF5 file")
-def main(enriched_sumstats, hdf5_file, label_meta, experiment_name, force):
+def main(enriched_sumstats, filelist, hdf5_file, label_meta, experiment_name, force):
     """Initialize variant effect analysis from enriched summary statistics"""
+
+    # Validate input arguments
+    if not enriched_sumstats and not filelist:
+        raise click.UsageError("Either --enriched_sumstats or --filelist must be provided")
+    if enriched_sumstats and filelist:
+        raise click.UsageError("Cannot specify both --enriched_sumstats and --filelist")
 
     output_dir = Path(hdf5_file).parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Processing experiment: {experiment_name}")
-    print(f"Enriched sumstats: {enriched_sumstats}")
+    if filelist:
+        print(f"Filelist: {filelist}")
+    else:
+        print(f"Enriched sumstats: {enriched_sumstats}")
     print(f"HDF5 file: {hdf5_file}")
 
     # Load enriched summary statistics
     print("Loading enriched summary statistics...")
-    enriched_df = load_enriched_sumstats(enriched_sumstats)
-    print(f"Loaded {len(enriched_df)} enriched variants")
+    if filelist:
+        enriched_df_dict = load_enriched_sumstats_from_filelist(filelist)
+        total_variants = sum(len(df) for df in enriched_df_dict.values())
+        print(f"Loaded {total_variants} total variants from {len(enriched_df_dict)} experiments")
+    else:
+        enriched_df = load_enriched_sumstats(enriched_sumstats)
+        enriched_df_dict = {experiment_name: enriched_df}
+        total_variants = len(enriched_df)
+        print(f"Loaded {total_variants} enriched variants")
 
     # Remove existing file if force flag is set
     if force and os.path.exists(hdf5_file):
@@ -120,39 +182,47 @@ def main(enriched_sumstats, hdf5_file, label_meta, experiment_name, force):
 
     print(f"Existing variants in index: {len(existing_index)}")
 
-    # Sort by index_key for efficient binary search lookups later
-    enriched_df = enriched_df.sort_values('index_key')
-    
-    # Separate new and existing variants using lists for better performance
+    # Process each experiment separately to efficiently use existing_index
     new_variant_data = {"index_key": [], "rsid": [], "chr": [], "pos": [], "ref": [], "alt": [], "finished": []}
-    experiment_data = []
+    experiment_data_dict = {}
 
-    for _, variant in tqdm(enriched_df.iterrows()):
-        index_key = variant["index_key"]
+    for exp_idx, (exp_name, enriched_df) in enumerate(enriched_df_dict.items()):
+        print(f"Processing experiment {exp_idx + 1}/{len(enriched_df_dict)}: '{exp_name}' with {len(enriched_df)} variants...")
 
-        # Store experiment data regardless
-        experiment_data.append(
-            {
-                "index_key": index_key,
-                "reverse_map": variant["reverse_map"],
-                "z_score": variant["z_score"],
-                "n_sample": variant["n_sample"],
-            }
-        )
+        # Sort by index_key for efficient processing
+        enriched_df = enriched_df.sort_values('index_key')
 
-        # Only add to main table if new
-        if index_key not in existing_index:
-            new_variant_data["index_key"].append(index_key)
-            new_variant_data["rsid"].append(variant["rsid"])
-            new_variant_data["chr"].append(variant["chr"])
-            new_variant_data["pos"].append(variant["pos"])
-            new_variant_data["ref"].append(variant["ref"])
-            new_variant_data["alt"].append(variant["alt"])
-            new_variant_data["finished"].append(False)
+        experiment_data = []
+        for _, variant in tqdm(enriched_df.iterrows(), desc=f"Processing {exp_name}"):
+            index_key = variant["index_key"]
+
+            # Store experiment data regardless
+            experiment_data.append(
+                {
+                    "index_key": index_key,
+                    "reverse_map": variant["reverse_map"],
+                    "z_score": variant["z_score"],
+                    "n_sample": variant["n_sample"],
+                }
+            )
+
+            # Only add to main table if new (using existing_index set for O(1) lookup)
+            if index_key not in existing_index:
+                new_variant_data["index_key"].append(index_key)
+                new_variant_data["rsid"].append(variant["rsid"])
+                new_variant_data["chr"].append(variant["chr"])
+                new_variant_data["pos"].append(variant["pos"])
+                new_variant_data["ref"].append(variant["ref"])
+                new_variant_data["alt"].append(variant["alt"])
+                new_variant_data["finished"].append(False)
+                # Add to existing_index to avoid duplicates in later experiments
+                existing_index.add(index_key)
+
+        experiment_data_dict[exp_name] = experiment_data
 
     n_new_variants = len(new_variant_data["index_key"])
     print(f"New variants to add: {n_new_variants}")
-    print(f"Experiment data entries: {len(experiment_data)}")
+    print(f"Number of experiments: {len(experiment_data_dict)}")
 
     # Update HDF5
     with h5py.File(hdf5_file, "a") as f:
@@ -183,39 +253,41 @@ def main(enriched_sumstats, hdf5_file, label_meta, experiment_name, force):
             variants_grp["alt"][start_idx:end_idx] = new_variant_data["alt"]
             variants_grp["finished"][start_idx:end_idx] = new_variant_data["finished"]
 
-        # Add experiment data
-        if experiment_data:
-            print(f"Storing experiment data for: {experiment_name}")
+        # Add experiment data for all experiments
+        if experiment_data_dict:
+            print(f"Storing experiment data for {len(experiment_data_dict)} experiments...")
             exp_grp = f["experiments"]
 
-            if experiment_name in exp_grp:
-                print(f"Experiment {experiment_name} already exists, overwriting...")
-                del exp_grp[experiment_name]
+            for exp_name, experiment_data in experiment_data_dict.items():
+                print(f"  Storing experiment: {exp_name}")
 
-            exp_data_grp = exp_grp.create_group(experiment_name)
+                if exp_name in exp_grp:
+                    print(f"    Experiment {exp_name} already exists, overwriting...")
+                    del exp_grp[exp_name]
 
-            # Convert to arrays for efficient storage
-            exp_df = pd.DataFrame(experiment_data)
+                exp_data_grp = exp_grp.create_group(exp_name)
 
-            exp_data_grp.create_dataset(
-                "index_key", data=exp_df["index_key"], dtype=h5py.string_dtype(), compression="gzip"
-            )
-            exp_data_grp.create_dataset(
-                "reverse_map", data=exp_df["reverse_map"].values, dtype=bool, compression="gzip"
-            )
-            exp_data_grp.create_dataset("z_score", data=exp_df["z_score"].values, dtype="f4", compression="gzip")
-            exp_data_grp.create_dataset("n_sample", data=exp_df["n_sample"].values, dtype="f4", compression="gzip")
+                # Convert to arrays for efficient storage
+                exp_df = pd.DataFrame(experiment_data)
+
+                exp_data_grp.create_dataset(
+                    "index_key", data=exp_df["index_key"], dtype=h5py.string_dtype(), compression="gzip"
+                )
+                exp_data_grp.create_dataset(
+                    "reverse_map", data=exp_df["reverse_map"].values, dtype=bool, compression="gzip"
+                )
+                exp_data_grp.create_dataset("z_score", data=exp_df["z_score"].values, dtype="f4", compression="gzip")
+                exp_data_grp.create_dataset("n_sample", data=exp_df["n_sample"].values, dtype="f4", compression="gzip")
 
     # Summary
     print("\n" + "=" * 60)
     print("INITIALIZATION SUMMARY")
     print("=" * 60)
-    print(f"Experiment: {experiment_name}")
-    print(f"Total enriched variants: {len(enriched_df)}")
+
+    print(f"Total enriched variants: {total_variants}")
     print(f"New variants added to main table: {n_new_variants}")
-    print(f"Experiment data entries: {len(experiment_data)}")
     print(f"HDF5 file: {hdf5_file}")
-    print(f"Experiment data stored under: experiments/{experiment_name}")
+    print(f"Experiment data stored under: experiments/[experiment_name]")
 
 
 if __name__ == "__main__":
