@@ -123,12 +123,13 @@ class CrossCellMultinomialLoss(nn.Module):
         self.rescale = rescale
 
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
-        # sum across lengths
-        m_true = torch.mean(y_true, dim=-1)  # B x T
-        m_pred = torch.mean(y_pred, dim=-1)  # B x T
+        
+        # sum across tracks
+        m_true = torch.mean(y_true, dim=-1)  # B x L
+        m_pred = torch.mean(y_pred, dim=-1)  # B x L
 
         # total count poisson loss, mean across targets
-        poisson_term = poisson(m_pred, m_true, eps=self.eps)  # B x T
+        poisson_term = poisson(m_pred, m_true, eps=self.eps)  # B x L
         
         # y_pred: B x L x T, y_true: B x L x T
         y_true += self.eps
@@ -141,7 +142,7 @@ class CrossCellMultinomialLoss(nn.Module):
         multinomial_dot = -p_true * pl_pred  # B x L x T
         multinomial_term = torch.sum(multinomial_dot, dim=-1)  # B x L
 
-        loss = multinomial_term + self.total_weight * poisson_term  # B x T
+        loss = multinomial_term + self.total_weight * poisson_term  # B x L
         if self.rescale:
             loss = loss * 2 / (1 + self.total_weight)
 
