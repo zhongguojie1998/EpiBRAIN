@@ -122,17 +122,15 @@ def load_existing_index(h5_path):
 
 
 @click.command()
-@click.option(
-    "-s", "--enriched_sumstats", help="Path to enriched summary statistics CSV/CSV.GZ file"
-)
+@click.option("-s", "--enriched_sumstats", help="Path to enriched summary statistics CSV/CSV.GZ file")
+@click.option("-e", "--experiment_name", help="Unique experiment name")
 @click.option(
     "-f", "--filelist", help="Path to file containing list of enriched summary statistics files (one per line)"
 )
 @click.option("-h5", "--hdf5_file", required=True, help="Path to HDF5 storage file")
 @click.option("-l", "--label_meta", required=True, help="Path to label_meta.csv")
-@click.option("-e", "--experiment_name", required=True, help="Unique experiment name")
 @click.option("--force", is_flag=True, help="Force recreate HDF5 file")
-def main(enriched_sumstats, filelist, hdf5_file, label_meta, experiment_name, force):
+def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, force):
     """Initialize variant effect analysis from enriched summary statistics"""
 
     # Validate input arguments
@@ -144,7 +142,6 @@ def main(enriched_sumstats, filelist, hdf5_file, label_meta, experiment_name, fo
     output_dir = Path(hdf5_file).parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Processing experiment: {experiment_name}")
     if filelist:
         print(f"Filelist: {filelist}")
     else:
