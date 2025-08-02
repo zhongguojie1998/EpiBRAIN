@@ -296,8 +296,9 @@ class PredictionHead(nn.Module):
     def _setup_cell_encoder(self):
         """Setup shared celltype encoder if needed"""
         if self.use_cell_encoder:
-            self.shared_cell_encoder = nn.Linear(
-                self.in_features, self.celltype_hidden_dim * self.shared_celltype_num
+            self.shared_cell_encoder = nn.Sequential(
+                nn.Linear(self.in_features, self.celltype_hidden_dim * self.shared_celltype_num),
+                nn.GELU(approximate="tanh"),
             )
         else:
             self.shared_cell_encoder = None
@@ -314,7 +315,9 @@ class PredictionHead(nn.Module):
                 # Use shared cell encoder, only build modality head
                 if head_config["task"] == "regression":
                     self.heads[head_name] = nn.Linear(self.celltype_hidden_dim, head_config["modality_num"])
-                    self.register_parameter(f'{head_name}_scale', nn.Parameter(torch.ones(head_config["track_num"])))
+                    self.register_parameter(
+                        f"{head_name}_scale", nn.Parameter(torch.ones(head_config["track_num"]))
+                    )
                 else:  # classification
                     self.heads[head_name] = nn.Linear(
                         self.celltype_hidden_dim, head_config["modality_num"] * head_config["class_num"]
