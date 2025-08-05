@@ -45,7 +45,7 @@ def main(config, checkpoint, output):
     model.eval()
 
     dna_tokenizer = FastaInterval(
-        fasta_file=os.path.abspath(myconfig.data.refer_genom), context_length=myconfig.data.context_length
+        fasta_file=myconfig.data.refer_genom, context_length=myconfig.data.context_length
     )
 
     package = ModelPackage(model, dna_tokenizer, myconfig)
