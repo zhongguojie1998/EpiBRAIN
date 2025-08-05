@@ -27,8 +27,7 @@ def validate_chunk_file(chunk_file):
         with h5py.File(chunk_file, 'r') as f:
             required_datasets = [
                 "successful_indices",
-                "successful_results",
-                "error_indices",
+                "error_indices", 
                 "error_info",
             ]
             # Check if it's a part file or final result file
@@ -41,6 +40,16 @@ def validate_chunk_file(chunk_file):
             for attr in required_attrs:
                 if attr not in f.attrs:
                     return False, f"Missing attribute: {attr}"
+
+            # Check if we have successful_results group
+            if "successful_results" not in f:
+                return False, "Missing successful_results group"
+            
+            if not isinstance(f["successful_results"], h5py.Group):
+                return False, "successful_results must be a group"
+                
+            if "score_names" not in f.attrs:
+                return False, "Missing score_names attribute"
 
             return True, "OK"
 
@@ -102,10 +111,16 @@ def main(hdf5_file, chunk_dir, cleanup, force):
         print("No valid chunks to merge!")
         return
 
+    # Get score names from HDF5 or determine from chunk files
+    with h5py.File(hdf5_file, 'r') as f:
+        score_names = f.attrs["score_names"]
+    
+    print(f"Score names: {score_names}")
+
     # Collect all results
     print("Collecting results from valid chunks...")
     all_indices = []
-    all_results = []
+    all_results = {score_name: [] for score_name in score_names}
     total_successful = 0
     chunk_info = []
 
@@ -113,10 +128,15 @@ def main(hdf5_file, chunk_dir, cleanup, force):
         with h5py.File(chunk_file, 'r') as f:
             # Get successful results only
             successful_indices = f['successful_indices'][:]
-            successful_results = f['successful_results'][:]
+            
+            for score_name in score_names:
+                if score_name in f['successful_results']:
+                    successful_results = f['successful_results'][score_name][:]
+                    all_results[score_name].append(successful_results)
+                else:
+                    print(f"Warning: Score {score_name} not found in {chunk_file.name}")
 
             all_indices.append(successful_indices)
-            all_results.append(successful_results)
             total_successful += len(successful_indices)
 
             # Handle both part files and final result files
@@ -131,17 +151,25 @@ def main(hdf5_file, chunk_dir, cleanup, force):
 
             chunk_info.append(chunk_info_dict)
 
-    if not all_results:
+    # Check if we have any results to merge
+    if not any(all_results.values()):
         print("No successful results to merge!")
         return
 
     # Concatenate all results
     print("Merging results...")
     all_indices = np.concatenate(all_indices, dtype='i8')
-    all_results = np.vstack(all_results)
+    
+    # Concatenate results for each score type
+    merged_results = {}
+    for score_name in score_names:
+        if all_results[score_name]:
+            merged_results[score_name] = np.vstack(all_results[score_name])
+            print(f"{score_name} result matrix shape: {merged_results[score_name].shape}")
+        else:
+            print(f"Warning: No results found for score {score_name}")
 
     print(f"Total successful computations: {total_successful}")
-    print(f"Result matrix shape: {all_results.shape}")
 
     # Update main HDF5 file
     print("Updating main HDF5 file...")
@@ -154,16 +182,21 @@ def main(hdf5_file, chunk_dir, cleanup, force):
         # Sort indices for better access pattern (contiguous reads/writes are faster)
         sort_order = np.argsort(all_indices)
         sorted_indices = all_indices[sort_order]
-        sorted_results = all_results[sort_order]
 
         print("Batch updating status...")
         # Create finished array
         finished_array = np.array([True] * len(sorted_indices), dtype=bool)
+        variants_grp['finished'][sorted_indices] = finished_array
 
         print("Batch updating results...")
         # Use fancy indexing for batch updates (much faster than individual updates)
-        variants_grp['finished'][sorted_indices] = finished_array
-        results_grp['variant_effects'][sorted_indices, :] = sorted_results
+        for score_name in score_names:
+            if score_name in merged_results:
+                sorted_results = merged_results[score_name][sort_order]
+                if score_name in results_grp:
+                    results_grp[score_name][sorted_indices, :] = sorted_results
+                else:
+                    print(f"Warning: Score dataset {score_name} not found in main HDF5 file")
 
         # Update metadata
         f.attrs['last_merge_at'] = pd.Timestamp.now().isoformat()

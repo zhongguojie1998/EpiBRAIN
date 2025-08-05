@@ -131,6 +131,11 @@ def main(
     task_indices = pick_tasks(hdf5_file, force)
     print(f"Found {len(task_indices)} tasks to process")
 
+    # Get score names from HDF5
+    with h5py.File(hdf5_file, "r") as f:
+        score_names = f.attrs["score_names"]
+    print(f"Score names: {score_names}")
+
     if not task_indices:
         print("No tasks to process!")
         return
@@ -162,6 +167,7 @@ def main(
 
         # Generate individual script
         script_path = f"{output_dir}/run_chunk_{chunk_id}.sh"
+        score_names_args = " ".join([f"--score_names {name}" for name in score_names])
         with open(script_path, "w") as f:
             f.write(
                 f"""#!/bin/bash
@@ -173,7 +179,8 @@ def main(
   --batch_size {batch_size} \\
   --save_interval {save_interval} \\
   --precision {precision} \\
-  --use_head {use_head}
+  --use_head {use_head} \\
+  {score_names_args}
 """
             )
         os.chmod(script_path, 0o755)

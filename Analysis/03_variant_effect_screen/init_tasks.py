@@ -60,7 +60,7 @@ def load_enriched_sumstats_from_filelist(filelist_path):
     return df_dict
 
 
-def init_hdf5_structure(h5_path, label_meta_path):
+def init_hdf5_structure(h5_path, label_meta_path, score_names):
     """Initialize HDF5 with optimized structure"""
     label_meta = pd.read_csv(label_meta_path)
     trial_names = label_meta["trial"].tolist()
@@ -69,6 +69,7 @@ def init_hdf5_structure(h5_path, label_meta_path):
         # Metadata
         f.attrs["trial_names"] = label_meta["trial"].tolist()
         f.attrs["trial_dims"] = label_meta["dim"].tolist()
+        f.attrs["score_names"] = score_names
 
         # Main variants table (compressed)
         variants_grp = f.create_group("variants")
@@ -84,16 +85,17 @@ def init_hdf5_structure(h5_path, label_meta_path):
             "finished", (0,), maxshape=(None,), dtype="bool", compression="gzip"
         )
 
-        # Results table (compressed)
+        # Results table (compressed) - create datasets for each score type
         results_grp = f.create_group("results")
-        results_grp.create_dataset(
-            "variant_effects",
-            (0, len(trial_names)),
-            maxshape=(None, len(trial_names)),
-            dtype="f4",
-            chunks=True,
-            compression="gzip",
-        )
+        for score_name in score_names:
+            results_grp.create_dataset(
+                score_name,
+                (0, len(trial_names)),
+                maxshape=(None, len(trial_names)),
+                dtype="f4",
+                chunks=True,
+                compression="gzip",
+            )
 
         # Experiments group for Z/N storage
         f.create_group("experiments")
@@ -130,7 +132,8 @@ def load_existing_index(h5_path):
 @click.option("-h5", "--hdf5_file", required=True, help="Path to HDF5 storage file")
 @click.option("-l", "--label_meta", required=True, help="Path to label_meta.csv")
 @click.option("--force", is_flag=True, help="Force recreate HDF5 file")
-def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, force):
+@click.option("-s", "--score_names", multiple=True, default=["raw_diff"], help="Score names for results_grp (can be used multiple times)")
+def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, force, score_names):
     """Initialize variant effect analysis from enriched summary statistics"""
 
     # Validate input arguments
@@ -168,16 +171,20 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
     # Initialize or load HDF5
     if not os.path.exists(hdf5_file):
         print("Initializing HDF5 structure...")
-        trial_names = init_hdf5_structure(hdf5_file, label_meta)
+        trial_names = init_hdf5_structure(hdf5_file, label_meta, list(score_names))
         existing_index = set()
     else:
         print("Loading existing HDF5...")
         existing_index = load_existing_index(hdf5_file)
-        # Load trial names
+        # Load trial names and score names
         with h5py.File(hdf5_file, "r") as f:
             trial_names = f.attrs["trial_names"]
+            # Get score names from existing file, or use default
+            if "score_names" in f.attrs:
+                score_names = f.attrs["score_names"]
 
     print(f"Existing variants in index: {len(existing_index)}")
+    print(f"Score names: {score_names}")
 
     # Process each experiment separately to efficiently use existing_index
     new_variant_data = {"index_key": [], "rsid": [], "chr": [], "pos": [], "ref": [], "alt": [], "finished": []}
@@ -235,7 +242,10 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
             # Resize datasets
             for key in ["index_key", "rsid", "chr", "ref", "alt", "finished", "pos"]:
                 variants_grp[key].resize((new_size,))
-            results_grp["variant_effects"].resize((new_size, len(trial_names)))
+
+            # Resize all score datasets
+            for score_name in score_names:
+                results_grp[score_name].resize((new_size, len(trial_names)))
 
             # Add data in batch - directly use the prepared lists (much faster)
             start_idx = current_size
