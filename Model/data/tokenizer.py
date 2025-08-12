@@ -212,5 +212,8 @@ class FastaInterval:
         if return_rela_idx:
             return_dict["rela_idx"] = (s_idx, e_idx)
             return_dict["real_region"] = (start, end)
+            # return padding
+            return_dict['left_padding'] = left_padding
+            return_dict['right_padding'] = right_padding
 
         return return_dict

@@ -127,6 +127,8 @@ def process_vcf_chunk(args):
                 seqs_cov_file=label_h5,
                 genome_cov_file=data_config.loc[i, "file"],
                 umap_npy_path=unmap_npy,
+                left_padding=token_dict['left_padding'],
+                right_padding=token_dict['right_padding'],
                 **data_config.loc[i].drop(["exp", "file"]).to_dict(),
             )
             with h5py.File(label_h5, "r") as f:
@@ -254,8 +256,11 @@ def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, proces
     logger.info("Starting processing...")
     if processor == "gpu":
         mp.set_start_method("spawn", force=True)
-    with mp.Pool(processes=num_processes) as pool:
-        pool.map(process_vcf_chunk, process_args)
+    if num_processes == 1:
+        process_vcf_chunk(process_args[0])
+    else:
+        with mp.Pool(processes=num_processes) as pool:
+            pool.map(process_vcf_chunk, process_args)
 
 
 if __name__ == "__main__":

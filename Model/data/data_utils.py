@@ -507,6 +507,8 @@ def get_labels(
     anchor_pct=0.999,
     clip=None,
     clip_soft=None,
+    left_padding=0,  # necessary if we padding the sequence
+    right_padding=0, # necessary if we padding the sequence
 ):
     """Get coverage labels for model sequences."""
 
@@ -520,7 +522,7 @@ def get_labels(
 
     # compute dimensions
     num_seqs = len(model_seqs)
-    seq_len_nt = model_seqs[0].end - model_seqs[0].start
+    seq_len_nt = model_seqs[0].end - model_seqs[0].start + left_padding + right_padding
     target_length = seq_len_nt // pool_width
     assert target_length > 0
 
@@ -564,6 +566,10 @@ def get_labels(
         # set NaN's to baseline
         nan_mask = np.isnan(seq_cov_nt)
         seq_cov_nt[nan_mask] = baseline_cov
+
+        # perform padding, if padding is non-zero
+        if left_padding > 0 or right_padding > 0:
+            seq_cov_nt = np.pad(seq_cov_nt, (left_padding, right_padding), mode="constant", constant_values=0)
 
         # sum pool
         seq_cov = seq_cov_nt.reshape(target_length, pool_width)
