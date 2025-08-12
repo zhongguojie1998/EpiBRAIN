@@ -118,16 +118,19 @@ def collate_fn(batch):
 
 def load_label_meta_from_h5(h5_path):
     with h5py.File(h5_path, "r") as f:
-        return f.attrs["trial_names"]
+        return f.attrs["trial_dims"]
 
 
 def save_intermediate_results(
-    chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, save_count
+    chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, save_count, score_names
 ):
     """Save current batch results independently"""
 
     # Concatenate current batch only
-    successful_results = np.vstack(all_success_res).astype(np.float32)
+    successful_results = {}
+    for score_name in score_names:
+        successful_results[score_name] = np.vstack(all_success_res[score_name]).astype(np.float32)
+    
     successful_indices = np.concatenate(all_success)
     error_indices = np.concatenate(all_error)
     error_info = np.concatenate(error_msgs)
@@ -140,13 +143,19 @@ def save_intermediate_results(
         f.attrs["part_idx"] = save_count
         f.attrs["part_nsample"] = len(successful_indices) + len(error_indices)
         f.attrs["saved_at"] = pd.Timestamp.now().isoformat()
+        f.attrs["score_names"] = score_names
 
         f.create_dataset("successful_indices", data=successful_indices, dtype="i8", compression="gzip")
-        f.create_dataset("successful_results", data=successful_results, dtype="f4", compression="gzip")
+        
+        # Save results for each score type
+        results_grp = f.create_group("successful_results")
+        for score_name in score_names:
+            results_grp.create_dataset(score_name, data=successful_results[score_name], dtype="f4", compression="gzip")
+        
         f.create_dataset("error_indices", data=error_indices, dtype="i8", compression="gzip")
         f.create_dataset("error_info", data=error_info, dtype=h5py.string_dtype(), compression="gzip")
 
-    print(f"Part {save_count} saved: {successful_results.shape[0]} successful, {len(error_indices)} failed")
+    print(f"Part {save_count} saved: {len(successful_indices)} successful, {len(error_indices)} failed")
 
 
 def get_model(checkpoint, device, config=None):
@@ -176,6 +185,22 @@ def get_model(checkpoint, device, config=None):
     return model, dna_tokenizer, myconfig
 
 
+def validate_score_names(score_names):
+    """Validate and filter score names based on implemented scores."""
+    IMPLEMENTED_SCORES = {"raw_diff", "log_square"}  # Add more score names as you implement them
+    original_score_names = set(score_names)
+    score_names = [name for name in score_names if name in IMPLEMENTED_SCORES]
+
+    removed_scores = original_score_names - set(score_names)
+    if removed_scores:
+        for score in removed_scores:
+            print(f"Warning: Score '{score}' not implemented, removing from computation")
+
+    if not score_names:
+        raise ValueError("No implemented scores found in the requested score names")
+
+    return score_names
+
 @click.command()
 @click.option("-h5", "--hdf5_file", required=True)
 @click.option("-c", "--chunk_indices", type=str, required=True)
@@ -185,7 +210,9 @@ def get_model(checkpoint, device, config=None):
 @click.option("--batch_size", type=int, default=32)
 @click.option("--save_interval", type=int, default=20000, help="Save intermediate results every N samples")
 @click.option("-p", "--precision", type=click.Choice(["float32", "float64"]), default="float32", help="Numerical precision (float32 for speed, float64 for accuracy)")
-def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, save_interval, precision):
+@click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
+@click.option("-s", "--score_names", multiple=True, help="Score names to compute (will read from HDF5 if not provided)")
+def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, save_interval, precision, use_head, score_names):
 
     # Sort task indices for optimal HDF5 access pattern
     task_indices = np.load(chunk_indices)
@@ -207,13 +234,26 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
         dtype_fn = lambda x: x.float()
         print("Using float32 precision for faster computation")
 
+    # Get score names from HDF5 or use provided ones
+    if not score_names:
+        with h5py.File(hdf5_file, "r") as f:
+            score_names = f.attrs["score_names"]
+    else:
+        score_names = score_names
+
+    score_names = validate_score_names(score_names)
+
+    print(f"Score names: {score_names}")
+
     dataset = VariantDataset(hdf5_file, task_indices, dna_tokenizer)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True, drop_last=False, persistent_workers=True)
+    trial_dims = load_label_meta_from_h5(hdf5_file)
 
     print(f"Computing variant effects for chunk {chunk_id}...")
     start_time = time.time()
 
-    all_success_res = []
+    # Initialize result storage for each score type
+    all_success_res = {score_name: [] for score_name in score_names}
     all_success = []
     all_error = []
     error_msgs = []
@@ -235,12 +275,23 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             wt_input = dtype_fn(wt_batch.permute(0, 2, 1).to(device))
             mut_input = dtype_fn(mut_batch.permute(0, 2, 1).to(device))
 
-            pred_wt = model(wt_input, config.model.use_head, False).detach().cpu().numpy()
-            pred_mut = model(mut_input, config.model.use_head, False).detach().cpu().numpy()
-            diffs = pred_mut - pred_wt
-            diffs = np.sum(diffs, axis=1)
+            pred_wt = model(wt_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
+            pred_mut = model(mut_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
 
-        all_success_res.append(diffs)
+            # Calculate different scores based on score_names
+            for score_name in score_names:
+                if score_name == "raw_diff":
+                    diffs = pred_mut - pred_wt
+                    scores = np.sum(diffs, axis=1)
+                elif score_name == "log_square":
+                    log_alt = np.log2(1 + pred_mut)
+                    log_ref = np.log2(1 + pred_wt)
+
+                    diff_squared = (log_alt - log_ref) ** 2  # shape: (B, L, T)
+                    sum_diff = np.sum(diff_squared, axis=1)  # shape: (B, T)
+                    scores = np.sqrt(sum_diff)  # shape: (B, T)
+
+                all_success_res[score_name].append(scores)
         all_success.append(task_ids[masks])
         all_error.append(task_ids[~masks])
         error_msgs.append(msgs[~masks])
@@ -254,11 +305,11 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             time_since_last_save = current_time - last_save_time
             print(f"\nSaving part {part_count} at {processed_count} samples... (Time since last save: {time_since_last_save:.2f}s)")
             save_intermediate_results(
-                chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, part_count
+                chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, part_count, score_names
             )
             last_save_time = current_time
             # Reset accumulators for next part
-            all_success_res = []
+            all_success_res = {score_name: [] for score_name in score_names}
             all_success = []
             all_error = []
             error_msgs = []
@@ -270,7 +321,7 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
         time_since_last_save = current_time - last_save_time
         print(f"\nSaving final part {part_count}... (Time since last save: {time_since_last_save:.2f}s)")
         save_intermediate_results(
-            chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, part_count
+            chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, part_count, score_names
         )
 
     total_time = time.time() - start_time
