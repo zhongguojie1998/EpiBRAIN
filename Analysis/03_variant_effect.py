@@ -168,7 +168,8 @@ def process_vcf_chunk(args):
     default="gpu",
 )
 @click.option("--num_processes", type=int, default=4, help="Number of subprocess to use for parallel processing")
-def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, processor, num_processes):
+@click.option("--local_processes", type=str, default='0,1,2,3', help="Index of subprocess to use for local parallel processing")
+def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, processor, num_processes, local_processes):
     LOG_BASE = os.path.abspath(log_base)
     CHK_BASE = os.path.abspath(chk_base)
     RES_BASE = os.path.abspath(res_base)
@@ -241,8 +242,9 @@ def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, proces
         logger.debug(chunk)
 
     # Prepare arguments for each process
+    local_chunks = [chunk for i, chunk in enumerate(chunks) if i in map(int, local_processes.split(","))]
     process_args = []
-    for process_id, chunk in enumerate(chunks):
+    for process_id, chunk in enumerate(local_chunks):
         args = (
             chunk,
             f"{LOG_BASE}/{exp_name}/overall_setting.yaml",
