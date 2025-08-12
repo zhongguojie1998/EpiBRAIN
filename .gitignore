@@ -1,0 +1,31 @@
+**/.vscode
+**/__pycache__
+**/.ipynb_checkpoint
+
+# directories
+test/
+logs/
+Chk/
+Data/
+Res/
+basenji
+baskerville
+baskerville_me
+borzoi
+westminster
+archive/
+
+# symbolic links
+logs
+Chk
+Data
+Res
+
+# other files
+hostfile
+
+# slurm output
+*.out
+
+SLDP/
+local/
