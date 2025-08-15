@@ -208,12 +208,6 @@ def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, proces
     if processor == "cpu":
         available_devices = mp.cpu_count()
 
-    if num_processes > available_devices:
-        logger.warning(
-            f"Requested {num_processes} {processor} but only {available_devices} available. Using {available_devices} {processor}."
-        )
-        num_processes = available_devices
-
     # Multi-Process parallel processing
     logger.info(f"Processing with {num_processes} processes")
 
@@ -258,10 +252,10 @@ def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, proces
     logger.info("Starting processing...")
     if processor == "gpu":
         mp.set_start_method("spawn", force=True)
-    if num_processes == 1:
+    if len(local_chunks) == 1:
         process_vcf_chunk(process_args[0])
     else:
-        with mp.Pool(processes=num_processes) as pool:
+        with mp.Pool(processes=len(local_chunks)) as pool:
             pool.map(process_vcf_chunk, process_args)
 
 
