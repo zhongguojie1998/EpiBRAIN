@@ -21,6 +21,6 @@ def variant_score(row):
         score = np.concatenate((sum_score, l2_score), axis=0)
     return score
 # apply variant_score to all eqtl
-scores = np.vstack(eqtl.apply(variant_score, axis=1))
-
+eqtl_unique = eqtl.drop_duplicates(subset=['#CHROM', 'REF', 'POS', 'ALT'])
+scores = np.vstack(eqtl_unique.apply(variant_score, axis=1))
 # %%
