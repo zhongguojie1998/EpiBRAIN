@@ -28,3 +28,6 @@ hostfile
 *.out
 
 SLDP/
+
+# weird nfs files
+.nfs*
