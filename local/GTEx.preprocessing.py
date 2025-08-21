@@ -1,12 +1,13 @@
-# 
+# %%
 import pandas as pd
 import numpy as np
 import os
-# 
+# %%
 all_tissue = pd.DataFrame()
 # get names of all tissues
 getx_files = os.listdir('/gpfs/commons/groups/ren_lab/guojiezhong/Data/GTEx/v10/SuSiE/')
 tissues = [f.split('/')[-1].replace('.v10.eQTLs.SuSiE_summary.parquet', '') for f in getx_files if f.endswith('.v10.eQTLs.SuSiE_summary.parquet')]
+# %%
 for tissue in tissues:
     print(tissue)
     gtex = pd.read_parquet(f'/gpfs/commons/groups/ren_lab/guojiezhong/Data/GTEx/v10/SuSiE/{tissue}.v10.eQTLs.SuSiE_summary.parquet')
@@ -26,11 +27,14 @@ for tissue in tissues:
     def get_closest_tss(row):
         chr = row['chr']
         pos = row['pos']
-        tss_chr = tss[tss['chr'] == chr]
-        if tss_chr.empty:
+        if row['gene_name'] in tss['gene'].values:
+            tss_sel = tss[tss['gene'] == row['gene_name']]
+        else:
+            tss_sel = tss[tss['chr'] == chr]
+        if tss_sel.empty:
             return np.nan, np.nan, np.nan, np.nan
-        tss_chr['distance'] = abs(tss_chr['pos'] - pos)
-        closest_tss = tss_chr.loc[tss_chr['distance'].idxmin()]
+        tss_sel['distance'] = abs(tss_sel['pos'] - pos)
+        closest_tss = tss_sel.loc[tss_sel['distance'].idxmin()]
         return closest_tss['transcript'], closest_tss['gene'], closest_tss['distance'], closest_tss['strand']
     gtex[['closest_transcript', 'closest_gene', 'closest_distance', 'closest_strand']] = gtex.apply(get_closest_tss, axis=1, result_type='expand')
     #  filter to PIP ≥ 0.9
@@ -56,6 +60,11 @@ for tissue in tissues:
         vcf['QUAL'] = '.'
         vcf['FILTER'] = '.'
         vcf['INFO'] = all_group['label'].copy()
+        # add causal gene names
+        vcf['gene_name'] = all_group['gene_name'].copy()
+        vcf['biotype'] = all_group['biotype'].copy()
+        vcf['pip'] = all_group['pip'].copy()
+        vcf['af'] = all_group['af'].copy()
         vcf.to_csv(f'../Data/source/eQTL/{tissue}/{group.replace('>', '_').replace('<', '_').replace('-', '_')}.vcf', sep='\t', index=False, header=True)
     all.to_csv(f'../Data/source/eQTL/{tissue}/info.csv', index=False)
     all['tissue'] = tissue
@@ -72,3 +81,4 @@ for group in all_tissue['group'].unique().tolist() + ['all']:
         vcf['INFO'] = all_group['label'].copy()
         vcf.to_csv(f'../Data/source/eQTL/{group.replace('>', '_').replace('<', '_').replace('-', '_')}.vcf', sep='\t', index=False, header=True)
 all_tissue.to_csv(f'../Data/source/eQTL/info.csv', index=False)
+# %%
