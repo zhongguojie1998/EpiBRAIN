@@ -13,15 +13,15 @@ deepspeed: False  # whether to use deepspeed
 ## training stage setting
 load_checkpoint: null # path to the checkpoint to load (if using deepspeed, then the checkpoint tag), if not given, will start from scratch, else, will resume training from the given checkpoint
 test_only: False # whether to only run the test stage, if True, load_checkpoint must be given
-finetune: False # whether to finetune the model
+finetune: True # whether to finetune the model
 
 ## training hyperparameter
-lr: 1e-4 # maximum learning rate
-lr_warmup_step: 2000  # gradually increase lr from 0 to `lr` in given optimization steps
-batch_size: 12 # batch size for one single GPU
-total_epoch: 100  # maximum training epoch number
-accum_step: 1 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
-clip_grad_norm: 0.15 # gradient clipping norm, 0.15 as in borzoi
+lr: 5e-5 # maximum learning rate
+lr_warmup_step: 10000  # gradually increase lr from 0 to `lr` in given optimization steps
+batch_size: 3 # batch size for one single GPU
+total_epoch: 200  # maximum training epoch number
+accum_step: 2 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
+clip_grad_norm: 0.1 # gradient clipping norm, 0.15 as in borzoi
 seed: 42  # random seed for reproduciblility
 
 ## model head setup
@@ -80,3 +80,5 @@ dataloader_params:  # dataloader parameters, should be accepted by torch.utils.d
   pin_memory: True
   num_workers: 12
   persistent_workers: True
+
+torchrun: false

@@ -15,6 +15,7 @@ borzoi
 westminster
 archive/
 local/
+.history/
 
 # symbolic links
 logs
