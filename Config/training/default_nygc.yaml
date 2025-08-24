@@ -1,0 +1,6 @@
+defaults:
+  - default
+
+world_size: 3
+
+batch_size: 4
