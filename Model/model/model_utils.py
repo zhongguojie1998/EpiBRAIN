@@ -41,7 +41,7 @@ def std_pred_head_config(config):
     {
         # Shared parameters (optional)
         'use_cell_encoder': bool,           # Whether to use shared celltype encoder (default: False)
-        'celltype_hidden_dim': int,         # Hidden dim for celltype embedding (default: in_features//2)
+        'celltype_hidden_dim': int,         # Hidden dim for celltype embedding
 
         # Individual head configs
         'head_name': {

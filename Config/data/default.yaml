@@ -1,7 +1,7 @@
 storage_path: ./Data/basel_ganglia_complete_v1 # where to store the data embedding, now only support precomputed version
 refer_genom: ./Data/source/hg38/hg38.fa # path to the reference genome
 context_length: 524_288  # The length of the DNA serving as one sample. For enformer, the number is 196,608
-preload_data: True  # whether to preload the data into memory, if True, will load the data into memory, if False, will load the data from disk when needed
+preload_data: False  # whether to preload the data into memory, if True, will load the data into memory, if False, will load the data from disk when needed
 used_dataset: # the dataset to load in the training process
   - train
   - valid
