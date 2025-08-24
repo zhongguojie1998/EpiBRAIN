@@ -338,7 +338,7 @@ def preprocess(
         end_time = time.perf_counter()
 
         failed_targets = [item for item in failed_targets if item is not None]
-        failed_num = sum(failed_targets)
+        failed_num = len(failed_targets)
         if failed_num > 0:
             logger.warning(
                 f"Failed to process {failed_num} trial files. Please check the log for details. The failed trials are saved in {storage_path}/failed_trials.txt"
