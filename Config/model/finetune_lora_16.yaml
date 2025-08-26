@@ -1,0 +1,10 @@
+defaults:
+  - default
+
+finetune_param:
+    target_modules: # add lora layer
+      - to_q
+      - to_v
+    modules_to_save:  # other layers requiring optimization
+      - prediction_head
+    r: 16  # lora rank
