@@ -118,7 +118,7 @@ def collate_fn(batch):
 
 def load_label_meta_from_h5(h5_path):
     with h5py.File(h5_path, "r") as f:
-        return f.attrs["trial_dims"]
+        return f["model_meta/trial_dims"][:]
 
 
 def save_intermediate_results(

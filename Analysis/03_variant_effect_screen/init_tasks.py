@@ -6,14 +6,22 @@ import h5py
 import pandas as pd
 from tqdm import tqdm
 
+REQUIRED_COLS = ["rsid", "chr", "pos", "ref", "alt", "index_key"]
 
-def load_enriched_sumstats(csv_path):
+
+def load_enriched_sumstats(csv_path: str):
     """Load enriched summary statistics"""
     df = pd.read_csv(csv_path, sep="\t", compression="gzip" if csv_path.endswith(".gz") else None)
 
+    if csv_path.endswith("vcf") or csv_path.endswith("vcf.gz"):
+        df.rename({"#CHROM": "chr", "POS": "pos", "REF": "ref", "ALT": "alt"}, axis=1, inplace=True)
+        if "rsid" not in df.columns:
+            df["rsid"] = "NA"
+        df["index_key"] = df["chr"] + ":" + df["pos"].astype("str") + ":" + df["ref"] + ":" + df["alt"]
+
     # Validate required columns
-    required_cols = ["rsid", "chr", "pos", "ref", "alt", "index_key", "reverse_map", "z_score", "n_sample"]
-    missing_cols = [col for col in required_cols if col not in df.columns]
+
+    missing_cols = [col for col in REQUIRED_COLS if col not in df.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns in enriched file: {missing_cols}")
 
@@ -24,28 +32,31 @@ def load_enriched_sumstats_from_filelist(filelist_path):
     """Load enriched summary statistics from multiple files listed in filelist TSV"""
     if not os.path.exists(filelist_path):
         raise FileNotFoundError(f"Filelist not found: {filelist_path}")
-    
+
     # Read filelist as TSV: file_path, experiment_name (optional)
-    filelist_df = pd.read_csv(filelist_path, sep='\t', header=None, names=['file_path', 'experiment_name'])
-    
+    filelist_df = pd.read_csv(filelist_path, sep="\t", header=None, names=["file_path", "experiment_name"])
+
     # Fill missing experiment names with file stem
-    filelist_df['experiment_name'] = filelist_df.apply(
-        lambda row: row['experiment_name'] if pd.notna(row['experiment_name']) 
-        else Path(row['file_path']).stem.replace('.tsv', '').replace('.csv', ''),
-        axis=1
+    filelist_df["experiment_name"] = filelist_df.apply(
+        lambda row: (
+            row["experiment_name"]
+            if pd.notna(row["experiment_name"])
+            else Path(row["file_path"]).stem.replace(".tsv", "").replace(".csv", "")
+        ),
+        axis=1,
     )
-    
+
     print(f"Loading {len(filelist_df)} files from filelist...")
-    
+
     df_dict = {}
     for _, row in tqdm(filelist_df.iterrows(), desc="Loading files", total=len(filelist_df)):
-        file_path = row['file_path']
-        exp_name = row['experiment_name']
-        
+        file_path = row["file_path"]
+        exp_name = row["experiment_name"]
+
         if not os.path.exists(file_path):
             print(f"Warning: File not found, skipping: {file_path}")
             continue
-        
+
         try:
             df = load_enriched_sumstats(file_path)
             df_dict[exp_name] = df
@@ -53,10 +64,10 @@ def load_enriched_sumstats_from_filelist(filelist_path):
         except Exception as e:
             print(f"Error loading {file_path}: {e}")
             continue
-    
+
     if not df_dict:
         raise ValueError("No valid files could be loaded from filelist")
-    
+
     return df_dict
 
 
@@ -66,10 +77,14 @@ def init_hdf5_structure(h5_path, label_meta_path, score_names):
     trial_names = label_meta["trial"].tolist()
 
     with h5py.File(h5_path, "w") as f:
-        # Metadata
-        f.attrs["trial_names"] = label_meta["trial"].tolist()
-        f.attrs["trial_dims"] = label_meta["dim"].tolist()
         f.attrs["score_names"] = score_names
+
+        # Metadata
+        model_grp = f.create_group("model_meta")
+        model_grp.create_dataset(
+            "trial_names", data=label_meta["trial"].values, dtype=h5py.string_dtype(), compression="gzip"
+        )
+        model_grp.create_dataset("trial_dims", data=label_meta["dim"].values, dtype="i8", compression="gzip")
 
         # Main variants table (compressed)
         variants_grp = f.create_group("variants")
@@ -81,9 +96,7 @@ def init_hdf5_structure(h5_path, label_meta_path, score_names):
         variants_grp.create_dataset("pos", (0,), maxshape=(None,), dtype="i8", compression="gzip")
         variants_grp.create_dataset("ref", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip")
         variants_grp.create_dataset("alt", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip")
-        variants_grp.create_dataset(
-            "finished", (0,), maxshape=(None,), dtype="bool", compression="gzip"
-        )
+        variants_grp.create_dataset("finished", (0,), maxshape=(None,), dtype="bool", compression="gzip")
 
         # Results table (compressed) - create datasets for each score type
         results_grp = f.create_group("results")
@@ -124,15 +137,21 @@ def load_existing_index(h5_path):
 
 
 @click.command()
-@click.option("-s", "--enriched_sumstats", help="Path to enriched summary statistics CSV/CSV.GZ file")
+@click.option("-f", "--enriched_sumstats", help="Path to enriched summary statistics CSV/CSV.GZ file")
 @click.option("-e", "--experiment_name", help="Unique experiment name")
 @click.option(
-    "-f", "--filelist", help="Path to file containing list of enriched summary statistics files (one per line)"
+    "-fl", "--filelist", help="Path to file containing list of enriched summary statistics files (one per line)"
 )
 @click.option("-h5", "--hdf5_file", required=True, help="Path to HDF5 storage file")
 @click.option("-l", "--label_meta", required=True, help="Path to label_meta.csv")
 @click.option("--force", is_flag=True, help="Force recreate HDF5 file")
-@click.option("-s", "--score_names", multiple=True, default=["raw_diff"], help="Score names for results_grp (can be used multiple times)")
+@click.option(
+    "-s",
+    "--score_names",
+    multiple=True,
+    default=["raw_diff"],
+    help="Score names for results_grp (can be used multiple times)",
+)
 def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, force, score_names):
     """Initialize variant effect analysis from enriched summary statistics"""
 
@@ -178,7 +197,7 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
         existing_index = load_existing_index(hdf5_file)
         # Load trial names and score names
         with h5py.File(hdf5_file, "r") as f:
-            trial_names = f.attrs["trial_names"]
+            trial_names = f["model_meta/trial_dims"][:]
             # Get score names from existing file, or use default
             if "score_names" in f.attrs:
                 score_names = f.attrs["score_names"]
@@ -191,24 +210,22 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
     experiment_data_dict = {}
 
     for exp_idx, (exp_name, enriched_df) in enumerate(enriched_df_dict.items()):
-        print(f"Processing experiment {exp_idx + 1}/{len(enriched_df_dict)}: '{exp_name}' with {len(enriched_df)} variants...")
+        print(
+            f"Processing experiment {exp_idx + 1}/{len(enriched_df_dict)}: '{exp_name}' with {len(enriched_df)} variants..."
+        )
 
         # Sort by index_key for efficient processing
-        enriched_df = enriched_df.sort_values('index_key')
+        enriched_df = enriched_df.sort_values("index_key")
 
         experiment_data = []
         for _, variant in tqdm(enriched_df.iterrows(), desc=f"Processing {exp_name}"):
             index_key = variant["index_key"]
 
+            additional_info = {k: variant[k] for k in variant.index if k not in REQUIRED_COLS}
+            additional_info.update({"index_key": index_key})
+
             # Store experiment data regardless
-            experiment_data.append(
-                {
-                    "index_key": index_key,
-                    "reverse_map": variant["reverse_map"],
-                    "z_score": variant["z_score"],
-                    "n_sample": variant["n_sample"],
-                }
-            )
+            experiment_data.append(additional_info)
 
             # Only add to main table if new (using existing_index set for O(1) lookup)
             if index_key not in existing_index:
@@ -277,14 +294,21 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
                 # Convert to arrays for efficient storage
                 exp_df = pd.DataFrame(experiment_data)
 
-                exp_data_grp.create_dataset(
-                    "index_key", data=exp_df["index_key"], dtype=h5py.string_dtype(), compression="gzip"
-                )
-                exp_data_grp.create_dataset(
-                    "reverse_map", data=exp_df["reverse_map"].values, dtype=bool, compression="gzip"
-                )
-                exp_data_grp.create_dataset("z_score", data=exp_df["z_score"].values, dtype="f4", compression="gzip")
-                exp_data_grp.create_dataset("n_sample", data=exp_df["n_sample"].values, dtype="f4", compression="gzip")
+                for i in exp_df.columns:
+                    exp_data_grp.create_dataset(i, data=exp_df[i].values, compression="gzip")
+
+                # exp_data_grp.create_dataset(
+                #     "index_key", data=exp_df["index_key"], dtype=h5py.string_dtype(), compression="gzip"
+                # )
+                # exp_data_grp.create_dataset(
+                #     "reverse_map", data=exp_df["reverse_map"].values, dtype=bool, compression="gzip"
+                # )
+                # exp_data_grp.create_dataset(
+                #     "z_score", data=exp_df["z_score"].values, dtype="f4", compression="gzip"
+                # )
+                # exp_data_grp.create_dataset(
+                #     "n_sample", data=exp_df["n_sample"].values, dtype="f4", compression="gzip"
+                # )
 
     # Summary
     print("\n" + "=" * 60)
