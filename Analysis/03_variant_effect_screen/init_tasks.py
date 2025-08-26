@@ -297,19 +297,6 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
                 for i in exp_df.columns:
                     exp_data_grp.create_dataset(i, data=exp_df[i].values, compression="gzip")
 
-                # exp_data_grp.create_dataset(
-                #     "index_key", data=exp_df["index_key"], dtype=h5py.string_dtype(), compression="gzip"
-                # )
-                # exp_data_grp.create_dataset(
-                #     "reverse_map", data=exp_df["reverse_map"].values, dtype=bool, compression="gzip"
-                # )
-                # exp_data_grp.create_dataset(
-                #     "z_score", data=exp_df["z_score"].values, dtype="f4", compression="gzip"
-                # )
-                # exp_data_grp.create_dataset(
-                #     "n_sample", data=exp_df["n_sample"].values, dtype="f4", compression="gzip"
-                # )
-
     # Summary
     print("\n" + "=" * 60)
     print("INITIALIZATION SUMMARY")
