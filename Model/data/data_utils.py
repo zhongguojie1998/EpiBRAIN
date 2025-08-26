@@ -542,7 +542,11 @@ def get_labels(
         mseq = model_seqs[si]
 
         # read coverage
-        seq_cov_nt = genome_cov_open.read(mseq.chr, mseq.start, mseq.end)
+        try:
+            seq_cov_nt = genome_cov_open.read(mseq.chr, mseq.start, mseq.end)
+        except RuntimeError as e:
+            print(genome_cov_file, ":", mseq.chr, ":", mseq.start, "-", mseq.end)
+            raise e
         seq_cov_nt = seq_cov_nt.astype("float32")
 
         # determine baseline coverage
