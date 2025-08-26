@@ -1,0 +1,5 @@
+defaults:
+  - data: drop_celltype
+  - model: drop_celltype
+  - training: default_nygc
+  - logging: debug
