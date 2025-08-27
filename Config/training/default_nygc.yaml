@@ -6,3 +6,9 @@ world_size: 3
 batch_size: 2
 
 accum_step: 4
+
+dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader
+  batch_size: ${training.batch_size}
+  pin_memory: True
+  num_workers: 0
+  persistent_workers: False
