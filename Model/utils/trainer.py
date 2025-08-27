@@ -763,9 +763,9 @@ class DNASeqModelTrainer:
                     task_type = head_data["task_type"]
                     label_meta = head_data["label_meta"].reset_index().set_index("trial")
                     for trial in label_meta.index:
-                        dim = label_meta.loc[trial, "dim"]
-                        label_subset = label[task_type][:, :, dim].to(self.local_rank, non_blocking=True)
-                        pred_subset = pred[head_name][:, :, dim, ...]
+                        pred_dim, label_dim = label_meta.loc[trial, ["dim", "label_dim"]]
+                        label_subset = label[task_type][:, :, label_dim].to(self.local_rank, non_blocking=True)
+                        pred_subset = pred[head_name][:, :, pred_dim, ...]
                         B, L = pred_subset.shape[:2]
                         # Update metrics for this head
                         for metric_name in metric_name_dict[task_type]:
