@@ -1,0 +1,12 @@
+defaults:
+  - default
+
+# new output head setting for the model
+output_heads: # set up the prediction head name and trial number
+  use_cell_encoder: False  # whether to use shared cell encoder for the output heads, if True, the output will be calculated as celltype embedding then shared task output, else, directly output separate celltype * modality
+  celltype_hidden_dim: 64  # the dimension of the cell type embedding, if use_cell_encoder is True, this will be used to calculate the cell type embedding
+  regression:
+      track_num: 180
+      celltype_num: 36
+      modality_num: 5 # ATAC, H3K27ac, H3K27me3, H3K9me3, RNA
+      task: regression # choose from `regression` or `classification`
