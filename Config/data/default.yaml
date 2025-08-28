@@ -1,0 +1,50 @@
+storage_path: ./Data/basel_ganglia_complete_v1 # where to store the data embedding, now only support precomputed version
+refer_genom: ./Data/source/hg38/hg38.fa # path to the reference genome
+context_length: 524_288  # The length of the DNA serving as one sample. For enformer, the number is 196,608
+preload_data: False  # whether to preload the data into memory, if True, will load the data into memory, if False, will load the data from disk when needed
+used_dataset: # the dataset to load in the training process
+  - train
+  - valid
+  - test
+
+preprocess:
+  storage_path: ${data.storage_path}
+  refer_genom: ${data.refer_genom}
+  trial_summary_path: ./Data/data_config/basel_ganglia_complete_v1.csv # path to the trials (label), only support bigwig files
+  gap_bed: ./Data/source/merged_blacklist_gaps.bed # if provided, delete all the reads from gap regions so that they are not included in the datasets
+
+  unmap_bed: ./Data/source/umap_k36_t10_l32.bed # if provided, delete reads with too many unmap regions so that they are not included in the datasets
+  unmap_threshold: 0.5 # the threshold to filter the unmap regions, if unmap_bed is provided, remove sequences with more than this unmappable bin percentile (should be between 0 and 1)
+
+  blacklist_bed: ./Data/source/blacklist.bed # if provided, set all the reads value from blacklist regions to within the baseline value
+
+  break_threshold: 3_145_728 # the threshold to break the long contig into smaller pieces to preprocess, for enformer, the number is 1,179,648 (196,608 * 6). This is to speed up the preprocessing
+
+  stride_train: 174_775 # the stride to get the next context, can be given in relative percentage of the context_length (1.0 means no overlap, 0.5 means half overlap, etc.), or in absolute number of base pairs (e.g., 196,608 etc.). Here, the stride is 196,608 / 2 (50% overlap) + 63, to slightly shift the window boundary
+  stride_test: 522_253 
+  snap: 1 # align the sampling init point of each contig, e.g., 1000 means the sampling will start from the closest multiple of 1000th base pair of each contig, this is to ensure the same sampling point for each contig, so that the training and testing data are aligned
+  context_length: ${data.context_length}
+  window_size: 32  # The window size is restricted by the model architecture (the final bp resolution). For enformer, the number is 128
+  n_window: 16320 # The central bin number to keep and calculate the label. For enformer, the number is 896 (196,608 / 128 (bins) - 320 (bins per side) * 2)
+
+  folds: null # if provided, process the data in the cross validation manner
+  valid_pct_or_chr: 0.1 # the percentage of the samples to use for validation, if folds is provided, this will be ignored. if provided as chromosome names divided by comma, e.g., chr1,chr2,chr3, will use these chromosomes for validation
+  test_pct_or_chr: 0.1 # the percentage of the samples to use for testing, if folds is provided, this will be ignored. if provided as chromosome names divided by comma, e.g., chr1,chr2,chr3, will use these chromosomes for test
+  sample_pct: 1.0 # the percentage of the samples (for all sets) to use, 1.0 means all samples, 0.1 means 10% of the samples
+
+  seed: 42 # random seed for reproducibility
+  num_worker: 24 # number of workers to use for the preprocessing
+  preload_data: ${data.preload_data}
+
+  force_restart: False # whether to restart the preprocessing, if True, will delete the existing processed data and start from scratch
+  precision: float32  # save data at this precision
+
+dataset:
+  storage_path: ${data.storage_path}
+  refer_genom: ${data.refer_genom}
+  context_length: ${data.context_length}
+  preload_data: ${data.preload_data}
+  shift_augs:  # data augumentation, if provided, will randomly shift the sequence by a random bases
+    - -3 # minimum shift 
+    - 3 # maximum shift
+  rc_aug: True # data augumentation, if provided, will randomly reverse the sequence

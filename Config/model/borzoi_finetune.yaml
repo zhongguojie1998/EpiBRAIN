@@ -1,0 +1,22 @@
+defaults:
+  - flashzoi
+
+model_name: ./Chk/borzoi_pretrain
+
+flashed: False  # whether to use FlashAttention, in finetune setting, we should disable this
+use_autocast: False  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
+
+finetune_method: lora 
+finetune_param:
+    target_modules: # add lora layer
+      - to_q
+      - to_v
+    modules_to_save:  # other layers requiring optimization
+      - prediction_head
+    r: 8  # lora rank
+  
+partial_load: # only load the given part of the pretrained model. If not provided/null, default load all the pretrained parameters
+  - res_tower
+  - transformer
+  - upsample_tower
+  - final_joined_convs

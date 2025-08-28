@@ -1,0 +1,85 @@
+# Training setup
+
+## basic hardware setup
+world_size: 4 # how many GPUs to use for training, 1 for single GPU training, >1 for DDP training
+gpu_id: null  # when world size > 1, even if specified, will not be used
+MASTER_ADDR: localhost # master address for DDP training
+MASTER_PORT: 12320 # master port for DDP training
+
+## model training optimizing
+use_grad_compression: False  # whether to use gradient compression (PowerSGD) to reduce GPU communication time. Need to make sure that this is the main training bottle neck
+deepspeed: True  # whether to use deepspeed
+
+## training stage setting
+load_checkpoint: null # path to the checkpoint to load (if using deepspeed, then the checkpoint tag), if not given, will start from scratch, else, will resume training from the given checkpoint
+test_only: False # whether to only run the test stage, if True, load_checkpoint must be given
+finetune: False # whether to finetune the model
+
+## training hyperparameter
+lr: 1e-4 # maximum learning rate
+lr_warmup_step: 2000  # gradually increase lr from 0 to `lr` in given optimization steps
+batch_size: 12 # batch size for one single GPU
+total_epoch: 100  # maximum training epoch number
+accum_step: 1 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
+clip_grad_norm: 0.15 # gradient clipping norm, 0.15 as in borzoi
+seed: 42  # random seed for reproduciblility
+
+## model head setup
+use_head: # list of heads to use for training
+  - regression
+
+## loss setup
+loss: poisson_mn # the name of the loss function (now support: poisson, poisson_mn)
+loss_params:
+  total_weight: 1
+  weight_range: 1
+  eps: 1e-7
+  reduction: mean
+
+## optimizer setup
+add_opt_group: True # whether to use optimizer parameter groups
+
+# optimizer: AdamW # optimizer to use, should be supported by deepspeed
+# optimizer_params: # optimizer parameters
+#   lr: ${training.lr}
+#   # adam_w_mode: True  # whether to use traditional adam instead of adamw (only when setting this to false and use the Adam can we get traditional adam, or we will get adamw)
+
+optimizer: OneBitAdam # optimizer to use, should be supported by deepspeed
+optimizer_params: # optimizer parameters
+  lr: ${training.lr}
+  freeze_step: ${training.lr_warmup_step}
+
+# optimizer: ZeroOneAdam # optimizer to use, should be supported by deepspeed
+# optimizer_params: # optimizer parameters
+#   lr: ${training.lr}
+#   var_freeze_step: ${training.lr_warmup_step}
+#   local_step_scaler: 37100
+
+## scheduler setup
+# scheduler: WarmupLR # learning rate scheduler to use, should be supported by deepspeed
+# scheduler_params: # scheduler parameters
+#   warmup_min_lr: 0
+#   warmup_max_lr: ${training.lr}
+#   warmup_num_steps: ${training.lr_warmup_step}
+
+scheduler: WarmupCosineLR # learning rate scheduler to use, should be supported by deepspeed
+scheduler_params: # scheduler parameters
+  total_num_steps: 84200
+  warmup_num_steps: ${training.lr_warmup_step}
+  warmup_type: linear
+
+# scheduler: WarmupDecayLR # learning rate scheduler to use, should be supported by deepspeed
+# scheduler_params: # scheduler parameters
+#   total_num_steps: 84200
+#   warmup_max_lr: ${training.lr}
+#   warmup_num_steps: ${training.lr_warmup_step}
+#   warmup_type: linear
+
+## dataloader setup
+dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader
+  batch_size: ${training.batch_size}
+  pin_memory: True
+  num_workers: 12
+  persistent_workers: True
+
+

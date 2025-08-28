@@ -1,0 +1,17 @@
+# logging setup
+
+exp_name: default  # experiment name, used to create the log directory and checkpoint directory
+
+## overall logging setup
+log_level: INFO  # logging level, INFO, DEBUG, etc.
+log_dir: ./logs/${logging.exp_name}  # if null/not provided, otput the logs to the console, if provided, output the logs to the file
+write_log_to_file: True  # whether to output the logs to the file, if True, will output the logs to the file
+overwrite_log_file: False  # whether to overwrite the log file, if True, will overwrite the existing log file
+use_tensorboard: True  # whether to use tensorboard to log the training process, if True, will log the training process to tensorboard
+
+## training logging setup
+checkpoint_dir: ./Chk/${logging.exp_name}  # directory to save the checkpoints
+res_dir: ./Res/${logging.exp_name}
+save_every: 1 # save checkpoint for every x epochs
+report_every: 1  # report basic training log (loss, model parameter (optional), etc.) for every x optimization steps (i.e. x effective batches)
+log_more: False # log more metrics during training, including model gradient and model parameter histogram. Only effective when using tensorboard

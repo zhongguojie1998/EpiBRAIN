@@ -1,0 +1,5 @@
+defaults:
+  - data: default
+  - model: borzoi_enformer_style_finetune
+  - training: finetune
+  - logging: default

@@ -1,0 +1,10 @@
+defaults:
+  - flashzoi_mini
+
+model_name: flashzoi_mini_res
+
+res_tower_param:  # parameters for the residual tower
+  res_link: True # whether to use residual link in the conv layer
+
+upsample_param:
+  res_link: True # whether to use residual link for the separable conv

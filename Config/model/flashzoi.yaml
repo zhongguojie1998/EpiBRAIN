@@ -1,0 +1,52 @@
+
+model_name: flashzoi
+
+## technical setup
+flashed: True  # whether to use FlashAttention
+use_autocast: False  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
+
+## model hyperparameter
+conv_dna_param:  # parameters for the convolutional DNA layer
+  out_channels: 512  # number of output channels for the conv layer
+  kernel_size: 15  # kernel size for the conv layer
+
+res_tower_param:  # parameters for the residual tower
+  filters_init: 608 # initial number of output channels
+  filters_end: 1536 # final number of output channels
+  divisible_by: 32 # exp{ln(end / init) / (depth - 1)} * previous filter, choose the next nearest filter size divisible by this number
+  kernel_size: 5
+  pool_size: 2
+  depth: 6  # number of residual blocks in the tower
+  res_link: False # whether to use residual link in the conv layer
+
+transformer_param:
+  heads: 8  # atten head num
+  attn_dim_key: 64  # set up atten, not used in FlashAttention
+  attn_dim_value: 192  # set up atten, not used in FlashAttention
+  pos_dropout: 0.01  # set up atten, not used in FlashAttention
+  attn_dropout: 0.05  # atten dropout
+  dropout: 0.2  # transformer linear layer dp rate
+  depth: 8  # transformer layer depth
+
+crop_param:
+  return_center_bins_only: True # whether to only use the central bins for loss calculation
+  bins_to_return: 16320  # how many (central) bins used to calculate loss, same as in enformer (114,688 bp aggregated into 128 bp bins)
+
+upsample_param:
+  upsample_layer_num: 2  # how many upsample layers to use, deciding final resolution, 0 corresponding to 128 bp resolution, 1 -> 64, 2 -> 32
+  kernel_size: 3  # for separable conv
+  res_link: False # whether to use residual link for the separable conv
+
+final_joined_conv_param:
+  out_channels: 1920  # number of output channels for the final conv layer
+  dropout: 0.1  # dropout rate for the final conv layer
+
+# new output head setting for the model
+output_heads: # set up the prediction head name and trial number
+  use_cell_encoder: False  # whether to use shared cell encoder for the output heads, if True, the output will be calculated as celltype embedding then shared task output, else, directly output separate celltype * modality
+  celltype_hidden_dim: 960  # the dimension of the cell type embedding, if use_cell_encoder is True, this will be used to calculate the cell type embedding
+  regression:
+    track_num: 87
+    celltype_num: null
+    modality_num: null
+    task: regression # choose from `regression` or `classification`

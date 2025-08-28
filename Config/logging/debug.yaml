@@ -1,0 +1,17 @@
+defaults:
+  - default
+
+# logging setup
+exp_name: debug  # experiment name, used to create the log directory and checkpoint directory
+log_level: DEBUG
+
+overwrite_log_file: False
+
+# training logging
+save_every: 1
+report_every: 1
+log_more: True
+
+# use this to enable even more logs, each card will out put somelogs
+diagnose: False
+diagnose_save_step: 10

@@ -1,0 +1,5 @@
+defaults:
+  - data: long_context
+  - model: flashzoi
+  - training: long_context
+  - logging: default

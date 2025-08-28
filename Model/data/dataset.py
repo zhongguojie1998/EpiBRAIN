@@ -1,0 +1,180 @@
+import math
+import multiprocessing as mp
+
+import pandas as pd
+import torch
+import torch.distributed as dist
+from data.tokenizer import FastaInterval
+from torch.utils.data import Dataset, Sampler, get_worker_info
+
+
+class GenomeIntervalDataset(Dataset):
+
+    def __init__(
+        self,
+        dataset_type,  # train, valid, test
+        storage_path,
+        refer_genom,
+        context_length=196_608,
+        preload_data=True,
+        shift_augs=None,
+        rc_aug=False,
+        return_augs=True,
+        return_token_dict=False,
+        external_rand_seed=mp.Value("i", 0),
+        load_task=set("regression"),
+        **kwargs,
+    ):
+        super().__init__()
+
+        self.storage_path = storage_path
+        self.context_length = context_length
+
+        assert return_augs if rc_aug else True, "If you want to use reverse complement augmentation, you must also return the augmentation information"
+
+        # load meta data
+        df = pd.read_csv(f"{storage_path}/sequences.bed", sep="\t", header=None)
+        df.columns = ["chr", "start", "end", "split"]
+        self.df = df[df["split"] == dataset_type].reset_index(drop=True)
+        self.load_task = list(load_task)
+
+        # load label
+        self.preload_data = preload_data
+        if preload_data:
+            all_label = torch.load(f"{storage_path}/data/{dataset_type}.pt")["label"]
+            self.all_label = {k: v[self.df.index] for k, v in all_label.items()}
+
+        # get tokenizer
+        self.tokenizer = FastaInterval(
+            fasta_file=refer_genom,
+            context_length=context_length,
+            return_seq_indices=False,
+            shift_augs=shift_augs,
+            rc_aug=rc_aug,
+        )
+        self.return_augs = return_augs
+        self.return_token_dict = return_token_dict
+
+        self.external_rand_seed = external_rand_seed
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, ind):
+        interval = self.df.iloc[ind, [0, 1, 2]]
+        chrom, start, end = interval
+
+        token_dict = self.tokenizer(
+            chrom, start, end, return_augs=self.return_augs, seed=self.external_rand_seed.value + ind
+        )
+        one_hot = token_dict["one_hot"]
+        if one_hot.shape[0] != self.context_length:
+            raise ValueError(
+                f"Context length not match (expecting {self.context_length}, {one_hot.shape[0]} observed). Chr {chrom}, start {start}, end {end}, aug shift {token_dict.get('rand_shift')}"
+            )
+
+        if self.preload_data:
+            label = {k: v[ind] for k, v in all_label.items() if k in self.load_task}
+        else:
+            all_label = torch.load(f"{self.storage_path}/data/{chrom}_{start}_{end}.pt")["label"]
+            label = {k: v for k, v in all_label.items() if k in self.load_task}
+
+        if self.return_augs:
+            # here, if reverse, the sequence is still 5'->3', which means the corresponding label should be reversed
+            if token_dict["rand_reverse"]:
+                label = {k: torch.flip(v, dims=[0]) for k, v in label.items()}
+
+        return one_hot if not self.return_token_dict else token_dict, label, ind
+
+
+def collate_fn(batch):
+    """
+    Custom collate function to handle dictionary labels.
+    """
+    sequences, labels, indices = zip(*batch)
+    
+    # Stack sequences and indices
+    sequences = torch.stack(sequences)
+    indices = torch.tensor(indices)
+    
+    # Handle dictionary labels
+    if isinstance(labels[0], dict):
+        # Get all task keys from the first sample
+        task_keys = labels[0].keys()
+        batched_labels = {}
+        
+        for task_key in task_keys:
+            # Stack labels for this task across the batch
+            task_labels = [label[task_key] for label in labels]
+            batched_labels[task_key] = torch.stack(task_labels)
+        
+        return sequences, batched_labels, indices
+    else:
+        # Fallback for non-dictionary labels
+        return sequences, torch.stack(labels), indices
+
+
+class DumySampler:
+
+    def __init__(self, **kwargs):
+        pass
+
+    def set_epoch(self, epoch):
+        pass
+
+
+class StrictDistributedSampler(Sampler):
+    """
+    strict allow once and only once appearance of each data point in the training loop
+    """
+
+    def __init__(
+        self,
+        dataset,
+        num_replicas: int = None,
+        rank: int = None,
+        shuffle: bool = False,
+    ):
+        if num_replicas is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires torch.distributed")
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires torch.distributed")
+            rank = dist.get_rank()
+
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.shuffle = shuffle
+        self.epoch = 0
+        self.num_samples = math.ceil(len(self.dataset) / self.num_replicas)
+
+    def __iter__(self):
+        n = len(self.dataset)
+
+        if self.shuffle:
+            # set the random seed based on the epoch
+            g = torch.Generator()
+            g.manual_seed(self.epoch)
+            indices = torch.randperm(n, generator=g).tolist()
+        else:
+            indices = list(range(n))
+
+        # get the start and end based on the rank
+        start = self.rank * self.num_samples
+        end = min(start + self.num_samples, n)
+        # we do not discard any sample, but it may cause the last card has less sample
+        sub_indices = indices[start:end]
+
+        return iter(sub_indices)
+
+    def __len__(self):
+
+        if self.rank == self.num_replicas - 1:
+            return len(self.dataset) - self.num_samples * (self.num_replicas - 1)
+        return self.num_samples
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch

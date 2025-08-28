@@ -1,0 +1,5 @@
+defaults:
+  - data: default
+  - model: flashzoi_enformer_style
+  - training: deepspeed
+  - logging: default
