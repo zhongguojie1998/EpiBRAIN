@@ -56,9 +56,24 @@ def plot_manhattan(args, outdir):
 
 
 def prepare_dfs(label_path, dataset_path, metadata_path):
-    all = torch.load(label_path)
+    # if label_path is a directory, load all '.pt' files in it
+    if os.path.isdir(label_path):
+        all = []
+        info = []
+        for file in os.listdir(label_path):
+            if file.endswith(".pt"):
+                all.append(torch.load(os.path.join(label_path, file)))
+                info.append(file.replace(".pt", ""))
+        all = torch.cat([i['label']['regression'].unsqueeze(0) for i in all], dim=0)
+    else:
+        all = torch.load(label_path)
+        info = None
     sequences = pd.read_csv(dataset_path, sep="\t", header=None)
     sequences.columns = ["chrom", "start", "end", "split"]
+    # reorder all by sequences
+    if info is not None:
+        sequences.index = sequences['chrom'] + "_" + sequences['start'].astype(str) + "_" + sequences['end'].astype(str)
+        sequences = sequences.loc[info]
     sequences.shape, sequences[sequences["split"] == "train"].shape, sequences[
         sequences["split"] == "valid"
     ].shape, sequences[sequences["split"] == "test"].shape
