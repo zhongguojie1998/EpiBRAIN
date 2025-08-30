@@ -712,12 +712,12 @@ class DNASeqModelTrainer:
         # get and write the metric logs
         # self.metrics.update(tm_metrics.compute())
 
-    def infer_step(self, log_loss=False, save_pred=False, log_prefix="Valid"):
+    def infer_step(self, log_loss=False, save_pred=False, save_method="merge", log_prefix="Valid"):
         self.inference_model.eval()
 
         if log_loss:
             running_loss_local = torch.tensor(0.0, device=self.local_rank)
-        if save_pred:
+        if save_pred and save_method=='merge':
             preds = {}
             labels = {}
             inds = []
@@ -748,15 +748,25 @@ class DNASeqModelTrainer:
                     running_loss_local += total_loss.detach()
                 # pred
                 if save_pred:
-                    for k, v in pred.items():
-                        if k not in preds:
-                            preds[k] = []
-                        preds[k].append(v.detach().cpu())
-                    for k, v in label.items():
-                        if k not in labels:
-                            labels[k] = []
-                        labels[k].append(v.detach().cpu())
-                    inds.append(ind)
+                    if save_method == "merge":
+                        for k, v in pred.items():
+                            if k not in preds:
+                                preds[k] = []
+                            preds[k].append(v.detach().cpu())
+                        for k, v in label.items():
+                            if k not in labels:
+                                labels[k] = []
+                            labels[k].append(v.detach().cpu())
+                        inds.append(ind)
+                    else:
+                        torch.save(
+                            {
+                                "label": {k: v.detach().cpu() for k, v in label.items()},
+                                "pred": {k: v.detach().cpu() for k, v in pred.items()},
+                                "index": ind,
+                            },
+                            f"{self.logging_config.res_dir}/{log_prefix}_preds_rank_{self.rank}_epoch_{self.current_epoch}_batch_{i}.pt",
+                        )
 
                 # metrics
                 for head_name, head_data in self.head_data_setting.items():
@@ -787,7 +797,7 @@ class DNASeqModelTrainer:
             global_avg_loss = total_loss / (len(dataloader) * self.world_size)
             self.metrics.update({f"{log_prefix}/loss": global_avg_loss.cpu().item()})
 
-        if save_pred:
+        if save_pred and save_method=='merge':
             # we have to pre save all the res and later aggregate them
             torch.save(
                 {
@@ -1115,20 +1125,21 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
         else:
             trainer.data_rand_seed.value = trainer.current_epoch
             save_pred_res = myconfig.logging.get("save_pred_res", True)
+            save_method = myconfig.logging.get("save_method", "split")
 
             if trainer.data_func["train"]["data_loader"] is not None:
                 with timer(f"[Train/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                    trainer.infer_step(log_loss=False, log_prefix="Train", save_pred=save_pred_res)
+                    trainer.infer_step(log_loss=False, log_prefix="Train", save_pred=save_pred_res, save_method=save_method)
                 blocking_sync_wait(world_size)
 
             if trainer.data_func["valid"]["data_loader"] is not None:
                 with timer(f"[Valid/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                    trainer.infer_step(log_loss=False, log_prefix="Valid", save_pred=save_pred_res)
+                    trainer.infer_step(log_loss=False, log_prefix="Valid", save_pred=save_pred_res, save_method=save_method)
                 blocking_sync_wait(world_size)
 
             if trainer.data_func["test"]["data_loader"] is not None:
                 with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                    trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=save_pred_res)
+                    trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=save_pred_res, save_method=save_method)
                 blocking_sync_wait(world_size)
 
             # save the raw preds and write the metrics
