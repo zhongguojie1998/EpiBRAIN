@@ -84,8 +84,11 @@ def init_hdf5_structure(h5_path, label_meta_path, score_names):
         model_grp.create_dataset(
             "trial_names", data=label_meta["trial"].values, dtype=h5py.string_dtype(), compression="gzip"
         )
-        model_grp.create_dataset("trial_dims", data=label_meta["dim"].values, dtype="i8", compression="gzip")
-
+        if "dim" in label_meta.columns:
+            model_grp.create_dataset("trial_dims", data=label_meta["dim"].values, dtype="i8", compression="gzip")
+        else:
+            model_grp.create_dataset("trial_dims", data=label_meta.index.values, dtype="i8", compression="gzip")
+            
         # Main variants table (compressed)
         variants_grp = f.create_group("variants")
         variants_grp.create_dataset(

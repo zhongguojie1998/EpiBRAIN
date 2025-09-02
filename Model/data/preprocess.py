@@ -11,6 +11,8 @@ import numpy as np
 import pandas as pd
 from utils.logging import LOGGER_PREFIX, LazyLogger
 
+from Analysis.get_transcripts import get_transcripts_in_region
+
 from .data_utils import (
     STD_CHR,
     Contig,
@@ -346,6 +348,15 @@ def preprocess(
             with open(f"{storage_path}/failed_trials.txt", "w") as f:
                 for trial in failed_targets:
                     f.write(f"{trial}\n")
+
+        # get RNA transcripts locations
+        for mseq in mseqs:
+            transcripts_df = get_transcripts_in_region(f"{mseq.chr}:{mseq.start}-{mseq.end}", window_size=window_size, n_window=n_window)
+            
+            if not transcripts_df.empty:
+                longest_transcript = transcripts_df.loc[transcripts_df['length'].idxmax()]
+                mseq.rna_transcript = longest_transcript['transcriptID']
+                mseq.rna_gene = longest_transcript['geneName']
 
         ################################################################
         # stats
