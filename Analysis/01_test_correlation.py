@@ -51,7 +51,7 @@ def main(exp_name, chk, splits, res_base, data_base, use_mp, n_processes):
     os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data", exist_ok=True)
 
     # load label meta info
-    label_meta = pd.read_csv(f"{DATA_BASE}/label_meta.csv", index_col=0)
+    label_meta = pd.read_csv(f"{DATA_BASE}/raw_label_meta.csv", index_col=None)
 
     # splits = ["Train", "Valid", "Test"]
 
@@ -61,8 +61,8 @@ def main(exp_name, chk, splits, res_base, data_base, use_mp, n_processes):
             print(f"Calculate metric for {split}")
 
             test_res = torch.load(f"{RES_BASE}/{exp_name}/{split}_preds_epoch_{chk}.pt")
-            test_label = test_res["label"].reshape(-1, len(label_meta))
-            test_pred = test_res["pred"].reshape(-1, len(label_meta))
+            test_label = test_res["label"]['regression'].reshape(-1, len(label_meta))
+            test_pred = test_res["pred"]['regression'].reshape(-1, len(label_meta))
 
             metric = pd.DataFrame(index=label_meta["trial"], columns=["MSE", "MAE", "PearsonR"])
 

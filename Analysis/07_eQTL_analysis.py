@@ -34,6 +34,8 @@ for i in range(6):
     else:
         log_square = np.concatenate([log_square, part['successful_results']['log_square'][:]])
         raw_diff = np.concatenate([raw_diff, part['successful_results']['raw_diff'][:]])
+# %% define biotypes to keep
+biotype_to_keep = ['protein_coding', 'lncRNA', 'IG_V_gene', 'TR_V_gene', 'IG_C_gene', 'snoRNA', 'snRNA', 'TR_C_gene', 'miRNA']
 # %%
 import sklearn
 track_results = pd.DataFrame()
@@ -48,6 +50,9 @@ for organ in os.listdir('Data/source/eQTL/') + ['All']:
         eqtl_organ_info = pd.read_csv(f'Data/source/eQTL/{organ}/info.csv')
     else:
         continue
+    # filter eqtl_organ and eqtl_organ_info by biotype_to_keep
+    eqtl_organ_info = eqtl_organ_info.loc[eqtl_organ_info['biotype'].isin(biotype_to_keep)]
+    eqtl_organ = eqtl_organ.loc[eqtl_organ_info.index]
     eqtl_organ['group'] = eqtl_organ_info['group'].groupby(eqtl_organ_info['variant_id']).first().loc[eqtl_organ['ID']].values
     # drop duplicates
     eqtl_organ_unique = eqtl_organ.drop_duplicates(subset=['#CHROM', 'REF', 'POS', 'ALT'])
@@ -61,15 +66,25 @@ for organ in os.listdir('Data/source/eQTL/') + ['All']:
         label = (eqtl_organ_unique['INFO'].values == 'positive').astype(int)
         for i, idx in enumerate(track_anno.index):
             if group == 'all':
+                # auroc
                 auroc = sklearn.metrics.roc_auc_score(label, eqtl_scores[:, i])
+                # auprc
+                precision, recall, _ = sklearn.metrics.precision_recall_curve(label, eqtl_scores[:, i])
+                auprc = sklearn.metrics.auc(recall, precision)
                 positives = (eqtl_organ_unique['INFO'] == 'positive').sum()
                 negatives = (eqtl_organ_unique['INFO'] == 'negative').sum()
             else:
+                # auroc
                 auroc = sklearn.metrics.roc_auc_score(label[eqtl_organ_unique['group'] == group],
                                                       eqtl_scores[eqtl_organ_unique['group'] == group, i])
+                # auprc
+                precision, recall, _ = sklearn.metrics.precision_recall_curve(label[eqtl_organ_unique['group'] == group],
+                                                                              eqtl_scores[eqtl_organ_unique['group'] == group, i])
+                auprc = sklearn.metrics.auc(recall, precision)
                 positives = (eqtl_organ_unique['INFO'][eqtl_organ_unique['group'] == group] == 'positive').sum()
                 negatives = (eqtl_organ_unique['INFO'][eqtl_organ_unique['group'] == group] == 'negative').sum()
             track_anno.loc[idx, 'AUROC'] = auroc
+            track_anno.loc[idx, 'AUPRC'] = auprc
             track_anno.loc[idx, f'n_pos'] = positives
             track_anno.loc[idx, f'n_neg'] = negatives
         track_results = pd.concat([track_results, track_anno])
@@ -88,6 +103,8 @@ import matplotlib.pyplot as plt
 organs = ['Brain_Caudate_basal_ganglia', 'Brain_Nucleus_accumbens_basal_ganglia', 'Brain_Putamen_basal_ganglia']
 for organ in organs:
     fig, ax = plt.subplots(figsize=(10, 6))
-    sns.violinplot(data=track_results[track_results['organ'] == organ], x='group', y='AUROC', hue='mod', ax=ax)
+    # drop na values
+    to_plot = track_results[track_results['organ'] == organ].copy().dropna()
+    sns.violinplot(data=to_plot, x='group', y='AUPRC', hue='mod', ax=ax)
     ax.set_title(organ)
 # %%
