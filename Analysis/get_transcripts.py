@@ -42,7 +42,7 @@ def overlaps(region_start: int, region_end: int, transcript_start: int, transcri
     """Check if two genomic intervals overlap."""
     return not (region_end < transcript_start or region_start > transcript_end)
 
-def get_transcripts_in_region(region: str, gtf_file: str = "Data/source/gencode.v48.annotation.gtf.gz", window_size=32, n_window=None) -> pd.DataFrame:
+def get_transcripts_in_region(region: str, gtf_file: str = "Data/source/gencode.v48.annotation.gtf.gz", window_size=32, n_window=None, filter_to_full_transcript=False, filter_to_longest=False) -> pd.DataFrame:
     """
     Extract all transcripts that overlap with given genomic region.
     
@@ -96,6 +96,10 @@ def get_transcripts_in_region(region: str, gtf_file: str = "Data/source/gencode.
                 transcript_id = extract_transcript_id(attributes)
                 gene_name = extract_gene_name(attributes)
                 if transcript_id:
+                    if filter_to_full_transcript:
+                        # only include transcripts fully contained within the region
+                        if transcript_start < region_start or transcript_end > region_end:
+                            continue
                     # Calculate bin indices (32-bp bins starting from 0)
                     # Transcript coordinates relative to region start
                     transcript_rel_start = max(0, transcript_start - region_start)
@@ -121,6 +125,10 @@ def get_transcripts_in_region(region: str, gtf_file: str = "Data/source/gencode.
     df = pd.DataFrame(transcripts)
     if not df.empty:
         df = df.sort_values(['chr', 'start', 'transcriptID']).reset_index(drop=True)
+    
+    if filter_to_longest and not df.empty:
+        # Keep only the longest transcript per gene
+        df = df.loc[df.groupby('geneName')['length_bin'].idxmax()].reset_index(drop=True)
     
     return df
 

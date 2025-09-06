@@ -462,8 +462,20 @@ class DNASeqModelTrainer:
             task_pred = pred[head_name]
             # Get corresponding labels
             task_label = label[task_type].to(self.local_rank, non_blocking=True)
-
             # Compute loss
+            if "transcripts" in loss_name:
+                # get transcripts masks
+                if "transcripts_mask" in label:
+                    transcripts_mask = label["transcripts_mask"].to(self.local_rank, non_blocking=True) # total_transcripts x bsz x n_window
+                else:
+                    raise ValueError(f"Transcripts mask not found in label for loss {loss_name}")
+                cell_data = label_meta[label_meta["modality"] == "RNA"]
+                pred_subset = task_pred[:, :, cell_data.index.tolist(), ...] # bsz x n_window x cell_types
+                label_subset = task_label[:, :, cell_data["label_dim"].tolist()] # bsz x n_window x cell_types
+                # aggregate by label_mask
+                pred_transcripts = torch.einsum("tbn,bnc->tc", pred_subset, transcripts_mask) # total_transcripts x cell_types
+                label_transcripts = torch.einsum("tbn,bnc->tc", label_subset, transcripts_mask) # total_transcripts x cell_types
+                loss_value = criterion(pred_transcripts, label_transcripts)
             if "cross_cell" in loss_name:
                 loss_value = 0
                 for _, cell_data in label_meta.groupby("modality"):

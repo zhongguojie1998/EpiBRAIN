@@ -133,19 +133,21 @@ if __name__ == '__main__':
     # %% plot
     cell_type_info = pd.read_csv('Data/data_config/basel_ganglia_complete_v1.csv', index_col=0)
     rna_track_info['celltype_n'] = cell_type_info['celltype_n'].groupby(cell_type_info['exp']).first().loc[rna_track_info['trial']].values
-    fig, ax = plt.subplots()
-    sns.scatterplot(x=rna_track_info['raw_corr_pearson'], 
-                    y=rna_track_info['corr_canonical_pearson'], 
+    fig, ax = plt.subplots(figsize=(4, 4))
+    sns.scatterplot(x=rna_track_info['raw_corr_spearman'], 
+                    y=rna_track_info['corr_canonical_spearman'], 
                     hue=np.log(rna_track_info['celltype_n']),
                     ax=ax)
     # add diagnal line using sns
     sns.lineplot(x=[0, 1], y=[0, 1], color='k', linestyle='--', ax=ax)
-    ax.set_xlabel('RNA 32bp Pearson Correlation')
-    ax.set_ylabel('RNA canonical transcript Pearson Correlation')
+    ax.set_xlabel('RNA 32bp Spearman Correlation')
+    ax.set_ylabel('RNA canonical transcript Spearman Correlation')
     # %% visualize a certain cell type
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=(5, 5))
     sns.scatterplot(x=np.log1p(raw_predictions[gene_info_canonical.index, rna_track_info['trial']=='Oligodendrocyte_RNA']), 
                     y=np.log1p(raw_labels[gene_info_canonical.index, rna_track_info['trial']=='Oligodendrocyte_RNA']), 
                     ax=ax)
     ax.set_xlabel('RNA 32bp predictions')
     ax.set_ylabel('RNA 32bp labels')
+
+# %%

@@ -154,4 +154,4 @@ class CrossCellMultinomialLoss(nn.Module):
             return loss
 
 
-LOSS_DICT = {"poisson": nn.PoissonNLLLoss, "poisson_mn": PoissonMultinomialLoss, "cross_cell_mn": CrossCellMultinomialLoss}
+LOSS_DICT = {"poisson": nn.PoissonNLLLoss, "poisson_mn": PoissonMultinomialLoss, "cross_cell_mn": CrossCellMultinomialLoss, "transcripts_poisson_mn": PoissonMultinomialLoss, "transcripts_cross_cell_mn": CrossCellMultinomialLoss}

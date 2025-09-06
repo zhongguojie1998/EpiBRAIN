@@ -8,6 +8,7 @@ import time
 from functools import partial
 
 import numpy as np
+import torch
 import pandas as pd
 from utils.logging import LOGGER_PREFIX, LazyLogger
 
@@ -111,6 +112,32 @@ def get_trail_value_mp(
 
     return None
 
+
+# get RNA transcripts locations
+def process_transcript_region(mseq, window_size, n_window, storage_path):
+    # only keep the longest transcript and full-length transcripts in the region
+    transcripts_df = get_transcripts_in_region(f"{mseq.chr}:{mseq.start}-{mseq.end}", window_size=window_size, n_window=n_window,
+                                                filter_to_full_transcript=True, filter_to_longest=True)
+    # transform transcripts_df to a new track for 0-1 mask, with dim (1, n_window, n_transcripts), and save the transcript IDs and gene names
+    # when we get a output of bsz x n_window x RNA_dim (cell types), we can integrate it with the mask to get the RNA-specific output
+    # we do it like this, first get a mask of n_transcripts_total x bsz x n_window, then we get n_transcripts_total x RNA_dim predictions and labels
+    # then we apply poisson multinomial in two dimensions, cell type dimension, then across cell type dimension
+    # now we make the 0-1 mask with dim (1, n_window, n_transcripts), based on the start_bin_idx, end_bin_idx columns in transcripts_df
+    transcripts_mask = np.zeros((1, n_window, len(transcripts_df)), dtype=np.float32)
+    for i, (_, transcript) in enumerate(transcripts_df.iterrows()):
+        start_bin = int(transcript['start_bin_idx'])
+        end_bin = int(transcript['end_bin_idx'])
+        # Ensure bin indices are within valid range
+        start_bin = max(0, min(start_bin, n_window - 1))
+        end_bin = max(0, min(end_bin, n_window - 1))
+        # Set mask to 1 for bins where this transcript is present
+        transcripts_mask[0, start_bin:end_bin + 1, i] = 1.0
+    # save it to a torch pt file
+    torch.save({"transcripts_mask": transcripts_mask,
+                "transcript_ids": transcripts_df['transcriptID'].tolist(),
+                "gene_names": transcripts_df['geneName'].tolist()
+                }, f"{storage_path}/data/{mseq.chr}_{mseq.start}_{mseq.end}_transcripts.pt")
+    
 
 def preprocess(
     storage_path,
@@ -217,7 +244,7 @@ def preprocess(
 
         ################################################################
         # divide between train/valid/test (contigs)
-        ################################################################\
+        ################################################################
 
         if folds is not None:
             fold_labels = ["fold%d" % fi for fi in range(folds)]
@@ -349,14 +376,16 @@ def preprocess(
                 for trial in failed_targets:
                     f.write(f"{trial}\n")
 
-        # get RNA transcripts locations
-        for mseq in mseqs:
-            transcripts_df = get_transcripts_in_region(f"{mseq.chr}:{mseq.start}-{mseq.end}", window_size=window_size, n_window=n_window)
-            
-            if not transcripts_df.empty:
-                longest_transcript = transcripts_df.loc[transcripts_df['length'].idxmax()]
-                mseq.rna_transcript = longest_transcript['transcriptID']
-                mseq.rna_gene = longest_transcript['geneName']
+        # process transcripts for each model sequence
+        logger.info("Start to process transcripts for each model sequence")
+        process_transcript_region_prebound = partial(
+            process_transcript_region,
+            window_size=window_size,
+            n_window=n_window,
+            storage_path=storage_path
+        )
+        with mp.Pool(processes=num_worker) as pool:
+            pool.map(process_transcript_region_prebound, mseqs)
 
         ################################################################
         # stats

@@ -773,7 +773,9 @@ def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
         label_data = torch.tensor(label_data, dtype=precision)
         label_dict[task_type] = label_data
 
-    # TODO: we need to add gene level mask here to enable RNA gene expression count loss
+    # TODO: we have added gene level mask here to enable RNA gene expression count loss, 
+    # however we can't aggregate it all into a single tensor since different sequences 
+    # may have different number of genes, we need to save it separately
     if preload_data:
         # save the aggregated data
         for dataset_type, tmp in tqdm(todo.groupby(3), desc="Saving label"):
