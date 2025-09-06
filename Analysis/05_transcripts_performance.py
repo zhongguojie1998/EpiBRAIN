@@ -4,7 +4,7 @@ import os
 PWD = '/gpfs/commons/groups/ren_lab/guojiezhong/BICAN'
 sys.path.append(f'{PWD}/')
 os.chdir(PWD)
-from Analysis.get_transcripts import get_transcripts_in_region
+from Model.utils.get_transcripts import get_transcripts_in_region
 import torch
 import pandas as pd
 import numpy as np

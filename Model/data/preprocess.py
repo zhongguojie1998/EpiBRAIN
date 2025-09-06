@@ -12,7 +12,7 @@ import torch
 import pandas as pd
 from utils.logging import LOGGER_PREFIX, LazyLogger
 
-from Analysis.get_transcripts import get_transcripts_in_region
+from Model.utils.get_transcripts import get_transcripts_in_region
 
 from .data_utils import (
     STD_CHR,
