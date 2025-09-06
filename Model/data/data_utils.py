@@ -579,6 +579,9 @@ def get_labels(
             seq_cov = seq_cov.sum(axis=1, dtype="float32")
             # seq_cov = -1 + (1+seq_cov)**0.75
             seq_cov = -1 + np.sqrt(1 + seq_cov)
+        elif sum_stat == "sum_three_quarter":
+            seq_cov = seq_cov.sum(axis=1, dtype="float32")
+            seq_cov = seq_cov ** (3 / 4)
         elif sum_stat in ["mean", "avg"]:
             seq_cov = seq_cov.mean(axis=1, dtype="float32")
         elif sum_stat in ["mean_sqrt", "avg_sqrt"]:
@@ -596,7 +599,7 @@ def get_labels(
             logger.error('ERROR: Unrecognized summary statistic "%s".' % sum_stat)
             exit(1)
 
-        if umap_npy_path is not None:
+        if umap_npy_path is not None and umap_pct is not None:
             umap_cov = np.percentile(seq_cov, 100 * umap_pct)
             seq_cov[unmap_mask[si, :]] = np.minimum(seq_cov[unmap_mask[si, :]], umap_cov)
 

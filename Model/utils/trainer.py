@@ -472,6 +472,16 @@ class DNASeqModelTrainer:
                 cell_data = label_meta[label_meta["modality"] == "RNA"]
                 pred_subset = task_pred[:, :, cell_data.index.tolist(), ...] # bsz x n_window x cell_types
                 label_subset = task_label[:, :, cell_data["label_dim"].tolist()] # bsz x n_window x cell_types
+                # transform label_subset back to original scale
+                # TODO: enable getting the soft clip value from config
+                scale = 0.3
+                label_subset = label_subset / scale
+                pred_subset = pred_subset / scale
+                soft_clip_mask = label_subset > 384
+                label_subset[soft_clip_mask] = (label_subset[soft_clip_mask] - 384 + 1) ** 2 + 384 - 1
+                label_subset = label_subset ** (4 / 3)
+                # transform pred_subset back to original scale
+                pred_subset = pred_subset ** (4 / 3)
                 # aggregate by label_mask
                 pred_transcripts = torch.einsum("tbn,bnc->tc", pred_subset, transcripts_mask) # total_transcripts x cell_types
                 label_transcripts = torch.einsum("tbn,bnc->tc", label_subset, transcripts_mask) # total_transcripts x cell_types

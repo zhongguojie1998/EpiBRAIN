@@ -131,7 +131,7 @@ def process_transcript_region(mseq, window_size, n_window, storage_path):
         start_bin = max(0, min(start_bin, n_window - 1))
         end_bin = max(0, min(end_bin, n_window - 1))
         # Set mask to 1 for bins where this transcript is present
-        transcripts_mask[0, start_bin:end_bin + 1, i] = 1.0
+        transcripts_mask[0, start_bin:end_bin + 1, i] = 1.0 / (end_bin - start_bin + 1)  # normalize by length
     # save it to a torch pt file
     torch.save({"transcripts_mask": transcripts_mask,
                 "transcript_ids": transcripts_df['transcriptID'].tolist(),

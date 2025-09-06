@@ -85,8 +85,11 @@ class GenomeIntervalDataset(Dataset):
 
         if self.return_augs:
             # here, if reverse, the sequence is still 5'->3', which means the corresponding label should be reversed
+            # if RNA_minus and RNA_plus are in the label, they should be swapped
             if token_dict["rand_reverse"]:
                 label = {k: torch.flip(v, dims=[0]) for k, v in label.items()}
+            if "RNA_minus" in label and "RNA_plus" in label:
+                label["RNA_minus"], label["RNA_plus"] = label["RNA_plus"], label["RNA_minus"]
 
         return one_hot if not self.return_token_dict else token_dict, label, ind
 
