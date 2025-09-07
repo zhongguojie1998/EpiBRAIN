@@ -732,8 +732,24 @@ class CovFace:
             self.cov_open.close()
 
 
+META_INFO_COLS = [
+    "exp",
+    "task",
+    "sum_stat",
+    "baseline_pct",
+    "umap_pct",
+    "scale",
+    "extreme_clip_pct",
+    "offset",
+    "anchor_target",
+    "anchor_pct",
+    "clip",
+    "clip_soft",
+]
+
+
 # TODO: the current implementation is based on regression task, we may need an extra function for classification task
-def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
+def aggregate_data(storage_path, preload_data, todo=pd.DataFrame(), meta_info=pd.DataFrame(), precision="float32"):
     """Aggregate the label data from multiple files into file designed for model training."""
 
     separate_label_file = [
@@ -754,6 +770,25 @@ def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
     label_meta[["cell_type", "modality"]] = label_meta["trial"].str.rsplit("_", n=1, expand=True)
     label_meta = label_meta.sort_values(["task", "cell_type", "modality"])
     label_meta = label_meta[["trial", "cell_type", "modality", "task", "file"]]
+    ## incorporate meta_info if provided
+    if not meta_info.empty:
+        meta_info = meta_info[[i for i in META_INFO_COLS if i in meta_info.columns]].copy()
+        # add default values for missing columns
+        if "sum_stat" not in meta_info.columns:
+            meta_info["sum_stat"] = "sum"
+        if "baseline_pct" not in meta_info.columns:
+            meta_info["baseline_pct"] = 0.5
+        if "umap_pct" not in meta_info.columns:
+            meta_info["umap_pct"] = 0.5
+        if "scale" not in meta_info.columns:
+            meta_info["scale"] = 1
+        label_meta = pd.merge(
+            label_meta, meta_info.rename(columns={"exp": "trial"}), on=["trial", "task"], how="left"
+        )
+    if label_meta.isnull().values.any():
+        logger.warning(
+            f"Some label files are missing meta information, please double check at `{storage_path}/raw_label_meta.csv`!"
+        )
     label_meta.to_csv(f"{storage_path}/raw_label_meta.csv", index=False)
 
     # get all the label data
@@ -776,8 +811,8 @@ def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
         label_data = torch.tensor(label_data, dtype=precision)
         label_dict[task_type] = label_data
 
-    # TODO: we have added gene level mask here to enable RNA gene expression count loss, 
-    # however we can't aggregate it all into a single tensor since different sequences 
+    # TODO: we have added gene level mask here to enable RNA gene expression count loss,
+    # however we can't aggregate it all into a single tensor since different sequences
     # may have different number of genes, we need to save it separately
     if preload_data:
         # save the aggregated data

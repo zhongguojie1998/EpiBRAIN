@@ -147,7 +147,7 @@ def process_transcript_region(mseq, window_size, n_window, storage_path, force_r
                         "transcript_ids": transcripts_df['transcriptID'].tolist(),
                         "gene_names": transcripts_df['geneName'].tolist()
                         }, f"{storage_path}/data/{mseq.chr}_{mseq.start}_{mseq.end}_transcripts.pt")
-    
+
 
 def preprocess(
     storage_path,
@@ -452,6 +452,7 @@ def preprocess(
         logger.info(f"Preprocess data already exists at {storage_path}. Skipping preprocess step.")
 
     # start to aggregate the preprocessed data
+    trial_files = pd.read_csv(trial_summary_path)
     if preload_data:
         if force_restart or not os.path.exists(f"{storage_path}/data/all_label.pt"):
             logger.info("Start to aggregate data")
@@ -459,7 +460,8 @@ def preprocess(
             aggregate_data(
                 storage_path=storage_path,
                 preload_data=True,
-                task=data,
+                todo=data,
+                meta_info=trial_files,
                 precision=precision,
             )
             logger.info("Finish aggregation")
@@ -475,6 +477,7 @@ def preprocess(
                 storage_path=storage_path,
                 preload_data=False,
                 todo=data[data["generate"]],
+                meta_info=trial_files,
                 precision=precision,
             )
             logger.info("Finish aggregation")
