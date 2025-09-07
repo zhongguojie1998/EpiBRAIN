@@ -16,7 +16,7 @@ test_only: False # whether to only run the test stage, if True, load_checkpoint 
 finetune: True # whether to finetune the model
 
 ## training hyperparameter
-lr: 5e-5 # maximum learning rate
+lr: 1e-4 # maximum learning rate
 lr_warmup_step: 10000  # gradually increase lr from 0 to `lr` in given optimization steps
 batch_size: 3 # batch size for one single GPU
 total_epoch: 200  # maximum training epoch number
