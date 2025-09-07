@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=24                       # number of cores per tasks
 #SBATCH --gres=gpu:3                            # number of gpus
 #SBATCH --mem=360gb
-#SBATCH --time 72:00:00                         # maximum execution time (HH:MM:SS)
+#SBATCH --time 144:00:00                         # maximum execution time (HH:MM:SS)
 #SBATCH --output=%x-%j.out                      # output file name
 
 date;hostname;pwd
@@ -25,6 +25,6 @@ source /gpfs/commons/home/guojiezhong/.bashrc
 
 conda activate BICAN
 
-/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Model/train.py -c default -x "logging.exp_name=basel_ganglia_complete_v1" -x "training=default_nygc" 
+/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Model/train.py -c default -x "logging.exp_name=basel_ganglia_complete_v2" -x "training=default_nygc" 
 
 date

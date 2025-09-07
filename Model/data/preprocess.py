@@ -127,7 +127,6 @@ def process_transcript_region(mseq, window_size, n_window, storage_path, force_r
         # now we make the 0-1 mask with dim (1, n_window, n_transcripts), based on the start_bin_idx, end_bin_idx columns in transcripts_df
         # if no transcripts, just make an empty mask and save
         if transcripts_df.shape[0] == 0:
-            n_window = (mseq.end - mseq.start) // window_size
             transcripts_mask = np.zeros((1, n_window, 0), dtype=np.float32)
             torch.save({"transcripts_mask": torch.from_numpy(transcripts_mask),
                         "transcript_ids": [],
