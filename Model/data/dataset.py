@@ -115,7 +115,7 @@ def collate_fn(batch):
                 # 1 x n_window x n_transcripts
                 # Transform to n_transcripts_total x bsz x n_window
                 transformed_labels = []
-                for label, idx in enumerate(labels):
+                for idx, label in enumerate(labels):
                     transcripts_mask = label[task_key]
                     # ensure 3D: 1 x n_window x n_transcripts
                     if transcripts_mask.dim() == 2:
@@ -124,8 +124,10 @@ def collate_fn(batch):
                     transcripts_mask = transcripts_mask.permute(2, 0, 1)
                     # expand dim 1 to batch size
                     transcripts_mask = transcripts_mask.expand(-1, len(batch), -1)
-                    # fill dim 1 with batch index mask
-                    transcripts_mask[:, idx, :] = 1
+                    # create mask to zero out all batch dims except idx-th
+                    batch_mask = torch.zeros(len(batch), dtype=torch.bool)
+                    batch_mask[idx] = True
+                    transcripts_mask = transcripts_mask * batch_mask.view(1, -1, 1)
                     transformed_labels.append(transcripts_mask)
                 # concatenate all transcripts across the batch
                 batched_labels[task_key] = torch.cat(transformed_labels, dim=0)

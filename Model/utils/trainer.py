@@ -277,11 +277,15 @@ class DNASeqModelTrainer:
                 if split != "train":
                     # for valid and test, we disable the data augumentation
                     config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
+                # if transcripts are in self.training_config.loss.keys(), we need to return the transcripts mask
+                load_task = set([v["task_type"] for v in self.head_data_setting.values()])
+                if any(["transcripts" in i for i in self.training_config.loss.keys()]):
+                    load_task.add("transcripts")
                 self.data_func[split]["dataset"] = GenomeIntervalDataset(
                     split,
                     **config,
                     external_rand_seed=self.data_rand_seed,
-                    load_task=set([v["task_type"] for v in self.head_data_setting.values()]),
+                    load_task=load_task,
                 )
 
             except Exception as e:
@@ -469,7 +473,8 @@ class DNASeqModelTrainer:
                     transcripts_mask = label["transcripts_mask"].to(self.local_rank, non_blocking=True) # total_transcripts x bsz x n_window
                 else:
                     raise ValueError(f"Transcripts mask not found in label for loss {loss_name}")
-                cell_data = label_meta[label_meta["modality"] == "RNA"]
+                # TODO: split the transcript info to minus strand and plus strand, and handle them separately
+                cell_data = label_meta[label_meta["modality"].str.contains("RNA")]
                 pred_subset = task_pred[:, :, cell_data.index.tolist(), ...] # bsz x n_window x cell_types
                 label_subset = task_label[:, :, cell_data["label_dim"].tolist()] # bsz x n_window x cell_types
                 # transform label_subset back to original scale
@@ -483,9 +488,10 @@ class DNASeqModelTrainer:
                 # transform pred_subset back to original scale
                 pred_subset = pred_subset ** (4 / 3)
                 # aggregate by label_mask
-                pred_transcripts = torch.einsum("tbn,bnc->tc", pred_subset, transcripts_mask) # total_transcripts x cell_types
-                label_transcripts = torch.einsum("tbn,bnc->tc", label_subset, transcripts_mask) # total_transcripts x cell_types
-                loss_value = criterion(pred_transcripts, label_transcripts)
+                pred_transcripts = torch.einsum("tbn,bnc->tc", transcripts_mask, pred_subset) # total_transcripts x cell_types
+                label_transcripts = torch.einsum("tbn,bnc->tc", transcripts_mask, label_subset) # total_transcripts x cell_types
+                # unsqueeze to make it 1 x total_transcripts x cell_types, looks like batch size 1
+                loss_value = criterion(pred_transcripts.unsqueeze(0), label_transcripts.unsqueeze(0))
             if "cross_cell" in loss_name:
                 loss_value = 0
                 for _, cell_data in label_meta.groupby("modality"):

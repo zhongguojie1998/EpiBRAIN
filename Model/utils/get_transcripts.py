@@ -42,7 +42,8 @@ def overlaps(region_start: int, region_end: int, transcript_start: int, transcri
     """Check if two genomic intervals overlap."""
     return not (region_end < transcript_start or region_start > transcript_end)
 
-def get_transcripts_in_region(region: str, gtf_file: str = "Data/source/gencode.v48.annotation.gtf.gz", window_size=32, n_window=None, filter_to_full_transcript=False, filter_to_longest=False) -> pd.DataFrame:
+def get_transcripts_in_region(region: str, gtf_file: str = "Data/source/gencode.v48.annotation.gtf.gz", window_size=32, n_window=None, 
+                              filter_to_full_transcript=False, filter_to_longest=False) -> pd.DataFrame:
     """
     Extract all transcripts that overlap with given genomic region.
     
