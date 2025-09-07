@@ -254,7 +254,6 @@ class DNASeqModelTrainer:
                 task_label_meta = full_info.merge(
                     task_label_meta, on=["cell_type", "modality"], how="left"
                 ).dropna()
-                task_label_meta = task_label_meta[["trial", "cell_type", "modality", "task", "file"]]
 
             task_label_meta["label_dim"] = range(len(task_label_meta))
             task_label_meta.index.name = "dim"
@@ -470,26 +469,50 @@ class DNASeqModelTrainer:
             if "transcripts" in loss_name:
                 # get transcripts masks
                 if "transcripts_mask" in label:
-                    transcripts_mask = label["transcripts_mask"].to(self.local_rank, non_blocking=True) # total_transcripts x bsz x n_window
+                    transcripts_mask = label["transcripts_mask"].to(
+                        self.local_rank, non_blocking=True
+                    )  # total_transcripts x bsz x n_window
                 else:
                     raise ValueError(f"Transcripts mask not found in label for loss {loss_name}")
                 # TODO: split the transcript info to minus strand and plus strand, and handle them separately
                 cell_data = label_meta[label_meta["modality"].str.contains("RNA")]
-                pred_subset = task_pred[:, :, cell_data.index.tolist(), ...] # bsz x n_window x cell_types
-                label_subset = task_label[:, :, cell_data["label_dim"].tolist()] # bsz x n_window x cell_types
-                # transform label_subset back to original scale
-                # TODO: enable getting the soft clip value from config
-                scale = 0.3
-                label_subset = label_subset / scale
-                pred_subset = pred_subset / scale
-                soft_clip_mask = label_subset > 384
-                label_subset[soft_clip_mask] = (label_subset[soft_clip_mask] - 384 + 1) ** 2 + 384 - 1
+                pred_subset = task_pred[:, :, cell_data.index.tolist(), ...]  # bsz x n_window x cell_types
+                label_subset = task_label[:, :, cell_data["label_dim"].tolist()]  # bsz x n_window x cell_types
+
+                ## transform label_subset back to original scale
+                ### scale para
+                scale_tensor = (
+                    torch.tensor(cell_data["scale"].values, device=label_subset.device).unsqueeze(0).unsqueeze(0)
+                )  # bsz x n_window x cell_types
+                label_subset = label_subset / scale_tensor
+                pred_subset = pred_subset / scale_tensor
+                ### soft clip para
+                if "clip_soft" not in cell_data.columns:
+                    soft_clip_tensor = torch.full((cell_data.shape[0],), torch.inf, device=label_subset.device)
+                else:
+                    clip_arr = cell_data["clip_soft"].fillna(torch.inf).values
+                    soft_clip_tensor = torch.tensor(clip_arr, device=label_subset.device)
+
+                soft_clip_tensor = soft_clip_tensor.unsqueeze(0).unsqueeze(0)  # -> (1,1,cell_types)
+
+                #### get soft clip back to original scale
+                label_subset = torch.where(
+                    label_subset > soft_clip_tensor,
+                    (label_subset - soft_clip_tensor + 1) ** 2 + soft_clip_tensor - 1,
+                    label_subset,
+                )
                 label_subset = label_subset ** (4 / 3)
-                # transform pred_subset back to original scale
+                
+                ## transform pred_subset back to original scale
                 pred_subset = pred_subset ** (4 / 3)
+
                 # aggregate by label_mask
-                pred_transcripts = torch.einsum("tbn,bnc->tc", transcripts_mask, pred_subset) # total_transcripts x cell_types
-                label_transcripts = torch.einsum("tbn,bnc->tc", transcripts_mask, label_subset) # total_transcripts x cell_types
+                pred_transcripts = torch.einsum(
+                    "tbn,bnc->tc", transcripts_mask, pred_subset
+                )  # total_transcripts x cell_types
+                label_transcripts = torch.einsum(
+                    "tbn,bnc->tc", transcripts_mask, label_subset
+                )  # total_transcripts x cell_types
                 # unsqueeze to make it 1 x total_transcripts x cell_types, looks like batch size 1
                 loss_value = criterion(pred_transcripts.unsqueeze(0), label_transcripts.unsqueeze(0))
             if "cross_cell" in loss_name:
@@ -745,7 +768,7 @@ class DNASeqModelTrainer:
 
         if log_loss:
             running_loss_local = torch.tensor(0.0, device=self.local_rank)
-        if save_pred and save_method=='merge':
+        if save_pred and save_method == "merge":
             preds = {}
             labels = {}
             inds = []
@@ -825,7 +848,7 @@ class DNASeqModelTrainer:
             global_avg_loss = total_loss / (len(dataloader) * self.world_size)
             self.metrics.update({f"{log_prefix}/loss": global_avg_loss.cpu().item()})
 
-        if save_pred and save_method=='merge':
+        if save_pred and save_method == "merge":
             # we have to pre save all the res and later aggregate them
             torch.save(
                 {
@@ -1157,17 +1180,23 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
 
             if trainer.data_func["train"]["data_loader"] is not None:
                 with timer(f"[Train/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                    trainer.infer_step(log_loss=False, log_prefix="Train", save_pred=save_pred_res, save_method=save_method)
+                    trainer.infer_step(
+                        log_loss=False, log_prefix="Train", save_pred=save_pred_res, save_method=save_method
+                    )
                 blocking_sync_wait(world_size)
 
             if trainer.data_func["valid"]["data_loader"] is not None:
                 with timer(f"[Valid/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                    trainer.infer_step(log_loss=False, log_prefix="Valid", save_pred=save_pred_res, save_method=save_method)
+                    trainer.infer_step(
+                        log_loss=False, log_prefix="Valid", save_pred=save_pred_res, save_method=save_method
+                    )
                 blocking_sync_wait(world_size)
 
             if trainer.data_func["test"]["data_loader"] is not None:
                 with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                    trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=save_pred_res, save_method=save_method)
+                    trainer.infer_step(
+                        log_loss=False, log_prefix="Test", save_pred=save_pred_res, save_method=save_method
+                    )
                 blocking_sync_wait(world_size)
 
             # save the raw preds and write the metrics
