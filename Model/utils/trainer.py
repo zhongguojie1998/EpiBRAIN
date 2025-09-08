@@ -470,7 +470,7 @@ class DNASeqModelTrainer:
                 # get transcripts masks
                 if "transcripts_mask" in label:
                     transcripts_mask = label["transcripts_mask"].to(
-                        self.local_rank, non_blocking=True
+                        self.local_rank, non_blocking=True, dtype=task_pred.dtype
                     )  # total_transcripts x bsz x n_window
                 else:
                     raise ValueError(f"Transcripts mask not found in label for loss {loss_name}")
@@ -482,16 +482,16 @@ class DNASeqModelTrainer:
                 ## transform label_subset back to original scale
                 ### scale para
                 scale_tensor = (
-                    torch.tensor(cell_data["scale"].values, device=label_subset.device).unsqueeze(0).unsqueeze(0)
+                    torch.tensor(cell_data["scale"].values, device=label_subset.device, dtype=task_pred.dtype).unsqueeze(0).unsqueeze(0)
                 )  # bsz x n_window x cell_types
                 label_subset = label_subset / scale_tensor
                 pred_subset = pred_subset / scale_tensor
                 ### soft clip para
                 if "clip_soft" not in cell_data.columns:
-                    soft_clip_tensor = torch.full((cell_data.shape[0],), torch.inf, device=label_subset.device)
+                    soft_clip_tensor = torch.full((cell_data.shape[0],), torch.inf, device=label_subset.device, dtype=task_pred.dtype)
                 else:
                     clip_arr = cell_data["clip_soft"].fillna(torch.inf).values
-                    soft_clip_tensor = torch.tensor(clip_arr, device=label_subset.device)
+                    soft_clip_tensor = torch.tensor(clip_arr, device=label_subset.device, dtype=task_pred.dtype)
 
                 soft_clip_tensor = soft_clip_tensor.unsqueeze(0).unsqueeze(0)  # -> (1,1,cell_types)
 
@@ -506,6 +506,7 @@ class DNASeqModelTrainer:
                     torch.tensor(
                         np.where(cell_data["sum_stat"] == "sum_three_quarter", 4 / 3, 1.0),
                         device=label_subset.device,
+                        dtype=task_pred.dtype
                     )
                     .unsqueeze(0)
                     .unsqueeze(0)
