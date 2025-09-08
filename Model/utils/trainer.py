@@ -501,10 +501,18 @@ class DNASeqModelTrainer:
                     (label_subset - soft_clip_tensor + 1) ** 2 + soft_clip_tensor - 1,
                     label_subset,
                 )
-                label_subset = label_subset ** (4 / 3)
-                
+                ### sum stat para
+                sum_stat_tensor = (
+                    torch.tensor(
+                        np.where(cell_data["sum_stat"] == "sum_three_quarter", 4 / 3, 1.0),
+                        device=label_subset.device,
+                    )
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                )  # -> shape (1,1,cell_types)
+                label_subset = label_subset**sum_stat_tensor
                 ## transform pred_subset back to original scale
-                pred_subset = pred_subset ** (4 / 3)
+                pred_subset = pred_subset**sum_stat_tensor
 
                 # aggregate by label_mask
                 pred_transcripts = torch.einsum(
