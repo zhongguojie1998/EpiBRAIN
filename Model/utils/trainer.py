@@ -114,53 +114,48 @@ class CrossColumnPearsonR(tm.Metric):
     """
     def __init__(self):
         super().__init__()
-        self.add_state("preds", default=[], dist_reduce_fx="cat")
-        self.add_state("targets", default=[], dist_reduce_fx="cat")
+        self.add_state("corr_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("total_samples", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, preds: torch.Tensor, target: torch.Tensor):
         """
         preds, target: MxN tensors where M is samples, N is features/columns
-        Accumulate all batches for later computation
+        Calculate correlations for current batch and accumulate
         """
         assert preds.shape == target.shape, f"Shape mismatch: {preds.shape} vs {target.shape}"
-        
-        # Accumulate predictions and targets
-        self.preds.append(preds)
-        self.targets.append(target)
 
-    def compute(self):
-        if len(self.preds) == 0:
-            return torch.tensor(0.0)
-        
-        # Concatenate all accumulated batches along dimension 0
-        all_preds = torch.cat(self.preds, dim=0)    # shape: (total_M, N)
-        all_targets = torch.cat(self.targets, dim=0) # shape: (total_M, N)
-        
-        # Calculate correlation for each row
-        row_corrs = []
-        for i in range(all_preds.shape[0]):
-            pred_row = all_preds[i, :]
-            target_row = all_targets[i, :]
-            
+        # Calculate correlation for each row in current batch
+        batch_corrs = []
+        for i in range(preds.shape[0]):
+            pred_row = preds[i, :]
+            target_row = target[i, :]
+
             # Calculate Pearson correlation efficiently for two vectors
             pred_centered = pred_row - pred_row.mean()
             target_centered = target_row - target_row.mean()
-            
+
             # Compute correlation using dot product formula
             numerator = torch.sum(pred_centered * target_centered)
             pred_norm = torch.norm(pred_centered)
             target_norm = torch.norm(target_centered)
-            
+
             # Avoid division by zero
             if pred_norm > 1e-8 and target_norm > 1e-8:
                 corr = numerator / (pred_norm * target_norm)
-                row_corrs.append(corr)
-        
-        if row_corrs:
-            # Return mean of all row correlations
-            return torch.mean(torch.stack(row_corrs))
-        else:
+                batch_corrs.append(corr)
+
+        if batch_corrs:
+            # Accumulate sum of correlations and count of valid samples
+            batch_corr_sum = torch.sum(torch.stack(batch_corrs))
+            self.corr_sum += batch_corr_sum
+            self.total_samples += len(batch_corrs)
+
+    def compute(self):
+        if self.total_samples == 0:
             return torch.tensor(0.0)
+
+        # Return mean of all accumulated correlations
+        return self.corr_sum / self.total_samples
 
 
 def get_metric_collection(prefix: str = "Valid/", config={}):
