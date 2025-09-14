@@ -65,12 +65,12 @@ def load_config(config_dir: str = ".", config_name: str = "default", overrides: 
             check="within",
         )
     if config.training.test_only:
-        input_check(
-            config.training.get("load_checkpoint", None),
-            None,
-            "When testing, you must load a checkpoint by specifying in `training.load_checkpoint`",
-            check="exclude",
-        )
+        # input_check(
+        #     config.training.get("load_checkpoint", None),
+        #     None,
+        #     "When testing, you must load a checkpoint by specifying in `training.load_checkpoint`",
+        #     check="exclude",
+        # )
         input_check(
             "test",
             config.data.get("used_dataset", []),
