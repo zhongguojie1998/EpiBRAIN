@@ -23,11 +23,11 @@ dataset2['ID'] = dataset2['chrom'].astype(str) + '_' + dataset2['pos'].astype(st
 dataset1['ID'] = dataset1['ID'].astype(str)
 dataset2['ID'] = dataset2['ID'].astype(str)
 # %% reorder columns
-dataset1 = dataset1.iloc[:, [0, 1, 12, 2, 3] + list(range(4, 12))]
-dataset2 = dataset2.iloc[:, [0, 1, 9, 2, 3] + list(range(4, 9))]
+dataset1 = dataset1.iloc[:, [0, 1, 12, 2, 3]]
+dataset2 = dataset2.iloc[:, [0, 1, 9, 2, 3]]
 # %% rename columns 0:5
-dataset1.columns = ['#CHROM', 'POS', 'ID', 'REF', 'ALT'] + list(dataset1.columns[5:])
-dataset2.columns = ['#CHROM', 'POS', 'ID', 'REF', 'ALT'] + list(dataset2.columns[5:])
+dataset1.columns = ['#CHROM', 'POS', 'ID', 'REF', 'ALT']
+dataset2.columns = ['#CHROM', 'POS', 'ID', 'REF', 'ALT']
 # %% save again
 dataset1.to_csv("Data/source/TraitGym/complex_traits_test.vcf", index=False, sep='\t')
 dataset2.to_csv("Data/source/TraitGym/mendelian_traits_test.vcf", index=False, sep='\t')
