@@ -1,14 +1,14 @@
 #!/bin/bash
 #
-#SBATCH --job-name=bican                    # name
+#SBATCH --job-name=bican                        # name
 #SBATCH --mail-user=gz2294@cumc.columbia.edu    # email
 #SBATCH --mail-type=ALL
 #SBATCH --nodes=1                               # nodes
 #SBATCH --ntasks-per-node=1                     # crucial - only 1 task per dist per node!
-#SBATCH --cpus-per-task=24                       # number of cores per tasks
+#SBATCH --cpus-per-task=24                      # number of cores per tasks
 #SBATCH --gres=gpu:3                            # number of gpus
-#SBATCH --mem=220gb
-#SBATCH --time 144:00:00                         # maximum execution time (HH:MM:SS)
+#SBATCH --mem=100gb
+#SBATCH --time 24:00:00                         # maximum execution time (HH:MM:SS)
 #SBATCH --output=%x-%j.out                      # output file name
 
 date;hostname;pwd
@@ -25,6 +25,6 @@ source /gpfs/commons/home/guojiezhong/.bashrc
 
 conda activate BICAN
 
-/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Model/train.py -c default -x "logging.exp_name=basel_ganglia_complete_v2" -x "training=default_nygc"
+/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Model/train.py -c default -x "logging.exp_name=basel_ganglia_complete_v2_test" -x "training=default_nygc" -x "training.test_only=True" -x "training.load_checkpoint=best_valid_loss"
 
 date

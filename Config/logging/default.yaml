@@ -15,3 +15,6 @@ res_dir: ./Res/${logging.exp_name}
 save_every: 1 # save checkpoint for every x epochs
 report_every: 1  # report basic training log (loss, model parameter (optional), etc.) for every x optimization steps (i.e. x effective batches)
 log_more: False # log more metrics during training, including model gradient and model parameter histogram. Only effective when using tensorboard
+
+## inference setup
+save_method: split

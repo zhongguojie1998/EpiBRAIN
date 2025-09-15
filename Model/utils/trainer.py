@@ -70,9 +70,9 @@ def create_optimizer_grouped_parameters(model, use_groups=True):
     return optimizer_grouped_parameters
 
 
-def aggregate_test_res(trainer, prefix="Test"):
+def aggregate_test_res(trainer, prefix="Test", remove_raw=True):
     # aggregate the results and clear per rank file
-    pattern = f"{trainer.logging_config.res_dir}/{prefix}_preds_rank_*_epoch_{trainer.current_epoch}.pt"
+    pattern = f"{trainer.logging_config.res_dir}/{prefix}_preds_rank_*_epoch_{trainer.current_epoch}_*.pt"
 
     file_list = glob.glob(pattern)
     if not file_list:
@@ -102,9 +102,9 @@ def aggregate_test_res(trainer, prefix="Test"):
             {"label": all_labels, "pred": all_preds, "index": all_inds},
             f"{trainer.logging_config.res_dir}/{prefix}_preds_epoch_{trainer.current_epoch}.pt",
         )
-
-        for file_path in file_list:
-            os.remove(file_path)
+        if remove_raw:
+            for file_path in file_list:
+                os.remove(file_path)
 
 
 class CrossColumnPearsonR(tm.Metric):
@@ -727,8 +727,16 @@ class DNASeqModelTrainer:
     def load_checkpoint(self):
 
         self.logger.info(f"Loading checkpoint from {self.training_config.load_checkpoint}")
+        # if load_checkpoint is best_valid_loss, we need to find the actual file
+        if self.training_config.load_checkpoint == "best_valid_loss":
+            load_file = f"{self.logging_config.checkpoint_dir}/chk_epoch_best_valid_loss.pt"
+        # else is a epoch number, which doesn't end with .pt
+        elif not self.training_config.load_checkpoint.endswith(".pt"):
+            load_file = f"{self.logging_config.checkpoint_dir}/chk_epoch_{self.training_config.load_checkpoint}.pt"
+        else:
+            load_file = self.training_config.load_checkpoint
         self.checkpoint = torch.load(
-            self.training_config.load_checkpoint, map_location=torch.device(self.local_rank)
+            load_file, map_location=torch.device(self.local_rank)
         )
 
         # since this is first called in the model initialization pipeline, the model and optimizers loads the checkpoint in their own functions instead of here
@@ -1326,10 +1334,9 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
 
             # save the raw preds and write the metrics
             if trainer.should_log:
-                aggregate_test_res(trainer, "Train")
-                aggregate_test_res(trainer, "Valid")
-                aggregate_test_res(trainer, "Test")
-
+                aggregate_test_res(trainer, "Train", remove_raw=True)
+                aggregate_test_res(trainer, "Valid", remove_raw=True)
+                aggregate_test_res(trainer, "Test", remove_raw=True)
                 metric_dict = trainer.metrics
                 if myconfig.logging.use_tensorboard:
                     for k, v in metric_dict.items():
