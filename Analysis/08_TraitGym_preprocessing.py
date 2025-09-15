@@ -15,16 +15,16 @@ import pandas as pd
 import numpy as np
 dataset1 = pd.read_csv("Data/source/TraitGym/complex_traits_test.csv")
 dataset2 = pd.read_csv("Data/source/TraitGym/mendelian_traits_test.csv")
-# %%
-dataset1['ID'] = dataset1['chrom'].astype(str) + '_' + dataset1['pos'].astype(str) + '_' + dataset1['ref'] + '/' + dataset1['alt']
-dataset2['ID'] = dataset2['chrom'].astype(str) + '_' + dataset2['pos'].astype(str) + '_' + dataset2['ref'] + '/' + dataset2['alt']
-
+# %% 
+dataset1['chrom'] = 'chr' + dataset1['chrom'].astype(str)
+dataset2['chrom'] = 'chr' + dataset2['chrom'].astype(str)
+dataset1['ID'] = dataset1['chrom'].astype(str) + '_' + dataset1['pos'].astype(str) + '_' + dataset1['ref'] + '_' + dataset1['alt']
+dataset2['ID'] = dataset2['chrom'].astype(str) + '_' + dataset2['pos'].astype(str) + '_' + dataset2['ref'] + '_' + dataset2['alt']
+dataset1['ID'] = dataset1['ID'].astype(str)
+dataset2['ID'] = dataset2['ID'].astype(str)
 # %% reorder columns
 dataset1 = dataset1.iloc[:, [0, 1, 12, 2, 3] + list(range(4, 12))]
 dataset2 = dataset2.iloc[:, [0, 1, 9, 2, 3] + list(range(4, 9))]
-# %% save again
-dataset1['chrom'] = 'chr' + dataset1['chrom'].astype(str)
-dataset2['chrom'] = 'chr' + dataset2['chrom'].astype(str)
 # %% rename columns 0:5
 dataset1.columns = ['#CHROM', 'POS', 'ID', 'REF', 'ALT'] + list(dataset1.columns[5:])
 dataset2.columns = ['#CHROM', 'POS', 'ID', 'REF', 'ALT'] + list(dataset2.columns[5:])
