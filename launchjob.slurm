@@ -3,10 +3,10 @@
 #SBATCH --job-name=bican                    # name
 #SBATCH --mail-user=gz2294@cumc.columbia.edu    # email
 #SBATCH --mail-type=ALL
-#SBATCH --nodes=2                               # number of nodes
+#SBATCH --nodes=1                               # nodes
 #SBATCH --ntasks-per-node=1                     # crucial - only 1 task per dist per node!
 #SBATCH --cpus-per-task=24                       # number of cores per tasks
-#SBATCH --gres=gpu:4                            # number of gpus per node
+#SBATCH --gres=gpu:3                            # number of gpus
 #SBATCH --mem=220gb
 #SBATCH --time 144:00:00                         # maximum execution time (HH:MM:SS)
 #SBATCH --output=%x-%j.out                      # output file name
@@ -25,24 +25,6 @@ source /gpfs/commons/home/guojiezhong/.bashrc
 
 conda activate BICAN
 
-# Get node list and setup multinode variables
-export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
-export MASTER_PORT=29500
-export WORLD_SIZE=$((SLURM_NNODES * SLURM_NTASKS_PER_NODE))
-export NODE_RANK=$SLURM_NODEID
-
-echo "MASTER_ADDR: $MASTER_ADDR"
-echo "MASTER_PORT: $MASTER_PORT"
-echo "WORLD_SIZE: $WORLD_SIZE"
-echo "NODE_RANK: $NODE_RANK"
-echo "SLURM_PROCID: $SLURM_PROCID"
-
-torchrun \
-    --nnodes=$SLURM_NNODES \
-    --nproc_per_node=4 \
-    --node_rank=$SLURM_NODEID \
-    --master_addr=$MASTER_ADDR \
-    --master_port=$MASTER_PORT \
-    Model/train.py -c default -x "logging.exp_name=basel_ganglia_complete_v2_multinode" -x "training=default_nygc" --torchrun
+/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Model/train.py -c default -x "logging.exp_name=basel_ganglia_complete_v2" -x "training=default_nygc"
 
 date
