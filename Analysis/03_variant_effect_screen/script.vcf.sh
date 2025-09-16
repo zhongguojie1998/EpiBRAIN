@@ -80,7 +80,7 @@ fi
 python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
     -h5 "$H5_FILE" \
     -l "$LABEL_META" \
-    -e "$EXPERIMENT" -s raw_diff -s log_square
+    -e "$EXPERIMENT" -s raw_diff -s log_square -s local_raw_diff -s local_log_square
 
 # Build -g arguments for multiple chunks
 G_ARGS=""
