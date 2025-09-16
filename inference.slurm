@@ -25,6 +25,6 @@ source /gpfs/commons/home/guojiezhong/.bashrc
 
 conda activate BICAN
 
-/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Model/train.py -c default -x "logging.exp_name=basel_ganglia_complete_v2_test" -x "training=default_nygc" -x "training.test_only=True" -x "training.load_checkpoint=best_valid_loss"
+/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Model/train.py -c default -x "logging.exp_name=basel_ganglia_complete_v2_test" -x "training=default_nygc" -x "training.test_only=True" -x "data=test" -x "training.load_checkpoint=best_valid_loss"
 
 date

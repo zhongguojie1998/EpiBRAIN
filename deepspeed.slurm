@@ -5,10 +5,10 @@
 #SBATCH --mail-type=ALL
 #SBATCH --nodes=2                               # nodes
 #SBATCH --ntasks-per-node=1                     # crucial - only 1 task per dist per node!
-#SBATCH --cpus-per-task=8                       # number of cores per tasks
-#SBATCH --gres=gpu:1                            # number of gpus
-#SBATCH --mem=36gb
-#SBATCH --time 20:00:00                         # maximum execution time (HH:MM:SS)
+#SBATCH --cpus-per-task=24                       # number of cores per tasks
+#SBATCH --gres=gpu:3                            # number of gpus
+#SBATCH --mem=300gb
+#SBATCH --time 144:00:00                         # maximum execution time (HH:MM:SS)
 #SBATCH --output=%x-%j.out                      # output file name
 
 date;hostname;pwd

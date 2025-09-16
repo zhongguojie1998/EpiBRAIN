@@ -6,8 +6,8 @@
 #SBATCH --nodes=2                               # number of nodes
 #SBATCH --ntasks-per-node=1                     # crucial - only 1 task per dist per node!
 #SBATCH --cpus-per-task=24                       # number of cores per tasks
-#SBATCH --gres=gpu:4                            # number of gpus per node
-#SBATCH --mem=220gb
+#SBATCH --gres=gpu:3                            # number of gpus per node
+#SBATCH --mem=300gb
 #SBATCH --time 144:00:00                         # maximum execution time (HH:MM:SS)
 #SBATCH --output=%x-%j.out                      # output file name
 
@@ -37,12 +37,12 @@ echo "WORLD_SIZE: $WORLD_SIZE"
 echo "NODE_RANK: $NODE_RANK"
 echo "SLURM_PROCID: $SLURM_PROCID"
 
-torchrun \
+srun --cpu-bind=none --jobid $SLURM_JOBID bash -c 'torchrun \
     --nnodes=$SLURM_NNODES \
-    --nproc_per_node=4 \
-    --node_rank=$SLURM_NODEID \
+    --nproc_per_node=3 \
+    --node_rank=$SLURM_PROCID \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
-    Model/train.py -c default -x "logging.exp_name=basel_ganglia_complete_v2_multinode" -x "training=default_nygc" --torchrun
+    Model/train.py -c default -x "logging.exp_name=basel_ganglia_complete_v2_multinode" -x "training=nygc_multinodes" -x "data=debug" --torchrun'
 
 date
