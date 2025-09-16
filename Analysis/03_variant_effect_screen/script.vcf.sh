@@ -2,6 +2,7 @@
 # --vcf is input vcf
 # --output is output h5
 # --model is the model pickle file, it it is .pt, we will call prebuild_model.py to build a packaged model
+# --config is the config file for .pt models (required if model is .pt)
 # --label_meta is model label_meta file
 # --experiment is experiment name, optional, default "variant_effect_screen"
 # --chunks is number of chunks to split the vcf into, optional, default 1
@@ -20,6 +21,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --model)
             MODEL_FILE="$2"
+            shift 2
+            ;;
+        --config)
+            CONFIG_FILE="$2"
             shift 2
             ;;
         --label_meta)
@@ -50,10 +55,32 @@ EXPERIMENT=${EXPERIMENT:-"variant_effect_screen"}
 CHUNKS=${CHUNKS:-1}
 JOB_SCRIPT_PATH=${JOB_SCRIPT_PATH:-"$(dirname "$H5_FILE")/job_script"}
 
+# Handle .pt model files - convert to packaged model
+if [[ "$MODEL_FILE" == *.pt ]]; then
+    echo "Detected .pt model file. Converting to packaged model..."
+
+    # Check if config file is provided
+    if [ -z "$CONFIG_FILE" ]; then
+        echo "Error: --config parameter is required when using .pt model files"
+        exit 1
+    fi
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "Error: Config file $CONFIG_FILE not found"
+        exit 1
+    fi
+
+    PACKAGED_MODEL="${MODEL_FILE%.pt}_packaged.pkl"
+    python Analysis/03_variant_effect_screen/prebuild_model.py --config "$CONFIG_FILE" --checkpoint "$MODEL_FILE" --output "$PACKAGED_MODEL"
+
+    # Use the packaged model for the rest of the script
+    MODEL_FILE="$PACKAGED_MODEL"
+fi
+
 python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
     -h5 "$H5_FILE" \
     -l "$LABEL_META" \
-    -e "$EXPERIMENT" -s raw_diff -s log_square
+    -e "$EXPERIMENT" -s raw_diff -s log_square -s local_raw_diff -s local_log_square
 
 # Build -g arguments for multiple chunks
 G_ARGS=""
@@ -61,16 +88,16 @@ for ((i=0; i<$CHUNKS; i++)); do
     G_ARGS="$G_ARGS -g nygc$i:1:1:gpu"
 done
 
-python python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
+python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
     -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path
 
 # do slurm submission
 for ((i=0; i<$CHUNKS; i++)); do
-    sbatch --job_name="variant_chunk_$i" --partition="gpu" --mem="64G" --cpus-per-task="8" --time="24:00:00" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
+    sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="64G" --cpus-per-task="8" --time="24:00:00" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
 done
 
 # wait for all chunks to complete
-RESULTS_DIR="$(dirname "$H5_FILE")/chunk_results"
+RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/chunk_results"
 echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
 
 # Timeout after 24 hours (86400 seconds)
@@ -88,7 +115,8 @@ while true; do
 
     completed=0
     for ((i=0; i<$CHUNKS; i++)); do
-        if [ -f "$RESULTS_DIR/chunk_${i}_results.h5" ]; then
+        files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
+        if [ -e "${files[0]}" ]; then
             completed=$((completed + 1))
         fi
     done
@@ -106,6 +134,8 @@ done
 # wait for jobs to finish, then collate results
 python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"
 
-# cleanup: delete the results directory after merging
+# cleanup: delete the results directory and job scripts after merging
 echo "Cleaning up intermediate results directory: $RESULTS_DIR"
 rm -r "$RESULTS_DIR"
+echo "Cleaning up job scripts directory: $JOB_SCRIPT_PATH"
+rm -r "$JOB_SCRIPT_PATH"

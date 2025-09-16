@@ -187,7 +187,7 @@ def get_model(checkpoint, device, config=None):
 
 def validate_score_names(score_names):
     """Validate and filter score names based on implemented scores."""
-    IMPLEMENTED_SCORES = {"raw_diff", "log_square"}  # Add more score names as you implement them
+    IMPLEMENTED_SCORES = {"raw_diff", "log_square", "local_raw_diff", "local_log_square"}  # Add more score names as you implement them
     original_score_names = set(score_names)
     score_names = [name for name in score_names if name in IMPLEMENTED_SCORES]
 
@@ -289,6 +289,20 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
 
                     diff_squared = (log_alt - log_ref) ** 2  # shape: (B, L, T)
                     sum_diff = np.sum(diff_squared, axis=1)  # shape: (B, T)
+                    scores = np.sqrt(sum_diff)  # shape: (B, T)
+                elif score_name == "local_raw_diff":
+                    # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
+                    diffs = pred_mut - pred_wt
+                    diffs_local = diffs[:, diffs.shape[1] // 2 - 15: diffs.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
+                    scores = np.sum(diffs_local, axis=1)  # shape: (B, T)
+                elif score_name == "local_log_square":
+                    # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
+                    log_alt = np.log2(1 + pred_mut)
+                    log_ref = np.log2(1 + pred_wt)
+
+                    diff_squared = (log_alt - log_ref) ** 2  # shape: (B, L, T)
+                    diff_squared_local = diff_squared[:, diff_squared.shape[1] // 2 - 15: diff_squared.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
+                    sum_diff = np.sum(diff_squared_local, axis=1)  # shape: (B, T)
                     scores = np.sqrt(sum_diff)  # shape: (B, T)
 
                 all_success_res[score_name].append(scores)
