@@ -97,7 +97,7 @@ for ((i=0; i<$CHUNKS; i++)); do
 done
 
 # wait for all chunks to complete
-RESULTS_DIR="$(dirname "$H5_FILE")/chunk_results"
+RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/chunk_results"
 echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
 
 # Timeout after 24 hours (86400 seconds)
@@ -115,7 +115,8 @@ while true; do
 
     completed=0
     for ((i=0; i<$CHUNKS; i++)); do
-        if [ -f "$RESULTS_DIR/chunk_${i}_results.h5" ]; then
+        files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
+        if [ -e "${files[0]}" ]; then
             completed=$((completed + 1))
         fi
     done
@@ -133,6 +134,8 @@ done
 # wait for jobs to finish, then collate results
 python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"
 
-# cleanup: delete the results directory after merging
+# cleanup: delete the results directory and job scripts after merging
 echo "Cleaning up intermediate results directory: $RESULTS_DIR"
 rm -r "$RESULTS_DIR"
+echo "Cleaning up job scripts directory: $JOB_SCRIPT_PATH"
+rm -r "$JOB_SCRIPT_PATH"
