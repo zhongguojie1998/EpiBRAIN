@@ -21,10 +21,6 @@ export NCCL_DEBUG=INFO
 CONDA_PREFIX=/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN
 export CPLUS_INCLUDE_PATH=${CONDA_PREFIX}/lib/python3.12/site-packages/torch/include:${CONDA_PREFIX}/lib/python3.12/site-packages/torch/include/torch/csrc/api/include
 
-source /gpfs/commons/home/guojiezhong/.bashrc 
-
-conda activate BICAN
-
 # Get node list and setup multinode variables
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=29500

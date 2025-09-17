@@ -21,10 +21,6 @@ export NCCL_DEBUG=INFO
 CONDA_PREFIX=/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN
 export CPLUS_INCLUDE_PATH=${CONDA_PREFIX}/lib/python3.12/site-packages/torch/include:${CONDA_PREFIX}/lib/python3.12/site-packages/torch/include/torch/csrc/api/include
 
-source /gpfs/commons/home/guojiezhong/.bashrc 
-
-conda activate BICAN
-
 /gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Model/train.py -c default -x "logging.exp_name=basel_ganglia_complete_v2" -x "training=default_nygc"
 
 date
