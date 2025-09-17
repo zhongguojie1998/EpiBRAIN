@@ -1,4 +1,15 @@
-# !/bin/bash
+#!/bin/bash
+#
+#SBATCH --job-name=bican                    # name
+#SBATCH --mail-user=gz2294@cumc.columbia.edu    # email
+#SBATCH --mail-type=ALL
+#SBATCH --nodes=1                               # nodes
+#SBATCH --ntasks-per-node=1                     # crucial - only 1 task per dist per node!
+#SBATCH --cpus-per-task=24                       # number of cores per tasks
+#SBATCH --mem=360gb
+#SBATCH --time 72:00:00                         # maximum execution time (HH:MM:SS)
+#SBATCH --output=%x-%j.out                      # output file name
+
 # --filelist is input filelist
 # --output is output h5
 # --model is the model pickle file, it it is .pt, we will call prebuild_model.py to build a packaged model
@@ -71,16 +82,16 @@ if [[ "$MODEL_FILE" == *.pt ]]; then
     fi
 
     PACKAGED_MODEL="${MODEL_FILE%.pt}_packaged.pkl"
-    python Analysis/03_variant_effect_screen/prebuild_model.py --config "$CONFIG_FILE" --checkpoint "$MODEL_FILE" --output "$PACKAGED_MODEL"
+    /gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/prebuild_model.py --config "$CONFIG_FILE" --checkpoint "$MODEL_FILE" --output "$PACKAGED_MODEL"
 
     # Use the packaged model for the rest of the script
     MODEL_FILE="$PACKAGED_MODEL"
 fi
 
-python Analysis/03_variant_effect_screen/init_tasks.py -fl "$FILE_LIST" \
-    -h5 "$H5_FILE" \
-    -l "$LABEL_META" \
-    -e "$EXPERIMENT" -s raw_diff -s log_square -s local_raw_diff -s local_log_square
+# /gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/init_tasks.py -fl "$FILE_LIST" \
+#     -h5 "$H5_FILE" \
+#     -l "$LABEL_META" \
+#     -e "$EXPERIMENT" -s raw_diff -s log_square -s local_raw_diff -s local_log_square
 
 # Build -g arguments for multiple chunks
 G_ARGS=""
@@ -88,8 +99,8 @@ for ((i=0; i<$CHUNKS; i++)); do
     G_ARGS="$G_ARGS -g nygc$i:1:1:gpu"
 done
 
-python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
-    -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path
+/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
+    -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path --use_head human
 
 # do slurm submission
 for ((i=0; i<$CHUNKS; i++)); do
@@ -132,7 +143,7 @@ while true; do
 done
 
 # wait for jobs to finish, then collate results
-python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"
+/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"
 
 # cleanup: delete the results directory and job scripts after merging
 echo "Cleaning up intermediate results directory: $RESULTS_DIR"
