@@ -860,6 +860,8 @@ def _process_single_datapoint(args):
 
 # TODO: the current implementation is based on regression task, we may need an extra function for classification task
 def split_save_data(storage_path, todo=pd.DataFrame(), meta_info=pd.DataFrame(), precision="float32", n_workers=None):
+    # Set OpenMP threads to 1 when using multiprocessing to avoid resource conflicts
+    os.environ['OMP_NUM_THREADS'] = '1'
     """Split and save the label data from multiple files into file designed for model training."""
 
     separate_label_file = [
@@ -906,7 +908,7 @@ def split_save_data(storage_path, todo=pd.DataFrame(), meta_info=pd.DataFrame(),
 
     # set number of workers
     if n_workers is None:
-        n_workers = min(mp.cpu_count(), len(todo))
+        n_workers = min(mp.cpu_count() // 2, len(todo), 8)  # Use half cores, max 8 workers
 
     logger.info(f"Using {n_workers} workers for multiprocessing")
 

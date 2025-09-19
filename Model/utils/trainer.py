@@ -86,9 +86,10 @@ def aggregate_test_res(trainer, prefix="Test", remove_raw=True):
 
             all_inds.append(data["index"])
             for k, v in data["label"].items():
-                if k not in all_labels:
+                if k not in all_labels and k != "transcripts_mask":
                     all_labels[k] = []
-                all_labels[k].append(v)
+                if k != "transcripts_mask":
+                    all_labels[k].append(v)
             for k, v in data["pred"].items():
                 if k not in all_preds:
                     all_preds[k] = []
