@@ -3,6 +3,7 @@
 import collections
 import heapq
 import math
+import multiprocessing as mp
 import os
 import subprocess
 import tempfile
@@ -832,8 +833,33 @@ def aggregate_data(storage_path, preload_data, todo=pd.DataFrame(), meta_info=pd
                 save_dict[task_type] = task_label_data[i].clone()
             torch.save({"label": save_dict}, f"{storage_path}/data/{chrom}_{start}_{end}.pt")
 
+def _process_single_datapoint(args):
+    """Helper function to process a single data point for multiprocessing."""
+    i, todo_row, label_meta, storage_path, precision = args
+
+    chrom, start, end = todo_row[0], todo_row[1], todo_row[2]
+    save_dict = {}
+
+    try:
+        torch_precision = getattr(torch, precision)
+    except AttributeError:
+        torch_precision = getattr(torch, "float32")
+
+    for task_type in label_meta["task"].unique():
+        label_data = []
+        for label_file in label_meta.loc[label_meta["task"] == task_type, "file"]:
+            with h5py.File(label_file, "r") as f:
+                label_data.append(f["targets"][i])
+
+        label_data = np.stack(label_data, axis=-1)
+        label_data = torch.tensor(label_data, dtype=torch_precision)
+        save_dict[task_type] = label_data
+
+    torch.save({"label": save_dict}, f"{storage_path}/data/{chrom}_{start}_{end}.pt")
+    return i
+
 # TODO: the current implementation is based on regression task, we may need an extra function for classification task
-def split_save_data(storage_path, todo=pd.DataFrame(), meta_info=pd.DataFrame(), precision="float32"):
+def split_save_data(storage_path, todo=pd.DataFrame(), meta_info=pd.DataFrame(), precision="float32", n_workers=None):
     """Split and save the label data from multiple files into file designed for model training."""
 
     separate_label_file = [
@@ -878,25 +904,24 @@ def split_save_data(storage_path, todo=pd.DataFrame(), meta_info=pd.DataFrame(),
     # get all the label data and save directly per data point
     os.makedirs(f"{storage_path}/data", exist_ok=True)
 
-    try:
-        precision = getattr(torch, precision)
-    except AttributeError:
-        logger.warning(f"Specified precision {precision} is not accept, save as float32")
-        precision = getattr(torch, "float32")
+    # set number of workers
+    if n_workers is None:
+        n_workers = min(mp.cpu_count(), len(todo))
 
-    # save per data point separately without loading into label_dict
-    for i in tqdm(todo.index, desc="Saving label"):
-        chrom, start, end = todo.loc[i, [0, 1, 2]]
-        save_dict = {}
+    logger.info(f"Using {n_workers} workers for multiprocessing")
 
-        for task_type in label_meta["task"].unique():
-            label_data = []
-            for label_file in label_meta.loc[label_meta["task"] == task_type, "file"]:
-                with h5py.File(label_file, "r") as f:
-                    label_data.append(f["targets"][i])
+    # prepare arguments for multiprocessing
+    args_list = []
+    for i in todo.index:
+        todo_row = todo.loc[i, [0, 1, 2]].values
+        args_list.append((i, todo_row, label_meta, storage_path, precision))
 
-            label_data = np.stack(label_data, axis=-1)
-            label_data = torch.tensor(label_data, dtype=precision)
-            save_dict[task_type] = label_data
-
-        torch.save({"label": save_dict}, f"{storage_path}/data/{chrom}_{start}_{end}.pt")
+    # save per data point separately using multiprocessing
+    if n_workers > 1:
+        with mp.Pool(processes=n_workers) as pool:
+            list(tqdm(pool.imap(_process_single_datapoint, args_list),
+                     total=len(args_list), desc="Saving label"))
+    else:
+        # fallback to single-threaded processing
+        for args in tqdm(args_list, desc="Saving label"):
+            _process_single_datapoint(args)

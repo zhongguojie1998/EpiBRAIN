@@ -479,5 +479,6 @@ def preprocess(
                 todo=data[data["generate"]],
                 meta_info=trial_files,
                 precision=precision,
+                n_workers=num_worker,
             )
             logger.info("Finish split and save data")
