@@ -831,3 +831,72 @@ def aggregate_data(storage_path, preload_data, todo=pd.DataFrame(), meta_info=pd
             for task_type, task_label_data in label_dict.items():
                 save_dict[task_type] = task_label_data[i].clone()
             torch.save({"label": save_dict}, f"{storage_path}/data/{chrom}_{start}_{end}.pt")
+
+# TODO: the current implementation is based on regression task, we may need an extra function for classification task
+def split_save_data(storage_path, todo=pd.DataFrame(), meta_info=pd.DataFrame(), precision="float32"):
+    """Split and save the label data from multiple files into file designed for model training."""
+
+    separate_label_file = [
+        f"{storage_path}/labels/{i}" for i in os.listdir(f"{storage_path}/labels") if i.endswith(".h5")
+    ]
+    if not separate_label_file:
+        logger.error("No label files found in the specified directory.")
+        exit(1)
+    else:
+        logger.info(f"Found {len(separate_label_file)} label files to aggregate.")
+
+    # prepare raw label meta
+    label_meta = pd.DataFrame({"file": separate_label_file})
+    label_meta["trial"] = (
+        label_meta["file"].str.split("/").str[-1].str.split(".").str[0].str.split("_", n=1).str[-1]
+    )
+    label_meta["task"] = label_meta["file"].str.split("/").str[-1].str.split("_").str[0]
+    label_meta[["cell_type", "modality"]] = label_meta["trial"].str.rsplit("_", n=1, expand=True)
+    label_meta = label_meta.sort_values(["task", "cell_type", "modality"])
+    label_meta = label_meta[["trial", "cell_type", "modality", "task", "file"]]
+    ## incorporate meta_info if provided
+    if not meta_info.empty:
+        meta_info = meta_info[[i for i in META_INFO_COLS if i in meta_info.columns]].copy()
+        # add default values for missing columns
+        if "sum_stat" not in meta_info.columns:
+            meta_info["sum_stat"] = "sum"
+        if "baseline_pct" not in meta_info.columns:
+            meta_info["baseline_pct"] = 0.5
+        if "umap_pct" not in meta_info.columns:
+            meta_info["umap_pct"] = 0.5
+        if "scale" not in meta_info.columns:
+            meta_info["scale"] = 1
+        label_meta = pd.merge(
+            label_meta, meta_info.rename(columns={"exp": "trial"}), on=["trial", "task"], how="left"
+        )
+    if label_meta.isnull().values.any():
+        logger.warning(
+            f"Some label files are missing meta information, please double check at `{storage_path}/raw_label_meta.csv`!"
+        )
+    label_meta.to_csv(f"{storage_path}/raw_label_meta.csv", index=False)
+
+    # get all the label data and save directly per data point
+    os.makedirs(f"{storage_path}/data", exist_ok=True)
+
+    try:
+        precision = getattr(torch, precision)
+    except AttributeError:
+        logger.warning(f"Specified precision {precision} is not accept, save as float32")
+        precision = getattr(torch, "float32")
+
+    # save per data point separately without loading into label_dict
+    for i in tqdm(todo.index, desc="Saving label"):
+        chrom, start, end = todo.loc[i, [0, 1, 2]]
+        save_dict = {}
+
+        for task_type in label_meta["task"].unique():
+            label_data = []
+            for label_file in label_meta.loc[label_meta["task"] == task_type, "file"]:
+                with h5py.File(label_file, "r") as f:
+                    label_data.append(f["targets"][i])
+
+            label_data = np.stack(label_data, axis=-1)
+            label_data = torch.tensor(label_data, dtype=precision)
+            save_dict[task_type] = label_data
+
+        torch.save({"label": save_dict}, f"{storage_path}/data/{chrom}_{start}_{end}.pt")

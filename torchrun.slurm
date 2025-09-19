@@ -39,6 +39,6 @@ srun --cpu-bind=none --jobid $SLURM_JOBID bash -c 'torchrun \
     --node_rank=$SLURM_PROCID \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
-    Model/train.py -c default -x "logging.exp_name=basel_ganglia_complete_v2_multinode" -x "training=nygc_multinodes" -x "data=debug" --torchrun'
+    Model/train.py -c default -x "logging.exp_name=basal_ganglia_miniatlas_complete_v1" -x "training=nygc_multinodes" --torchrun'
 
 date

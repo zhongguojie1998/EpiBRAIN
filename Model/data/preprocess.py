@@ -18,6 +18,7 @@ from .data_utils import (
     STD_CHR,
     Contig,
     aggregate_data,
+    split_save_data,
     annotate_unmap,
     break_large_contigs,
     contig_sequences,
@@ -472,12 +473,11 @@ def preprocess(
         )
 
         if data["generate"].any():
-            logger.info("Start to aggregate data")
-            aggregate_data(
+            logger.info("Start to split and save data")
+            split_save_data(
                 storage_path=storage_path,
-                preload_data=False,
                 todo=data[data["generate"]],
                 meta_info=trial_files,
                 precision=precision,
             )
-            logger.info("Finish aggregation")
+            logger.info("Finish split and save data")
