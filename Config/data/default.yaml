@@ -33,7 +33,7 @@ preprocess:
   sample_pct: 1.0 # the percentage of the samples (for all sets) to use, 1.0 means all samples, 0.1 means 10% of the samples
 
   seed: 42 # random seed for reproducibility
-  num_worker: 72 # number of workers to use for the preprocessing
+  num_worker: 24 # number of workers to use for the preprocessing
   preload_data: ${data.preload_data}
 
   force_restart: False # whether to restart the preprocessing, if True, will delete the existing processed data and start from scratch
