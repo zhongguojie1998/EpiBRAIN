@@ -143,10 +143,15 @@ while true; do
 done
 
 # wait for jobs to finish, then collate results
-/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"
-
-# cleanup: delete the results directory and job scripts after merging
-echo "Cleaning up intermediate results directory: $RESULTS_DIR"
-rm -r "$RESULTS_DIR"
-echo "Cleaning up job scripts directory: $JOB_SCRIPT_PATH"
-rm -r "$JOB_SCRIPT_PATH"
+if /gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"; then
+    # cleanup: delete the results directory and job scripts after successful merging
+    echo "Cleaning up intermediate results directory: $RESULTS_DIR"
+    rm -r "$RESULTS_DIR"
+    echo "Cleaning up job scripts directory: $JOB_SCRIPT_PATH"
+    rm -r "$JOB_SCRIPT_PATH"
+else
+    echo "Error: merge_results.py failed. Keeping intermediate files for debugging."
+    echo "Results directory: $RESULTS_DIR"
+    echo "Job scripts directory: $JOB_SCRIPT_PATH"
+    exit 1
+fi
