@@ -93,7 +93,7 @@ done
 
 # do slurm submission
 for ((i=0; i<$CHUNKS; i++)); do
-    sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="64G" --cpus-per-task="8" --time="24:00:00" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
+    sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="24G" --cpus-per-task="8" --time="24:00:00" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
 done
 
 # wait for all chunks to complete
