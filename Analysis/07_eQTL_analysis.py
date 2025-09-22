@@ -13,27 +13,14 @@ os.chdir(f'{PWD}/../')
 eqtl = pd.read_csv('Data/source/eQTL/all.vcf', sep='\t')
 eqtl_info = pd.read_csv('Data/source/eQTL/info.csv', sep=',')
 # %% read in results
-eqtl_h5 = h5py.File(f'Res/basel_ganglia_complete_v1/eQTL.h5', 'r')
-eqtl_info_df = pd.DataFrame({'chr': eqtl_h5['variants/chr'][:], 
-                             'pos': eqtl_h5['variants/pos'][:], 
-                             'ref': eqtl_h5['variants/ref'][:], 
+eqtl_h5 = h5py.File(f'Data/source/eQTL/basal_ganglia_v1_res.h5', 'r')
+log_square = eqtl_h5['results/local_log_square'][:]
+eqtl_info_df = pd.DataFrame({'chr': eqtl_h5['variants/chr'][:],
+                             'pos': eqtl_h5['variants/pos'][:],
+                             'ref': eqtl_h5['variants/ref'][:],
                              'alt': eqtl_h5['variants/alt'][:]})
 eqtl_info_df.index = eqtl_info_df['chr'].astype(str) + '_' + eqtl_info_df['pos'].astype(str) + '_' + eqtl_info_df['ref'].astype(str) + '_' + eqtl_info_df['alt'].astype(str) + '_b38'
-successful_indices = None
-log_square = None
-raw_diff = None
-for i in range(6):
-    part = h5py.File(f'Res/basel_ganglia_complete_v1/chunk_results/chunk_{i}_part_1.h5', 'r')
-    if successful_indices is None:
-        successful_indices = part['successful_indices'][:]
-    else:
-        successful_indices = np.concatenate([successful_indices, part['successful_indices'][:]])
-    if log_square is None:
-        log_square = part['successful_results']['log_square'][:]
-        raw_diff = part['successful_results']['raw_diff'][:]
-    else:
-        log_square = np.concatenate([log_square, part['successful_results']['log_square'][:]])
-        raw_diff = np.concatenate([raw_diff, part['successful_results']['raw_diff'][:]])
+
 # %% define biotypes to keep
 biotype_to_keep = ['protein_coding', 'lncRNA', 'IG_V_gene', 'TR_V_gene', 'IG_C_gene', 'snoRNA', 'snRNA', 'TR_C_gene', 'miRNA']
 brain_organs = ['Brain_Amygdala', 'Brain_Anterior_cingulate_cortex_BA24', 'Brain_Caudate_basal_ganglia',
@@ -42,7 +29,7 @@ brain_organs = ['Brain_Amygdala', 'Brain_Anterior_cingulate_cortex_BA24', 'Brain
                 'Brain_Spinal_cord_cervical_c-1', 'Brain_Substantia_nigra']
 basal_ganglia_organs = ['Brain_Caudate_basal_ganglia', 'Brain_Nucleus_accumbens_basal_ganglia', 'Brain_Putamen_basal_ganglia']
 # %% Add borzoi results
-borzoi = pd.read_csv('Data/source/eQTL/borzoi_track_results.csv', index_col=0)
+borzoi = pd.read_csv('Data/source/eQTL/borzoi_track_local_results.csv', index_col=0)
 # %%
 import sklearn
 track_results = pd.DataFrame()
@@ -110,7 +97,7 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
 track_results['celltype'] = track_results['exp'].str.split('_').str[:-1].str.join('_')
 track_results['mod'] = track_results['exp'].str.split('_').str[-1]
 # %% save results
-track_results.to_csv('Data/source/eQTL/track_results.csv')
+track_results.to_csv('Data/source/eQTL/track_local_results.csv')
 # %% add borzoi first
 track_results = pd.concat([track_results, borzoi])
 # %% plot

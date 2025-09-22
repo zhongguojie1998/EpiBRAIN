@@ -43,6 +43,10 @@ while [[ $# -gt 0 ]]; do
             JOB_SCRIPT_PATH="$2"
             shift 2
             ;;
+        --force)
+            FORCE="--force"
+            shift 1
+            ;;
         *)
             echo "Unknown option $1"
             exit 1
@@ -71,16 +75,16 @@ if [[ "$MODEL_FILE" == *.pt ]]; then
     fi
 
     PACKAGED_MODEL="${MODEL_FILE%.pt}_packaged.pkl"
-    python Analysis/03_variant_effect_screen/prebuild_model.py --config "$CONFIG_FILE" --checkpoint "$MODEL_FILE" --output "$PACKAGED_MODEL"
+    /gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/prebuild_model.py --config "$CONFIG_FILE" --checkpoint "$MODEL_FILE" --output "$PACKAGED_MODEL"
 
     # Use the packaged model for the rest of the script
     MODEL_FILE="$PACKAGED_MODEL"
 fi
 
-python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
+/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
     -h5 "$H5_FILE" \
     -l "$LABEL_META" \
-    -e "$EXPERIMENT" -s raw_diff -s log_square -s local_raw_diff -s local_log_square
+    -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE
 
 # Build -g arguments for multiple chunks
 G_ARGS=""
@@ -88,16 +92,25 @@ for ((i=0; i<$CHUNKS; i++)); do
     G_ARGS="$G_ARGS -g nygc$i:1:1:gpu"
 done
 
-python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
+/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
     -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path
+
+# Define results directory for checking existing chunks
+RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/chunk_results"
 
 # do slurm submission
 for ((i=0; i<$CHUNKS; i++)); do
-    sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="64G" --cpus-per-task="8" --time="24:00:00" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
+    # Check if chunk results already exist
+    files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
+    if [ -e "${files[0]}" ]; then
+        echo "Chunk $i results already exist, skipping job submission"
+    else
+        echo "Submitting job for chunk $i"
+        sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="64G" --cpus-per-task="8" --time="12:00:00" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
+    fi
 done
 
 # wait for all chunks to complete
-RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/chunk_results"
 echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
 
 # Timeout after 24 hours (86400 seconds)
@@ -132,10 +145,15 @@ while true; do
 done
 
 # wait for jobs to finish, then collate results
-python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"
-
-# cleanup: delete the results directory and job scripts after merging
-echo "Cleaning up intermediate results directory: $RESULTS_DIR"
-rm -r "$RESULTS_DIR"
-echo "Cleaning up job scripts directory: $JOB_SCRIPT_PATH"
-rm -r "$JOB_SCRIPT_PATH"
+if /gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"; then
+    # cleanup: delete the results directory and job scripts after successful merging
+    echo "Cleaning up intermediate results directory: $RESULTS_DIR"
+    rm -r "$RESULTS_DIR"
+    echo "Cleaning up job scripts directory: $JOB_SCRIPT_PATH"
+    rm -r "$JOB_SCRIPT_PATH"
+else
+    echo "Error: merge_results.py failed. Keeping intermediate files for debugging."
+    echo "Results directory: $RESULTS_DIR"
+    echo "Job scripts directory: $JOB_SCRIPT_PATH"
+    exit 1
+fi

@@ -14,7 +14,7 @@ eqtl = pd.read_csv('Data/source/eQTL/all.vcf', sep='\t')
 eqtl_info = pd.read_csv('Data/source/eQTL/info.csv', sep=',')
 # %% borzoi results
 eqtl_h5 = h5py.File(f'Data/source/eQTL/borzoi_res.h5', 'r')
-log_square = eqtl_h5['results/log_square'][:]
+log_square = eqtl_h5['results/local_log_square'][:]
 eqtl_info_df = pd.DataFrame({'chr': eqtl_h5['variants/chr'][:],
                              'pos': eqtl_h5['variants/pos'][:],
                              'ref': eqtl_h5['variants/ref'][:],
@@ -94,7 +94,7 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
 track_results['celltype'] = track_results['exp'].str.split('_').str[:-1].str.join('_')
 track_results['mod'] = 'borzoi'
 # %% save results
-track_results.to_csv('Data/source/eQTL/borzoi_track_results.csv')
+track_results.to_csv('Data/source/eQTL/borzoi_track_local_results.csv')
 # %% plot
 import seaborn as sns
 import matplotlib.pyplot as plt
