@@ -205,6 +205,52 @@ def validate_score_names(score_names):
 
     return score_names
 
+# calculate score
+def vep_score(pred_mut, pred_wt, score_name):
+    if score_name == "raw_diff":
+        diffs = pred_mut - pred_wt
+        scores = np.sum(diffs, axis=1)
+    elif score_name == "l1_sum":
+        diffs = np.abs(pred_mut - pred_wt)  # shape: (B, L, T)
+        scores = np.sum(diffs, axis=1)  # shape: (B, T)
+    elif score_name == "l2_sum":
+        diff_squared = (pred_mut - pred_wt) ** 2  # shape: (B, L, T)
+        sum_diff = np.sum(diff_squared, axis=1)  # shape: (B, T)
+        scores = np.sqrt(sum_diff)  # shape: (B, T)
+    elif score_name == "log_square":
+        log_alt = np.log2(1 + pred_mut)
+        log_ref = np.log2(1 + pred_wt)
+        diff_squared = (log_alt - log_ref) ** 2  # shape: (B, L, T)
+        sum_diff = np.sum(diff_squared, axis=1)  # shape: (B, T)
+        scores = np.sqrt(sum_diff)  # shape: (B, T)
+    elif score_name == "local_l1_sum":
+        # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
+        diffs = np.abs(pred_mut - pred_wt)  # shape: (B, L, T)
+        diffs_local = diffs[:, diffs.shape[1] // 2 - 15: diffs.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
+        scores = np.sum(diffs_local, axis=1)  # shape: (B, T)
+    elif score_name == "local_l2_sum":
+        # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
+        diff_squared = (pred_mut - pred_wt) ** 2  # shape: (B, L, T)
+        diff_squared_local = diff_squared[:, diff_squared.shape[1] // 2 - 15: diff_squared.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
+        sum_diff = np.sum(diff_squared_local, axis=1)  # shape: (B, T)
+        scores = np.sqrt(sum_diff)  # shape: (B, T)
+    elif score_name == "local_raw_diff":
+        # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
+        diffs = pred_mut - pred_wt
+        diffs_local = diffs[:, diffs.shape[1] // 2 - 15: diffs.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
+        scores = np.sum(diffs_local, axis=1)  # shape: (B, T)
+    elif score_name == "local_log_square":
+        # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
+        log_alt = np.log2(1 + pred_mut)
+        log_ref = np.log2(1 + pred_wt)
+        diff_squared = (log_alt - log_ref) ** 2  # shape: (B, L, T)
+        diff_squared_local = diff_squared[:, diff_squared.shape[1] // 2 - 15: diff_squared.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
+        sum_diff = np.sum(diff_squared_local, axis=1)  # shape: (B, T)
+        scores = np.sqrt(sum_diff)  # shape: (B, T)
+    else:
+        raise ValueError(f"Score '{score_name}' not implemented")
+    return scores
+            
 @click.command()
 @click.option("-h5", "--hdf5_file", required=True)
 @click.option("-c", "--chunk_indices", type=str, required=True)
@@ -286,51 +332,6 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             pred_wt_rev = model(wt_rev_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
             pred_mut_rev = model(mut_rev_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
 
-            # calculate score
-            def vep_score(pred_mut, pred_wt, score_name):
-                if score_name == "raw_diff":
-                    diffs = pred_mut - pred_wt
-                    scores = np.sum(diffs, axis=1)
-                elif score_name == "l1_sum":
-                    diffs = np.abs(pred_mut - pred_wt)  # shape: (B, L, T)
-                    scores = np.sum(diffs, axis=1)  # shape: (B, T)
-                elif score_name == "l2_sum":
-                    diff_squared = (pred_mut - pred_wt) ** 2  # shape: (B, L, T)
-                    sum_diff = np.sum(diff_squared, axis=1)  # shape: (B, T)
-                    scores = np.sqrt(sum_diff)  # shape: (B, T)
-                elif score_name == "log_square":
-                    log_alt = np.log2(1 + pred_mut)
-                    log_ref = np.log2(1 + pred_wt)
-                    diff_squared = (log_alt - log_ref) ** 2  # shape: (B, L, T)
-                    sum_diff = np.sum(diff_squared, axis=1)  # shape: (B, T)
-                    scores = np.sqrt(sum_diff)  # shape: (B, T)
-                elif score_name == "local_l1_sum":
-                    # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
-                    diffs = np.abs(pred_mut - pred_wt)  # shape: (B, L, T)
-                    diffs_local = diffs[:, diffs.shape[1] // 2 - 15: diffs.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
-                    scores = np.sum(diffs_local, axis=1)  # shape: (B, T)
-                elif score_name == "local_l2_sum":
-                    # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
-                    diff_squared = (pred_mut - pred_wt) ** 2  # shape: (B, L, T)
-                    diff_squared_local = diff_squared[:, diff_squared.shape[1] // 2 - 15: diff_squared.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
-                    sum_diff = np.sum(diff_squared_local, axis=1)  # shape: (B, T)
-                    scores = np.sqrt(sum_diff)  # shape: (B, T)
-                elif score_name == "local_raw_diff":
-                    # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
-                    diffs = pred_mut - pred_wt
-                    diffs_local = diffs[:, diffs.shape[1] // 2 - 15: diffs.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
-                    scores = np.sum(diffs_local, axis=1)  # shape: (B, T)
-                elif score_name == "local_log_square":
-                    # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
-                    log_alt = np.log2(1 + pred_mut)
-                    log_ref = np.log2(1 + pred_wt)
-                    diff_squared = (log_alt - log_ref) ** 2  # shape: (B, L, T)
-                    diff_squared_local = diff_squared[:, diff_squared.shape[1] // 2 - 15: diff_squared.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
-                    sum_diff = np.sum(diff_squared_local, axis=1)  # shape: (B, T)
-                    scores = np.sqrt(sum_diff)  # shape: (B, T)
-                else:
-                    raise ValueError(f"Score '{score_name}' not implemented")
-                return scores
             # Calculate different scores based on score_names
             for score_name in score_names:
                 scores_fwd = vep_score(pred_mut, pred_wt, score_name)
