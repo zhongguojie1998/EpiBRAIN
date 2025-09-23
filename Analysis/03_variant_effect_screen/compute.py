@@ -103,11 +103,13 @@ class VariantDataset(Dataset):
 
 
 def collate_fn(batch):
-    wt_list, mut_list, task_ids, msgs, masks = [], [], [], [], []
-    for item, task_index, err in batch:
-        if item is not None:
-            wt_list.append(item[0])
-            mut_list.append(item[1])
+    wt_list, mut_list, wt_rev_list, mut_rev_list, task_ids, msgs, masks = [], [], [], [], [], [], []
+    for item1, item2, task_index, err in batch:
+        if item1 is not None and item2 is not None:
+            wt_list.append(item1[0])
+            mut_list.append(item1[1])
+            wt_rev_list.append(item2[0])
+            mut_rev_list.append(item2[1])
             masks.append(True)
         else:
             masks.append(False)
@@ -116,7 +118,7 @@ def collate_fn(batch):
 
     if len(wt_list) == 0:
         return None, None, np.array(task_ids), np.array(msgs), np.array(masks)
-    return torch.stack(wt_list), torch.stack(mut_list), np.array(task_ids), np.array(msgs), np.array(masks)
+    return torch.stack(wt_list), torch.stack(mut_list), torch.stack(wt_rev_list), torch.stack(mut_rev_list), np.array(task_ids), np.array(msgs), np.array(masks)
 
 
 def load_label_meta_from_h5(h5_path):
