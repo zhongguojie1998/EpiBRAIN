@@ -80,7 +80,7 @@ fi
 /gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
     -h5 "$H5_FILE" \
     -l "$LABEL_META" \
-    -e "$EXPERIMENT" -s raw_diff -s log_square -s local_raw_diff -s local_log_square
+    -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square --force
 
 # Build -g arguments for multiple chunks
 G_ARGS=""
@@ -99,7 +99,7 @@ for ((i=0; i<$CHUNKS; i++)); do
         echo "Chunk $i results already exist, skipping job submission"
     else
         echo "Submitting job for chunk $i"
-        sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="64G" --cpus-per-task="8" --time="12:00:00" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
+        sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="24G" --cpus-per-task="8" --time="12:00:00" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
     fi
 done
 
