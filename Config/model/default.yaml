@@ -60,7 +60,7 @@ output_heads: # set up the prediction head name and trial number
   use_cell_encoder: True  # whether to use shared cell encoder for the output heads, if True, the output will be calculated as celltype embedding then shared task output, else, directly output separate celltype * modality
   celltype_hidden_dim: 64  # the dimension of the cell type embedding, if use_cell_encoder is True, this will be used to calculate the cell type embedding
   regression:
-      track_num: 386
-      celltype_num: 70
+      track_num: 199
+      celltype_num: 37
       modality_num: 6 # ATAC, H3K27ac, H3K27me3, H3K9me3, RNA_plus, RNA_minus
       task: regression # choose from `regression` or `classification`

@@ -1,15 +1,15 @@
-import multiprocessing as mp
 import os
 import warnings
-from functools import partial
 
 warnings.filterwarnings("ignore")
 
 import click
+import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+from joblib import Parallel, delayed
 
 
 def plot_manhattan(args, outdir):
@@ -55,41 +55,59 @@ def plot_manhattan(args, outdir):
     plt.close(fig)
 
 
-def prepare_dfs(label_path, dataset_path, metadata_path):
-    # if label_path is a directory, load all '.pt' files in it
-    if os.path.isdir(label_path):
-        all = []
-        info = []
-        for file in os.listdir(label_path):
-            if file.endswith(".pt"):
-                all.append(torch.load(os.path.join(label_path, file)))
-                info.append(file.replace(".pt", ""))
-        all = torch.cat([i['label']['regression'].unsqueeze(0) for i in all], dim=0)
-    else:
-        all = torch.load(label_path)
-        info = None
+def process_celltype(args):
+    label_path, celltype, sequences_data, outdir = args
+    print(f"Preparing dataframe and plotting for {celltype}")
+
+    # Read data from h5py file
+    h5_path = f'{label_path}/regression_{celltype}.h5'
+    with h5py.File(h5_path, 'r') as f:
+        data = f['targets'][:]
+
+    df = pd.DataFrame(data.flatten(), columns=["value"])
+    # Add chromosome information to the DataFrame, should be sequences['chrom'] repeated for each row in df
+    df["chrom"] = sequences_data["chrom"].repeat(data.shape[1]).reset_index(drop=True)
+    offset_start = np.arange(320 * 128, 320 * 128 + data.shape[1] * 128, 128)
+    df["start"] = sequences_data["start"].repeat(data.shape[1]).values + np.tile(offset_start, data.shape[0])
+    df["end"] = df["start"] + 128
+    df["midpoint"] = (df["start"] + df["end"]) / 2
+
+    # Directly plot using the plot_manhattan logic
+    plot_manhattan((celltype, df), outdir)
+
+    return celltype
+
+
+def load_pt_file(args):
+    file, label_path = args
+    if file.endswith(".pt") and file.startswith("chr") and "transcript" not in file:
+        return torch.load(os.path.join(label_path, file)), file.replace(".pt", "")
+    return None, None
+
+
+def prepare_dfs(label_path, dataset_path, metadata_path, output_dir, n_jobs=-1, celltype_patterns=None):
     sequences = pd.read_csv(dataset_path, sep="\t", header=None)
     sequences.columns = ["chrom", "start", "end", "split"]
-    # reorder all by sequences
-    if info is not None:
-        sequences.index = sequences['chrom'] + "_" + sequences['start'].astype(str) + "_" + sequences['end'].astype(str)
-        sequences = sequences.loc[info]
     sequences.shape, sequences[sequences["split"] == "train"].shape, sequences[
         sequences["split"] == "valid"
     ].shape, sequences[sequences["split"] == "test"].shape
     metadata = pd.read_csv(metadata_path)
-    dfs = {}
-    for i, celltype in enumerate(metadata["trial"]):
-        print(f"Preparing dataframe for {celltype}")
-        df = pd.DataFrame(all[:, :, i].flatten().numpy(), columns=["value"])
-        # Add chromosome information to the DataFrame, should be sequences['chrom'] repeated for each row in df
-        df["chrom"] = sequences["chrom"].repeat(all.shape[1]).reset_index(drop=True)
-        offset_start = np.arange(320 * 128, 320 * 128 + all.shape[1] * 128, 128)
-        df["start"] = sequences["start"].repeat(all.shape[1]).values + np.tile(offset_start, all.shape[0])
-        df["end"] = df["start"] + 128
-        df["midpoint"] = (df["start"] + df["end"]) / 2
-        dfs[celltype] = df
-    return dfs
+
+    # Filter cell types based on patterns if specified
+    celltypes = metadata["trial"].tolist()
+    if celltype_patterns:
+        filtered_celltypes = []
+        for celltype in celltypes:
+            if any(pattern in celltype for pattern in celltype_patterns):
+                filtered_celltypes.append(celltype)
+        celltypes = filtered_celltypes
+
+    processed_celltypes = Parallel(n_jobs=n_jobs)(
+        delayed(process_celltype)((label_path, celltype, sequences, output_dir))
+        for celltype in celltypes
+    )
+
+    return processed_celltypes
 
 
 @click.command()
@@ -97,22 +115,28 @@ def prepare_dfs(label_path, dataset_path, metadata_path):
 @click.option("-e", "--exp_name", default="enformer_style_split_data_v1")
 @click.option("--base_dir", default="./Data")
 @click.option("--num_worker", default=48)
-def main(output_dir, exp_name, base_dir, num_worker):
+@click.option("--celltype_patterns", default=None, help="Comma-separated patterns to filter cell types (e.g., 'BasalGanglia-Astrocyte,MiniAtlas-AST')")
+def main(output_dir, exp_name, base_dir, num_worker, celltype_patterns):
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # load in data
-    dfs = prepare_dfs(
-        label_path=f"{base_dir}/{exp_name}/data/all_label.pt",
+    # Parse celltype patterns if provided
+    patterns = None
+    if celltype_patterns:
+        patterns = [p.strip() for p in celltype_patterns.split(',')]
+
+    # load in data and generate plots in parallel
+    label_path = f"{base_dir}/{exp_name}/labels/"
+    processed_celltypes = prepare_dfs(
+        label_path=label_path,
         dataset_path=f"{base_dir}/{exp_name}/sequences.bed",
-        metadata_path=f"{base_dir}/{exp_name}/label_meta.csv",
+        metadata_path=f"{base_dir}/{exp_name}/raw_label_meta.csv",
+        output_dir=output_dir,
+        n_jobs=num_worker,
+        celltype_patterns=patterns,
     )
 
-    plot_func = partial(plot_manhattan, outdir=output_dir)
-
-    print("Start ploting")
-    with mp.Pool(processes=num_worker) as pool:
-        pool.map(plot_func, dfs.items())
+    print(f"Completed processing and plotting for {len(processed_celltypes)} celltypes")
 
 
 if __name__ == "__main__":
