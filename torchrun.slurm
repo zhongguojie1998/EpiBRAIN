@@ -11,6 +11,9 @@
 #SBATCH --time 144:00:00                         # maximum execution time (HH:MM:SS)
 #SBATCH --output=%x-%j.out                      # output file name
 
+# Parse experiment name argument
+EXP_NAME=${1:-"basal_ganglia_miniatlas_complete_v1"}
+
 date;hostname;pwd
 
 export CUDA_HOME=/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN
@@ -33,12 +36,15 @@ echo "WORLD_SIZE: $WORLD_SIZE"
 echo "NODE_RANK: $NODE_RANK"
 echo "SLURM_PROCID: $SLURM_PROCID"
 
-srun --cpu-bind=none --jobid $SLURM_JOBID bash -c 'torchrun \
-    --nnodes=$SLURM_NNODES \
+srun --cpu-bind=none --jobid $SLURM_JOBID bash -c "torchrun \
+    --nnodes=\$SLURM_NNODES \
     --nproc_per_node=3 \
-    --node_rank=$SLURM_PROCID \
-    --master_addr=$MASTER_ADDR \
-    --master_port=$MASTER_PORT \
-    Model/train.py -c default -x "logging.exp_name=basal_ganglia_miniatlas_drop_celltype_v1" -x "training=nygc_multinodes" --torchrun'
+    --node_rank=\$SLURM_PROCID \
+    --master_addr=\$MASTER_ADDR \
+    --master_port=\$MASTER_PORT \
+    Model/train.py -c default -x \"logging.exp_name=$EXP_NAME\" \
+        -x \"training=nygc_multinodes\" --torchrun \
+        -x \"data.storage_path=./Data/$EXP_NAME\" \
+        -x \"data.preprocess.trial_summary_path=./Data/data_config/$EXP_NAME.csv\""
 
 date

@@ -78,6 +78,39 @@ def process_celltype(args):
     return celltype
 
 
+def process_celltype_stats(args):
+    label_path, celltype = args
+    print(f"Processing statistics for {celltype}")
+
+    # Read data from h5py file
+    h5_path = f'{label_path}/regression_{celltype}.h5'
+    with h5py.File(h5_path, 'r') as f:
+        data = f['targets'][:]
+
+    # Calculate statistics
+    flattened_data = data.flatten()
+    stats = {
+        'celltype': celltype,
+        'min': np.min(flattened_data),
+        'max': np.max(flattened_data),
+        'mean': np.mean(flattened_data),
+        'std': np.std(flattened_data),
+        '5%': np.percentile(flattened_data, 5),
+        '10%': np.percentile(flattened_data, 10),
+        '25%': np.percentile(flattened_data, 25),
+        '50%': np.percentile(flattened_data, 50),
+        '75%': np.percentile(flattened_data, 75),
+        '90%': np.percentile(flattened_data, 90),
+        '95%': np.percentile(flattened_data, 95),
+        '99%': np.percentile(flattened_data, 99),
+        '99.9%': np.percentile(flattened_data, 99.9),
+        '99.99%': np.percentile(flattened_data, 99.99),
+        '99.999%': np.percentile(flattened_data, 99.999),
+    }
+
+    return stats
+
+
 def load_pt_file(args):
     file, label_path = args
     if file.endswith(".pt") and file.startswith("chr") and "transcript" not in file:
@@ -85,16 +118,21 @@ def load_pt_file(args):
     return None, None
 
 
-def prepare_dfs(label_path, dataset_path, metadata_path, output_dir, n_jobs=-1, celltype_patterns=None):
+def prepare_dfs(label_path, dataset_path, output_dir, n_jobs=-1, celltype_patterns=None):
     sequences = pd.read_csv(dataset_path, sep="\t", header=None)
     sequences.columns = ["chrom", "start", "end", "split"]
     sequences.shape, sequences[sequences["split"] == "train"].shape, sequences[
         sequences["split"] == "valid"
     ].shape, sequences[sequences["split"] == "test"].shape
-    metadata = pd.read_csv(metadata_path)
+
+    # Get celltypes from files under label_path
+    celltypes = []
+    for filename in os.listdir(label_path):
+        if filename.startswith("regression_") and filename.endswith(".h5"):
+            celltype = filename.replace("regression_", "").replace(".h5", "")
+            celltypes.append(celltype)
 
     # Filter cell types based on patterns if specified
-    celltypes = metadata["trial"].tolist()
     if celltype_patterns:
         filtered_celltypes = []
         for celltype in celltypes:
@@ -110,13 +148,44 @@ def prepare_dfs(label_path, dataset_path, metadata_path, output_dir, n_jobs=-1, 
     return processed_celltypes
 
 
+def compute_stats(label_path, celltype_patterns=None, n_jobs=-1):
+    # Get celltypes from files under label_path
+    celltypes = []
+    for filename in os.listdir(label_path):
+        if filename.startswith("regression_") and filename.endswith(".h5"):
+            celltype = filename.replace("regression_", "").replace(".h5", "")
+            celltypes.append(celltype)
+
+    # Filter cell types based on patterns if specified
+    if celltype_patterns:
+        filtered_celltypes = []
+        for celltype in celltypes:
+            if any(pattern in celltype for pattern in celltype_patterns):
+                filtered_celltypes.append(celltype)
+        celltypes = filtered_celltypes
+
+    stats_list = Parallel(n_jobs=n_jobs)(
+        delayed(process_celltype_stats)((label_path, celltype))
+        for celltype in celltypes
+    )
+
+    # Create DataFrame from statistics
+    stats_df = pd.DataFrame(stats_list)
+
+    # Sort by celltype name
+    stats_df = stats_df.sort_values('celltype').reset_index(drop=True)
+
+    return stats_df
+
+
 @click.command()
 @click.option("-o", "--output_dir", default="./Data/other/data_quality/manhattan_plot")
 @click.option("-e", "--exp_name", default="enformer_style_split_data_v1")
 @click.option("--base_dir", default="./Data")
 @click.option("--num_worker", default=48)
 @click.option("--celltype_patterns", default=None, help="Comma-separated patterns to filter cell types (e.g., 'BasalGanglia-Astrocyte,MiniAtlas-AST')")
-def main(output_dir, exp_name, base_dir, num_worker, celltype_patterns):
+@click.option("--stats_only", is_flag=True, help="Only compute statistics, skip visualization")
+def main(output_dir, exp_name, base_dir, num_worker, celltype_patterns, stats_only):
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -125,18 +194,31 @@ def main(output_dir, exp_name, base_dir, num_worker, celltype_patterns):
     if celltype_patterns:
         patterns = [p.strip() for p in celltype_patterns.split(',')]
 
-    # load in data and generate plots in parallel
     label_path = f"{base_dir}/{exp_name}/labels/"
-    processed_celltypes = prepare_dfs(
-        label_path=label_path,
-        dataset_path=f"{base_dir}/{exp_name}/sequences.bed",
-        metadata_path=f"{base_dir}/{exp_name}/raw_label_meta.csv",
-        output_dir=output_dir,
-        n_jobs=num_worker,
-        celltype_patterns=patterns,
-    )
 
-    print(f"Completed processing and plotting for {len(processed_celltypes)} celltypes")
+    if stats_only:
+        # Compute and display statistics only
+        stats_df = compute_stats(
+            label_path=label_path,
+            celltype_patterns=patterns,
+            n_jobs=num_worker
+        )
+        stats_output_path = os.path.join(output_dir, "stats.csv")
+        stats_df.to_csv(stats_output_path, index=False)
+        print(f"Statistics saved to: {stats_output_path}")
+        print("\nData Statistics Summary:")
+        print(stats_df.to_string(index=False))
+    else:
+        # load in data and generate plots in parallel
+        processed_celltypes = prepare_dfs(
+            label_path=label_path,
+            dataset_path=f"{base_dir}/{exp_name}/sequences.bed",
+            output_dir=output_dir,
+            n_jobs=num_worker,
+            celltype_patterns=patterns,
+        )
+
+        print(f"Completed processing and plotting for {len(processed_celltypes)} celltypes")
 
 
 if __name__ == "__main__":
