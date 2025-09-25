@@ -12,7 +12,7 @@ import h5py
 import intervaltree
 import numpy as np
 import pandas as pd
-import pyBigWig
+import pybigtools
 import pysam
 import torch
 from tqdm import tqdm
@@ -674,7 +674,7 @@ class CovFace:
             self.preprocess_bed()
 
         elif cov_ext in [".bw", ".bigwig"]:
-            self.cov_open = pyBigWig.open(self.cov_file, "r")
+            self.cov_open = pybigtools.open(self.cov_file, "r")
             self.bigwig = True
 
         elif cov_ext in [".h5", ".hdf5", ".w5", ".wdf5"]:
@@ -705,7 +705,7 @@ class CovFace:
 
     def read(self, chrm, start, end):
         if self.bigwig:
-            cov = self.cov_open.values(chrm, start, end, numpy=True).astype("float16")
+            cov = self.cov_open.values(chrm, start, end).astype("float16")
 
         else:
             if chrm in self.cov_open:
