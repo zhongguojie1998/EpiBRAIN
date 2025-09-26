@@ -1,0 +1,6 @@
+defaults:
+  - default
+
+batch_size: 1
+
+accum_step: 6
