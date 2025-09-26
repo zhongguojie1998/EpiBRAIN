@@ -14,6 +14,13 @@ from joblib import Parallel, delayed
 
 def plot_manhattan(args, outdir):
     celltype, df = args
+    output_path = f"{outdir}/{celltype}.png"
+
+    # Check if file exists, skip if it does
+    if os.path.exists(output_path):
+        print(f"PNG file already exists for {celltype}, skipping...")
+        return
+
     chrom_order = [str(i) for i in range(1, 23)] + ["X", "Y"]
     chrom_to_int = {chrom: i + 1 for i, chrom in enumerate(chrom_order)}
     colors = ["#1f77b4", "#ff7f0e"]
@@ -51,7 +58,7 @@ def plot_manhattan(args, outdir):
     fig.tight_layout()
 
     # ensure output dir exists
-    fig.savefig(f"{outdir}/{celltype}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -95,6 +102,7 @@ def process_celltype_stats(args):
         'max': np.max(flattened_data),
         'mean': np.mean(flattened_data),
         'std': np.std(flattened_data),
+        'zero_fraction': np.mean(flattened_data == 0),
         '5%': np.percentile(flattened_data, 5),
         '10%': np.percentile(flattened_data, 10),
         '25%': np.percentile(flattened_data, 25),
@@ -116,6 +124,75 @@ def load_pt_file(args):
     if file.endswith(".pt") and file.startswith("chr") and "transcript" not in file:
         return torch.load(os.path.join(label_path, file)), file.replace(".pt", "")
     return None, None
+
+
+def process_celltype_zero_check(args):
+    """Process a single celltype for zero region checking."""
+    celltype, label_path, sequences_data = args
+    print(f"Processing zero region check for {celltype}")
+
+    # Read data from h5py file
+    h5_path = f'{label_path}/regression_{celltype}.h5'
+    with h5py.File(h5_path, 'r') as f:
+        data = f['targets'][:]
+
+    # Create dataframe similar to process_celltype
+    df = pd.DataFrame(data.flatten(), columns=["value"])
+    df["chrom"] = sequences_data["chrom"].repeat(data.shape[1]).reset_index(drop=True)
+
+    # Calculate zero fraction per chromosome
+    chrom_stats = df.groupby("chrom")["value"].agg([
+        ('total_count', 'count'),
+        ('zero_count', lambda x: (x == 0).sum()),
+        ('zero_fraction', lambda x: (x == 0).mean())
+    ]).reset_index()
+
+    chrom_stats['celltype'] = celltype
+    return chrom_stats
+
+
+def zero_region_check(dataset_path, label_path, celltype_patterns=None, n_jobs=-1):
+    """
+    Count the zero fraction in each chromosome for all celltypes using multiprocessing.
+
+    Args:
+        dataset_path: Path to the sequences.bed file
+        label_path: Path to the labels directory
+        celltype_patterns: Optional patterns to filter cell types
+        n_jobs: Number of parallel jobs (-1 for all cores)
+
+    Returns:
+        DataFrame with chromosome and zero fraction statistics per celltype
+    """
+    # Read sequences data
+    sequences = pd.read_csv(dataset_path, sep="\t", header=None)
+    sequences.columns = ["chrom", "start", "end", "split"]
+
+    # Get celltypes from files under label_path
+    celltypes = []
+    for filename in os.listdir(label_path):
+        if filename.startswith("regression_") and filename.endswith(".h5"):
+            celltype = filename.replace("regression_", "").replace(".h5", "")
+            celltypes.append(celltype)
+
+    # Filter cell types based on patterns if specified
+    if celltype_patterns:
+        filtered_celltypes = []
+        for celltype in celltypes:
+            if any(pattern in celltype for pattern in celltype_patterns):
+                filtered_celltypes.append(celltype)
+        celltypes = filtered_celltypes
+
+    # Process celltypes in parallel
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(process_celltype_zero_check)((celltype, label_path, sequences))
+        for celltype in celltypes
+    )
+
+    # Combine all results
+    final_df = pd.concat(results, ignore_index=True)
+
+    return final_df
 
 
 def prepare_dfs(label_path, dataset_path, output_dir, n_jobs=-1, celltype_patterns=None):
@@ -208,6 +285,19 @@ def main(output_dir, exp_name, base_dir, num_worker, celltype_patterns, stats_on
         print(f"Statistics saved to: {stats_output_path}")
         print("\nData Statistics Summary:")
         print(stats_df.to_string(index=False))
+
+        # Compute zero region check after stats
+        zero_df = zero_region_check(
+            dataset_path=f"{base_dir}/{exp_name}/sequences.bed",
+            label_path=label_path,
+            celltype_patterns=patterns,
+            n_jobs=num_worker
+        )
+        zero_output_path = os.path.join(output_dir, "zero_region_stats.csv")
+        zero_df.to_csv(zero_output_path, index=False)
+        print(f"\nZero region statistics saved to: {zero_output_path}")
+        print("\nZero Region Statistics Summary:")
+        print(zero_df.to_string(index=False))
     else:
         # load in data and generate plots in parallel
         processed_celltypes = prepare_dfs(
