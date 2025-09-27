@@ -12,10 +12,8 @@ sys.path.append(str(ROOT / "Model"))
 os.chdir(ROOT)
 
 from data.tokenizer import FastaInterval
-from model.model_utils import setup_model
 from utils.config import load_config
 from utils.logging import BaseLogger
-from model.model_building_block import get_positional_embed
 
 class ModelPackage:
     def __init__(self, model, dna_tokenizer, config):
@@ -32,6 +30,8 @@ class ModelPackage:
 
 
 def fix_meta_buffers_with_original_data(model, original_model=None):
+    from model.model_building_block import get_positional_embed
+
 
     fixed_count = 0
 
@@ -78,18 +78,23 @@ def fix_meta_buffers_with_original_data(model, original_model=None):
 @click.option("--checkpoint", "-chk", help="Path to checkpoint file")
 @click.option("--output", "-o", required=True, help="Output path for packaged model")
 @click.option("--use_borzoi", is_flag=True, help="If set, use the borzoi implementation from borzoi-pytorch")
-def main(config, checkpoint, output, use_borzoi):
+@click.option("--use_grelu", is_flag=True, help="If set, use the borzoi implementation from grelu")
+def main(config, checkpoint, output, use_borzoi, use_grelu):
     myconfig = load_config(config_name=config)
     logger = BaseLogger(name="Model packaging", level=logging.INFO)
 
-    if not use_borzoi:
-        checkpoint_data = torch.load(checkpoint, map_location="cpu")
-        model = setup_model(myconfig, logger=logger)
-        model.load_state_dict(checkpoint_data["model_state_dict"])
-    else:
+    if use_grelu:
+        from model.borzoi_grelu.grelu_model import BorzoiGreluModel
+        model = BorzoiGreluModel()
+    elif use_borzoi:
         from model.borzoi_pytorch.pytorch_borzoi_model import Borzoi
         model = Borzoi.from_pretrained("johahi/borzoi-replicate-0")
         model = fix_meta_buffers_with_original_data(model)
+    else:
+        from model.model_utils import setup_model
+        checkpoint_data = torch.load(checkpoint, map_location="cpu")
+        model = setup_model(myconfig, logger=logger)
+        model.load_state_dict(checkpoint_data["model_state_dict"])
     model.eval()
 
     dna_tokenizer = FastaInterval(
