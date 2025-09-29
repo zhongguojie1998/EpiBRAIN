@@ -156,7 +156,7 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
         exit(0)
 
     # get data split and labels
-    if not bypass_data:
+    if not bypass_data and ("SLURM_PROCID" not in os.environ or os.environ["SLURM_PROCID"] == "0") and ("local_rank" not in locals() or local_rank == 0):
         try:
             preprocess(**myconfig.data.preprocess)
         except Exception as e:

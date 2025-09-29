@@ -732,7 +732,7 @@ class DNASeqModelTrainer:
         if self.training_config.load_checkpoint == "best_valid_loss":
             load_file = f"{self.logging_config.checkpoint_dir}/chk_epoch_best_valid_loss.pt"
         # else is a epoch number, which doesn't end with .pt
-        elif not self.training_config.load_checkpoint.endswith(".pt"):
+        elif isinstance(self.training_config.load_checkpoint, int) or not self.training_config.load_checkpoint.endswith(".pt"):
             load_file = f"{self.logging_config.checkpoint_dir}/chk_epoch_{self.training_config.load_checkpoint}.pt"
         else:
             load_file = self.training_config.load_checkpoint
