@@ -76,13 +76,13 @@ if [[ "$MODEL_FILE" == *.pt ]]; then
     fi
 
     PACKAGED_MODEL="${MODEL_FILE%.pt}_packaged.pkl"
-    /gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/prebuild_model.py --config "$CONFIG_FILE" --checkpoint "$MODEL_FILE" --output "$PACKAGED_MODEL"
+    python Analysis/03_variant_effect_screen/prebuild_model.py --config "$CONFIG_FILE" --checkpoint "$MODEL_FILE" --output "$PACKAGED_MODEL"
 
     # Use the packaged model for the rest of the script
     MODEL_FILE="$PACKAGED_MODEL"
 fi
 
-/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
+python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
     -h5 "$H5_FILE" \
     -l "$LABEL_META" \
     -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square --force
@@ -94,7 +94,7 @@ for machine in "${MACHINE_ARRAY[@]}"; do
     G_ARGS="$G_ARGS -g ${machine}:4:1:gpu"
 done
 
-/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
+python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
     -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path --use_head human
 
 # do slurm submission
@@ -145,7 +145,7 @@ while true; do
 done
 
 # wait for jobs to finish, then collate results
-/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"
+python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"
 
 # cleanup: delete the results directory and job scripts after merging
 echo "Cleaning up intermediate results directory: $RESULTS_DIR"
