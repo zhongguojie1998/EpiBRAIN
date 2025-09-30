@@ -1,16 +1,5 @@
-#!/bin/bash
-#
-#SBATCH --job-name=bican                    # name
-#SBATCH --mail-user=gz2294@cumc.columbia.edu    # email
-#SBATCH --mail-type=ALL
-#SBATCH --nodes=1                               # nodes
-#SBATCH --ntasks-per-node=1                     # crucial - only 1 task per dist per node!
-#SBATCH --cpus-per-task=24                       # number of cores per tasks
-#SBATCH --mem=360gb
-#SBATCH --time 72:00:00                         # maximum execution time (HH:MM:SS)
-#SBATCH --output=%x-%j.out                      # output file name
-
-# --filelist is input filelist
+# !/bin/bash
+# --vcf is input vcf
 # --output is output h5
 # --model is the model pickle file, it it is .pt, we will call prebuild_model.py to build a packaged model
 # --config is the config file for .pt models (required if model is .pt)
@@ -22,8 +11,8 @@
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --filelist)
-            FILE_LIST="$2"
+        --vcf)
+            VCF_FILE="$2"
             shift 2
             ;;
         --output)
@@ -54,6 +43,10 @@ while [[ $# -gt 0 ]]; do
             JOB_SCRIPT_PATH="$2"
             shift 2
             ;;
+        --machine)
+            MACHINES="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option $1"
             exit 1
@@ -65,6 +58,7 @@ done
 EXPERIMENT=${EXPERIMENT:-"variant_effect_screen"}
 CHUNKS=${CHUNKS:-1}
 JOB_SCRIPT_PATH=${JOB_SCRIPT_PATH:-"$(dirname "$H5_FILE")/job_script"}
+MACHINES=${MACHINES:-"turing,neumann,euler"}
 
 # Handle .pt model files - convert to packaged model
 if [[ "$MODEL_FILE" == *.pt ]]; then
@@ -88,22 +82,20 @@ if [[ "$MODEL_FILE" == *.pt ]]; then
     MODEL_FILE="$PACKAGED_MODEL"
 fi
 
-# /gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/init_tasks.py -fl "$FILE_LIST" \
-#     -h5 "$H5_FILE" \
-#     -l "$LABEL_META" \
-#     -e "$EXPERIMENT" -s raw_diff -s log_square -s local_raw_diff -s local_log_square
+/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
+    -h5 "$H5_FILE" \
+    -l "$LABEL_META" \
+    -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square --force
 
 # Build -g arguments for multiple chunks
 G_ARGS=""
-for ((i=0; i<$CHUNKS; i++)); do
-    G_ARGS="$G_ARGS -g nygc$i:1:1:gpu"
+IFS=',' read -ra MACHINE_ARRAY <<< "$MACHINES"
+for machine in "${MACHINE_ARRAY[@]}"; do
+    G_ARGS="$G_ARGS -g ${machine}:4:1:gpu"
 done
 
 /gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
     -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path --use_head human
-
-# wait for all chunks to complete
-RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/chunk_results"
 
 # do slurm submission
 for ((i=0; i<$CHUNKS; i++)); do
@@ -113,13 +105,16 @@ for ((i=0; i<$CHUNKS; i++)); do
         echo "Chunk $i results already exist, skipping job submission"
     else
         echo "Submitting job for chunk $i"
-        sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="64G" --cpus-per-task="8" --time="24:00:00" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
+        sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="24G" --cpus-per-task="8" --time="12:00:00" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
     fi
 done
+
+# wait for all chunks to complete
+RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/chunk_results"
 echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
 
-# Timeout after 48 hours (86400*2 seconds)
-TIMEOUT_SECONDS=172800
+# Timeout after 24 hours (86400 seconds)
+TIMEOUT_SECONDS=86400
 START_TIME=$(date +%s)
 
 while true; do
@@ -150,15 +145,10 @@ while true; do
 done
 
 # wait for jobs to finish, then collate results
-if /gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"; then
-    # cleanup: delete the results directory and job scripts after successful merging
-    echo "Cleaning up intermediate results directory: $RESULTS_DIR"
-    rm -r "$RESULTS_DIR"
-    echo "Cleaning up job scripts directory: $JOB_SCRIPT_PATH"
-    rm -r "$JOB_SCRIPT_PATH"
-else
-    echo "Error: merge_results.py failed. Keeping intermediate files for debugging."
-    echo "Results directory: $RESULTS_DIR"
-    echo "Job scripts directory: $JOB_SCRIPT_PATH"
-    exit 1
-fi
+/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"
+
+# cleanup: delete the results directory and job scripts after merging
+echo "Cleaning up intermediate results directory: $RESULTS_DIR"
+rm -r "$RESULTS_DIR"
+echo "Cleaning up job scripts directory: $JOB_SCRIPT_PATH"
+rm -r "$JOB_SCRIPT_PATH"
