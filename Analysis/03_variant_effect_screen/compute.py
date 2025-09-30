@@ -143,7 +143,7 @@ def save_intermediate_results(
     # Save to independent intermediate file
     intermediate_file = chunk_results_dir / f"chunk_{chunk_id}_part_{save_count}.h5"
 
-    with h5py.File(intermediate_file, "w") as f:
+    with h5py.File(intermediate_file, "w", libver='latest') as f:
         f.attrs["chunk_id"] = chunk_id
         f.attrs["part_idx"] = save_count
         f.attrs["part_nsample"] = len(successful_indices) + len(error_indices)

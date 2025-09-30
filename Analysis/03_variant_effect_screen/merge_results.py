@@ -173,7 +173,7 @@ def main(hdf5_file, chunk_dir, cleanup, force):
 
     # Update main HDF5 file
     print("Updating main HDF5 file...")
-    with h5py.File(hdf5_file, 'r+') as f:
+    with h5py.File(hdf5_file, 'r+', libver='latest') as f:
         variants_grp = f['variants']
         results_grp = f['results']
 

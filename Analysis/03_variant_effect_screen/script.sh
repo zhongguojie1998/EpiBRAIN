@@ -118,18 +118,23 @@ if [ "$FORCE" = "true" ]; then
     FORCE_FLAG="--force"
 fi
 
-if [ -n "$VCF_FILE" ]; then
-    # VCF mode
-    python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
-        -h5 "$H5_FILE" \
-        -l "$LABEL_META" \
-        -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG
+# Only run init_tasks if H5 file doesn't exist or force flag is on
+if [ ! -f "$H5_FILE" ] || [ "$FORCE" = "true" ]; then
+    if [ -n "$VCF_FILE" ]; then
+        # VCF mode
+        python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
+            -h5 "$H5_FILE" \
+            -l "$LABEL_META" \
+            -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG
+    else
+        # Filelist mode
+        python Analysis/03_variant_effect_screen/init_tasks.py -fl "$FILE_LIST" \
+            -h5 "$H5_FILE" \
+            -l "$LABEL_META" \
+            -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG
+    fi
 else
-    # Filelist mode
-    python Analysis/03_variant_effect_screen/init_tasks.py -fl "$FILE_LIST" \
-        -h5 "$H5_FILE" \
-        -l "$LABEL_META" \
-        -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG
+    echo "H5 file already exists and --force not specified. Skipping init_tasks."
 fi
 
 # Build -g arguments based on mode

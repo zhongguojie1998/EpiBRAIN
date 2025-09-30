@@ -76,7 +76,7 @@ def init_hdf5_structure(h5_path, label_meta_path, score_names):
     label_meta = pd.read_csv(label_meta_path)
     trial_names = label_meta["trial"].tolist()
 
-    with h5py.File(h5_path, "w") as f:
+    with h5py.File(h5_path, "w", libver='latest') as f:
         f.attrs["score_names"] = score_names
 
         # Metadata
@@ -246,7 +246,7 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
     print(f"Number of experiments: {len(experiment_data_dict)}")
 
     # Update HDF5
-    with h5py.File(hdf5_file, "a") as f:
+    with h5py.File(hdf5_file, "a", libver='latest') as f:
         # Add new variants to main table
         if new_variant_data["index_key"]:
             print("Adding new variants...")
