@@ -97,16 +97,10 @@ done
 python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
     -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path --use_head human
 
-# do slurm submission
-for ((i=0; i<$CHUNKS; i++)); do
-    # Check if chunk results already exist
-    files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
-    if [ -e "${files[0]}" ]; then
-        echo "Chunk $i results already exist, skipping job submission"
-    else
-        echo "Submitting job for chunk $i"
-        sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="24G" --cpus-per-task="8" --time="12:00:00" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
-    fi
+# SSH to each machine and run jobs
+for machine in "${MACHINE_ARRAY[@]}"; do
+    echo "Submitting jobs to $machine"
+    ssh "$machine" "cd $PWD; bash $JOB_SCRIPT_PATH/run_all_${machine}.sh" &
 done
 
 # wait for all chunks to complete
