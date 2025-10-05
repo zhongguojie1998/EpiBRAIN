@@ -156,6 +156,9 @@ python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
     -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path
 
 # Job submission based on mode
+H5_NAME=$(basename "$H5_FILE" .h5)
+RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/${H5_NAME}_chunk_results"
+
 if [ "$MODE" = "ssh" ]; then
     # SSH to each machine and run jobs
     for machine in "${MACHINE_ARRAY[@]}"; do
@@ -164,7 +167,6 @@ if [ "$MODE" = "ssh" ]; then
     done
 else
     # SLURM submission
-    RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/chunk_results"
     for ((i=0; i<$CHUNKS; i++)); do
         # Check if chunk results already exist
         files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
@@ -186,7 +188,6 @@ else
 fi
 
 # wait for all chunks to complete
-RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/chunk_results"
 echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
 
 # Timeout based on input type

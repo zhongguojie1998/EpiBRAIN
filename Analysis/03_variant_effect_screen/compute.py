@@ -315,7 +315,8 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
     last_save_time = start_time
 
     # Create intermediate results directory
-    chunk_results_dir = Path(hdf5_file).parent / "chunk_results"
+    h5_name = Path(hdf5_file).stem  # Get filename without .h5 extension
+    chunk_results_dir = Path(hdf5_file).parent / f"{h5_name}_chunk_results"
     chunk_results_dir.mkdir(exist_ok=True)
 
     for wt_batch, mut_batch, wt_rev_batch, mut_rev_batch, task_ids, msgs, masks in dataloader:
