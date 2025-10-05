@@ -153,7 +153,7 @@ else
 fi
 
 python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
-    -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path --use_head human
+    -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path
 
 # Job submission based on mode
 if [ "$MODE" = "ssh" ]; then
