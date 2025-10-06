@@ -167,18 +167,22 @@ def process_region_chunk(args):
         )
         np.save(unmap_npy, mseqs_unmap)
 
-        get_labels(
-            mseqs,
-            blacklist_bed=myconfig.data.preprocess.blacklist_bed,
-            pool_width=myconfig.data.preprocess.window_size,
-            kept_num_after_crop=myconfig.data.preprocess.n_window,
-            seqs_cov_file=label_h5,
-            genome_cov_file=data_config.loc[trial, "file"],
-            umap_npy_path=unmap_npy,
-            **data_config.loc[trial, ["sum_stat", "baseline_pct", "umap_pct", "scale", "clip", "clip_soft"]].to_dict(),
-        )
-        with h5py.File(label_h5, "r") as f:
-            label_trial = f["targets"][0]
+        try:
+            get_labels(
+                mseqs,
+                blacklist_bed=myconfig.data.preprocess.blacklist_bed,
+                pool_width=myconfig.data.preprocess.window_size,
+                kept_num_after_crop=myconfig.data.preprocess.n_window,
+                seqs_cov_file=label_h5,
+                genome_cov_file=data_config.loc[trial, "file"],
+                umap_npy_path=unmap_npy,
+                **data_config.loc[trial, ["sum_stat", "baseline_pct", "umap_pct", "scale", "clip", "clip_soft"]].to_dict(),
+            )
+            with h5py.File(label_h5, "r") as f:
+                label_trial = f["targets"][0]
+        except (ValueError, RuntimeError, IndexError) as e:
+            logger.warning(f"Failed to get labels for {name_base}: {str(e)}. Skipping this region.")
+            continue
 
         plot_data = [label_trial, pred_res_trial]
         plot_title = [f"{trial} Target", f"{trial} Pred"]
@@ -375,11 +379,14 @@ def main(
             if prefix is not None
             else f"{chr_name}_{start}_{end}_{trial}"
         )
-        region_df.iloc[i, -1] = (
-            not os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp/{name_base}.png")
-            or force_restart
+        # Check if all output files exist
+        output_files_exist = (
+            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp/{name_base}.png") and
+            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_mseqs_unmap.npy") and
+            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_label.h5")
         )
-        if not region_df.iloc[i, -1]:
+        region_df.at[i, 'todo'] = not output_files_exist or force_restart
+        if not region_df.at[i, 'todo']:
             logger.info(f"Skip {name_base}, already exists")
     region_df = region_df[region_df["todo"]].copy()
 
@@ -441,7 +448,7 @@ def main(
             f"{LOG_BASE}/{exp_name}/overall_setting.yaml",
             f"{CHK_BASE}/{exp_name}/chk_epoch_{chk}.pt",
             RES_BASE,
-            f"cuda:{process_id+2}" if processor == "gpu" else "cpu",
+            f"cuda:{process_id}" if processor == "gpu" else "cpu",
             force_restart,
             save_raw,
             prefix,
@@ -451,11 +458,13 @@ def main(
 
     # Run parallel processing
     logger.info("Starting processing...")
-    if processor == "gpu":
+    if processor == "gpu" and num_processes > 1:
         mp.set_start_method("spawn", force=True)
-    # with mp.Pool(processes=num_processes) as pool:
-    #     pool.map(process_region_chunk, process_args)
-    process_region_chunk(process_args[0])  # for debugging
+    if num_processes > 1:
+        with mp.Pool(processes=num_processes) as pool:
+            pool.map(process_region_chunk, process_args)
+    else:
+        process_region_chunk(process_args[0])  # for debugging
 
 
 if __name__ == "__main__":

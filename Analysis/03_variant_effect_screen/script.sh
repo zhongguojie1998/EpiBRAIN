@@ -75,7 +75,8 @@ done
 # Set defaults
 EXPERIMENT=${EXPERIMENT:-"variant_effect_screen"}
 CHUNKS=${CHUNKS:-1}
-JOB_SCRIPT_PATH=${JOB_SCRIPT_PATH:-"$(dirname "$H5_FILE")/job_script"}
+H5_BASENAME=$(basename "$H5_FILE" .h5)
+JOB_SCRIPT_PATH=${JOB_SCRIPT_PATH:-"$(dirname "$H5_FILE")/${H5_BASENAME}_job_script"}
 MACHINES=${MACHINES:-"turing,neumann,euler"}
 MODE=${MODE:-"slurm"}
 
@@ -156,8 +157,7 @@ python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
     -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path
 
 # Job submission based on mode
-H5_NAME=$(basename "$H5_FILE" .h5)
-RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/${H5_NAME}_chunk_results"
+RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/${H5_BASENAME}_chunk_results"
 
 if [ "$MODE" = "ssh" ]; then
     # SSH to each machine and run jobs
