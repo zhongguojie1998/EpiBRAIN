@@ -12,15 +12,12 @@ os.chdir(f'{PWD}/../')
 # %% read in eQTL files
 eqtl = pd.read_csv('Data/source/eQTL/all.vcf', sep='\t')
 eqtl_info = pd.read_csv('Data/source/eQTL/info.csv', sep=',')
-# %% read in results
-eqtl_h5 = h5py.File(f'Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1_res.h5', 'r')
-log_square = eqtl_h5['results/local_log_square'][:]
-eqtl_info_df = pd.DataFrame({'chr': eqtl_h5['variants/chr'][:],
-                             'pos': eqtl_h5['variants/pos'][:],
-                             'ref': eqtl_h5['variants/ref'][:],
-                             'alt': eqtl_h5['variants/alt'][:]})
-eqtl_info_df.index = eqtl_info_df['chr'].astype(str) + '_' + eqtl_info_df['pos'].astype(str) + '_' + eqtl_info_df['ref'].astype(str) + '_' + eqtl_info_df['alt'].astype(str) + '_b38'
-
+# %% chrombpnet results
+cell_types = []
+for cell_type in os.listdir('Data/source/chrombpnet/BICAN/ATAC/'):
+    if not os.path.isfile(f'Data/source/chrombpnet/BICAN/ATAC/{cell_type}/variant_scores.tsv'):
+        continue
+    cell_types.append(cell_type)
 # %% define biotypes to keep
 biotype_to_keep = ['protein_coding', 'lncRNA', 'IG_V_gene', 'TR_V_gene', 'IG_C_gene', 'snoRNA', 'snRNA', 'TR_C_gene', 'miRNA']
 brain_organs = ['Brain_Amygdala', 'Brain_Anterior_cingulate_cortex_BA24', 'Brain_Caudate_basal_ganglia',
@@ -30,7 +27,7 @@ brain_organs = ['Brain_Amygdala', 'Brain_Anterior_cingulate_cortex_BA24', 'Brain
 basal_ganglia_organs = ['Brain_Caudate_basal_ganglia', 'Brain_Nucleus_accumbens_basal_ganglia', 'Brain_Putamen_basal_ganglia']
 # %%
 import sklearn
-track_results = pd.DataFrame()
+result_df = pd.DataFrame()
 for organ in ['All', 'Brain', 'Basal_ganglia']:
     # if is directory
     if organ == 'All':
@@ -59,52 +56,42 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
     eqtl_organ['group'] = eqtl_organ_info['group'].groupby(eqtl_organ_info['variant_id']).first().loc[eqtl_organ['ID']].values
     # drop duplicates
     eqtl_organ_unique = eqtl_organ.drop_duplicates(subset=['#CHROM', 'REF', 'POS', 'ALT'])
-    eqtl_scores = log_square[eqtl_info_df.index.get_indexer(eqtl_organ_unique['ID'])]
-    # load track annotations
-    track_anno = pd.read_csv('./Data/data_config/basel_ganglia_complete_v1.csv', index_col=0)
-    track_anno['organ'] = organ
-    # get overall precision recall
-    for group in ['all', '<3k', '3k-12k', '12k-35k', '>35k']:
-        track_anno['group'] = group
-        label = (eqtl_organ_unique['INFO'].values == 'positive').astype(int)
-        for i, idx in enumerate(track_anno.index):
+    # for each cell type get the chrombpnet scores
+    for cell_type in cell_types:
+        chrombpnet_res = pd.read_csv(f'Data/source/chrombpnet/BICAN/ATAC/{cell_type}/variant_scores.tsv', sep='\t')
+        eqtl_scores = chrombpnet_res['logfc'].groupby(chrombpnet_res['variant_id']).first().loc[eqtl_organ_unique['ID']].values
+        # get overall precision recall
+        for group in ['all', '<3k', '3k-12k', '12k-35k', '>35k']:
+            label = (eqtl_organ_unique['INFO'].values == 'positive').astype(int)
             if group == 'all':
                 # auroc
-                auroc = sklearn.metrics.roc_auc_score(label, eqtl_scores[:, i])
+                auroc = sklearn.metrics.roc_auc_score(label, eqtl_scores)
                 # auprc
-                precision, recall, _ = sklearn.metrics.precision_recall_curve(label, eqtl_scores[:, i])
+                precision, recall, _ = sklearn.metrics.precision_recall_curve(label, eqtl_scores)
                 auprc = sklearn.metrics.auc(recall, precision)
                 positives = (eqtl_organ_unique['INFO'] == 'positive').sum()
                 negatives = (eqtl_organ_unique['INFO'] == 'negative').sum()
             else:
                 # auroc
-                auroc = sklearn.metrics.roc_auc_score(label[eqtl_organ_unique['group'] == group],
-                                                      eqtl_scores[eqtl_organ_unique['group'] == group, i])
+                auroc = sklearn.metrics.roc_auc_score(
+                    label[eqtl_organ_unique['group'] == group],
+                    eqtl_scores[eqtl_organ_unique['group'] == group]
+                )
                 # auprc
-                precision, recall, _ = sklearn.metrics.precision_recall_curve(label[eqtl_organ_unique['group'] == group],
-                                                                              eqtl_scores[eqtl_organ_unique['group'] == group, i])
+                precision, recall, _ = sklearn.metrics.precision_recall_curve(
+                    label[eqtl_organ_unique['group'] == group],
+                    eqtl_scores[eqtl_organ_unique['group'] == group]
+                )
                 auprc = sklearn.metrics.auc(recall, precision)
                 positives = (eqtl_organ_unique['INFO'][eqtl_organ_unique['group'] == group] == 'positive').sum()
                 negatives = (eqtl_organ_unique['INFO'][eqtl_organ_unique['group'] == group] == 'negative').sum()
-            track_anno.loc[idx, 'AUROC'] = auroc
-            track_anno.loc[idx, 'AUPRC'] = auprc
-            track_anno.loc[idx, f'n_pos'] = positives
-            track_anno.loc[idx, f'n_neg'] = negatives
-        track_results = pd.concat([track_results, track_anno])
-# %% add annotation
-track_results['celltype'] = track_results['exp'].str.split('_').str[:-1].str.join('_')
-track_results['mod'] = track_results['exp'].str.split('_').str[-1]
+            result_df = pd.concat([result_df, 
+                                   pd.DataFrame({'exp': cell_type, 'organ': organ, 'group': group,
+                                                 'AUROC': auroc, 'AUPRC': auprc,
+                                                 'positives': positives, 'negatives': negatives}, 
+                                                index=[0])], ignore_index=True)
 # %% save results
-track_results.to_csv('Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1.track_local_results.csv')
-# %%
-track_results = pd.read_csv('Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1.track_local_results.csv', index_col=0)
-# %% Add borzoi results
-borzoi = pd.read_csv('Data/source/eQTL/borzoi_track_local_results.csv', index_col=0)
-track_results = pd.concat([track_results, borzoi])
-# %% Add chrombpnet results
-chrombpnet = pd.read_csv('Data/source/eQTL/chrombpnet_miniatlas_ATAC_results.csv', index_col=0)
-chrombpnet['mod'] = 'chrombpnet'
-track_results = pd.concat([track_results, chrombpnet])
+result_df.to_csv('Data/source/eQTL/chrombpnet_miniatlas_ATAC_results.csv')
 # %% plot
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -112,7 +99,7 @@ organs = ['All', 'Brain', 'Basal_ganglia']
 for organ in organs:
     fig, ax = plt.subplots(figsize=(10, 6))
     # drop na values
-    to_plot = track_results[track_results['organ'] == organ].copy().dropna(axis=0, subset=['AUPRC', 'AUROC'])
-    sns.violinplot(data=to_plot, x='group', y='AUROC', hue='mod', ax=ax)
+    to_plot = result_df[result_df['organ'] == organ].copy().dropna()
+    sns.violinplot(data=to_plot, x='group', y='AUROC', ax=ax)
     ax.set_title(organ)
 # %%

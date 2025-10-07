@@ -57,6 +57,7 @@ def process_region_chunk(args):
         baseline_types,
         config_path,
         checkpoint_path,
+        label_meta_path,
         res_base,
         device,
         force_restart,
@@ -72,7 +73,7 @@ def process_region_chunk(args):
     logger = BaseLogger(name=f"Interpretation-{device}", level=logging.INFO)
 
     # Get label information
-    label_meta = pd.read_csv(f"{myconfig.data.storage_path}/raw_label_meta.csv")
+    label_meta = pd.read_csv(label_meta_path, index_col=None)
     data_config = pd.read_csv(f"{myconfig.data.preprocess.trial_summary_path}", index_col=1)
 
     # Setup model
@@ -112,7 +113,7 @@ def process_region_chunk(args):
         )
 
         try:
-            trial_dim = int(label_meta.index[label_meta['trial'] == trial].values[0])
+            trial_dim = int(label_meta.dim[label_meta['trial'] == trial].values[0])
         except:
             logger.warning(f"{trial} cannot be found in label meta, skip")
             continue
@@ -447,6 +448,7 @@ def main(
             baseline,
             f"{LOG_BASE}/{exp_name}/overall_setting.yaml",
             f"{CHK_BASE}/{exp_name}/chk_epoch_{chk}.pt",
+            f"{LOG_BASE}/{exp_name}/regression_label_meta.csv",
             RES_BASE,
             f"cuda:{process_id}" if processor == "gpu" else "cpu",
             force_restart,

@@ -40,18 +40,18 @@ def calculate_trial_metrics(trial_data):
 @click.option("--chk", required=True, type=str)
 @click.option("-s", "--splits", multiple=True, type=str, default=["Test"])
 @click.option("--res_base", required=True, default="./Res")
-@click.option("--data_base", required=True, default="./Data/enformer_style_split_data_v1")
+@click.option("--log_base", required=True, default="./logs")
 @click.option("--use_mp", is_flag=True, default=False, help="Enable multiprocessing for metric calculation")
 @click.option("--n_processes", type=int, default=None, help="Number of processes to use (default: CPU count)")
-def main(exp_name, chk, splits, res_base, data_base, use_mp, n_processes):
-    DATA_BASE = os.path.abspath(data_base)
+def main(exp_name, chk, splits, res_base, log_base, use_mp, n_processes):
+    LOG_BASE = os.path.abspath(f"{log_base}/{exp_name}/")
     RES_BASE = os.path.abspath(res_base)
 
     os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot", exist_ok=True)
     os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data", exist_ok=True)
 
     # load label meta info
-    label_meta = pd.read_csv(f"{DATA_BASE}/raw_label_meta.csv", index_col=None)
+    label_meta = pd.read_csv(f"{LOG_BASE}/regression_label_meta.csv", index_col=None)
 
     # splits = ["Train", "Valid", "Test"]
 
@@ -62,7 +62,7 @@ def main(exp_name, chk, splits, res_base, data_base, use_mp, n_processes):
 
             test_res = torch.load(f"{RES_BASE}/{exp_name}/{split}_preds_epoch_{chk}.pt")
             test_label = test_res["label"]['regression'].reshape(-1, len(label_meta))
-            test_pred = test_res["pred"]['regression'].reshape(-1, len(label_meta))
+            test_pred = test_res["pred"]['regression'][:, :, label_meta['dim']].reshape(-1, len(label_meta))
 
             metric = pd.DataFrame(index=label_meta["trial"], columns=["MSE", "MAE", "PearsonR"])
 
