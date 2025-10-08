@@ -72,7 +72,7 @@ def create_optimizer_grouped_parameters(model, use_groups=True):
 
 def aggregate_test_res(trainer, prefix="Test", remove_raw=True):
     # aggregate the results and clear per rank file
-    pattern = f"{trainer.logging_config.res_dir}/{prefix}_preds_rank_*_epoch_{trainer.current_epoch}_*.pt"
+    pattern = f"{trainer.logging_config.res_dir}/{prefix}_preds_rank_*_epoch_{trainer.current_epoch}*.pt"
 
     file_list = glob.glob(pattern)
     if not file_list:
