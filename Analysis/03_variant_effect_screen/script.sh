@@ -225,7 +225,7 @@ while true; do
 done
 
 # wait for jobs to finish, then collate results
-if python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE"; then
+if python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE" --chunk_dir "$RESULTS_DIR"; then
     # cleanup: delete the results directory and job scripts after successful merging
     echo "Cleaning up intermediate results directory: $RESULTS_DIR"
     rm -r "$RESULTS_DIR"
