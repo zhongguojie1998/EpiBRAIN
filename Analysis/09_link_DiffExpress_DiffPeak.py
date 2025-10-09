@@ -6,10 +6,10 @@ Script to link differential expression and differential peaks
 """
 
 import pandas as pd
-import numpy as np
 import gzip
 import os
 from tqdm import tqdm
+import pyranges as pr
 
 # Set working directory
 PWD = os.path.dirname(os.path.abspath(__file__))
@@ -105,97 +105,144 @@ diff_peak = pd.read_csv('Data/source/DiffPeak/K27ac_hba_ccre_LR.csv')
 print(f"Loaded {len(diff_peak)} differential peak entries")
 print(f"Columns: {diff_peak.columns.tolist()}")
 
-print("\nStep 5: Finding overlaps between TSS regions (±250kb) and differential peaks...")
+# Parse feature name to extract chrom, start, end
+print("\nStep 4.5: Parsing peak coordinates from 'feature name' column...")
+def parse_feature_name(feature):
+    """Parse feature name like 'chr10:47245631-47246130' into chrom, start, end"""
+    try:
+        chrom_part, coord_part = feature.split(':')
+        start, end = coord_part.split('-')
+        return chrom_part, int(start), int(end)
+    except:
+        return None, None, None
+
+parsed = diff_peak['feature name'].apply(parse_feature_name)
+diff_peak['chrom'] = [x[0] for x in parsed]
+diff_peak['start'] = [x[1] for x in parsed]
+diff_peak['end'] = [x[2] for x in parsed]
+
+# Remove entries with failed parsing
+diff_peak = diff_peak[diff_peak['chrom'].notna()].copy()
+print(f"Successfully parsed {len(diff_peak)} peak entries")
+
+print("\nStep 5: Finding overlaps between TSS regions (±250kb) and differential peaks using PyRanges...")
 # Define overlap window
 window_size = 250000  # 250kb
 
-# List to store overlapping pairs
-overlaps = []
+# Explicitly use known celltype columns
+tss_celltype_col = 'celltype'
+peak_celltype_col = 'subclass_corrected'
 
-# Group diff_peak by chromosome for efficient lookup
-diff_peak_by_chrom = {chrom: group for chrom, group in diff_peak.groupby('chrom') if 'chrom' in diff_peak.columns}
-
-# Check if celltype column exists in both dataframes
-tss_celltype_col = None
-peak_celltype_col = None
-
-for col in diff_expr_with_tss.columns:
-    if 'celltype' in col.lower() or 'cell_type' in col.lower() or 'cell' in col.lower():
-        tss_celltype_col = col
-        break
-
-for col in diff_peak.columns:
-    if 'celltype' in col.lower() or 'cell_type' in col.lower() or 'cell' in col.lower():
-        peak_celltype_col = col
-        break
+# Verify columns exist
+if tss_celltype_col not in diff_expr_with_tss.columns:
+    raise ValueError(f"Column '{tss_celltype_col}' not found in diff_expr_with_tss. Available columns: {diff_expr_with_tss.columns.tolist()}")
+if peak_celltype_col not in diff_peak.columns:
+    raise ValueError(f"Column '{peak_celltype_col}' not found in diff_peak. Available columns: {diff_peak.columns.tolist()}")
 
 print(f"TSS celltype column: {tss_celltype_col}")
 print(f"Peak celltype column: {peak_celltype_col}")
 
-# Iterate through TSS entries
-for tss_idx, tss_row in tqdm(diff_expr_with_tss.iterrows(), total=len(diff_expr_with_tss), desc="Finding overlaps"):
-    tss_chrom = tss_row['chrom']
-    tss_pos = tss_row['tss']
-    tss_celltype = tss_row[tss_celltype_col] if tss_celltype_col else None
+# Get unique celltypes
+tss_celltypes = set(diff_expr_with_tss[tss_celltype_col].dropna().unique())
+peak_celltypes = set(diff_peak[peak_celltype_col].dropna().unique())
+common_celltypes = tss_celltypes & peak_celltypes
 
-    # Define TSS window
-    tss_start = tss_pos - window_size
-    tss_end = tss_pos + window_size
+print(f"Found {len(tss_celltypes)} celltypes in TSS data")
+print(f"Found {len(peak_celltypes)} celltypes in peak data")
+print(f"Found {len(common_celltypes)} common celltypes to process")
 
-    # Get peaks on the same chromosome
-    if tss_chrom not in diff_peak_by_chrom:
-        continue
+if len(common_celltypes) == 0:
+    print("Warning: No common celltypes found!")
+    overlaps = []
+else:
+    # Process each celltype separately
+    all_overlaps = []
 
-    chrom_peaks = diff_peak_by_chrom[tss_chrom]
+    for celltype in tqdm(common_celltypes, desc="Processing celltypes"):
+        # Filter by celltype
+        tss_ct = diff_expr_with_tss[diff_expr_with_tss[tss_celltype_col] == celltype].copy()
+        peak_ct = diff_peak[diff_peak[peak_celltype_col] == celltype].copy()
 
-    # Find overlapping peaks
-    for peak_idx, peak_row in chrom_peaks.iterrows():
-        # Assume peak has start and end columns
-        peak_start_col = None
-        peak_end_col = None
-
-        for col in ['start', 'Start', 'peak_start', 'chromStart']:
-            if col in peak_row.index:
-                peak_start_col = col
-                break
-
-        for col in ['end', 'End', 'peak_end', 'chromEnd']:
-            if col in peak_row.index:
-                peak_end_col = col
-                break
-
-        if peak_start_col is None or peak_end_col is None:
+        if len(tss_ct) == 0 or len(peak_ct) == 0:
             continue
 
-        peak_start = peak_row[peak_start_col]
-        peak_end = peak_row[peak_end_col]
-        peak_celltype = peak_row[peak_celltype_col] if peak_celltype_col else None
+        # Prepare TSS regions with windows
+        tss_ct['Start'] = (tss_ct['tss'] - window_size).clip(lower=0)
+        tss_ct['End'] = tss_ct['tss'] + window_size
+        tss_ct['Chromosome'] = tss_ct['chrom']
+        tss_ct['tss_id'] = range(len(tss_ct))
 
-        # Check celltype match
-        if tss_celltype_col and peak_celltype_col:
-            if tss_celltype != peak_celltype:
-                continue
+        # Prepare peak regions
+        peak_ct['Chromosome'] = peak_ct['chrom']
+        peak_ct['Start'] = peak_ct['start']
+        peak_ct['End'] = peak_ct['end']
+        peak_ct['peak_id'] = range(len(peak_ct))
 
-        # Check overlap: peak overlaps with TSS window
-        if peak_end >= tss_start and peak_start <= tss_end:
-            # Store both rows with a combined record
-            overlap_record = {}
+        # Convert to PyRanges objects
+        tss_pr = pr.PyRanges(tss_ct[['Chromosome', 'Start', 'End', 'tss_id']])
+        peak_pr = pr.PyRanges(peak_ct[['Chromosome', 'Start', 'End', 'peak_id']])
 
-            # Add TSS info with prefix
-            for col in tss_row.index:
-                overlap_record[f'tss_{col}'] = tss_row[col]
+        # Find overlaps
+        overlaps_pr = tss_pr.join(peak_pr, suffix='_peak')
 
-            # Add peak info with prefix
-            for col in peak_row.index:
-                overlap_record[f'peak_{col}'] = peak_row[col]
+        if len(overlaps_pr) > 0:
+            overlaps_df = overlaps_pr.df
 
-            # Add distance from TSS to peak center
-            peak_center = (peak_start + peak_end) / 2
-            overlap_record['distance_to_tss'] = abs(peak_center - tss_pos)
+            # Rename PyRanges Start/End columns from peak
+            overlaps_df = overlaps_df.rename(columns={
+                'Start_peak': 'start_peak',
+                'End_peak': 'end_peak'
+            })
 
-            overlaps.append(overlap_record)
+            # Merge with original data to get all columns
+            overlaps_df = overlaps_df.merge(tss_ct.drop(columns=['Chromosome', 'Start', 'End']),
+                                           on='tss_id', how='left')
+            overlaps_df = overlaps_df.merge(peak_ct.drop(columns=['Chromosome', 'Start', 'End']),
+                                           on='peak_id', how='left')
 
-print(f"\nFound {len(overlaps)} overlaps between TSS regions and differential peaks")
+            # Add explicit celltype column for clarity
+            overlaps_df['celltype'] = celltype
+
+            # Add TSS region columns (TSS ± 511bp)
+            overlaps_df['start_tss'] = overlaps_df['tss'] - 511
+            overlaps_df['end_tss'] = overlaps_df['tss'] + 511
+
+            # Calculate distance from TSS to peak center
+            peak_center = (overlaps_df['start'] + overlaps_df['end']) / 2
+            overlaps_df['distance_to_tss'] = abs(peak_center - overlaps_df['tss'])
+
+            all_overlaps.append(overlaps_df)
+
+    # Combine all celltype results
+    if all_overlaps:
+        print(f"\nCombining results from {len(all_overlaps)} celltypes...")
+        overlaps_df = pd.concat(all_overlaps, ignore_index=True)
+
+        # Rename columns with prefixes for clarity
+        print("Formatting output...")
+        tss_cols = [col for col in diff_expr_with_tss.columns if col not in ['Chromosome', 'Start', 'End', 'tss_id']]
+        peak_cols = [col for col in diff_peak.columns if col not in ['Chromosome', 'Start', 'End', 'peak_id']]
+
+        rename_dict = {}
+        for col in tss_cols:
+            if col in overlaps_df.columns:
+                rename_dict[col] = f'tss_{col}'
+        for col in peak_cols:
+            if col in overlaps_df.columns and f'tss_{col}' not in rename_dict.values():
+                rename_dict[col] = f'peak_{col}'
+
+        overlaps_df = overlaps_df.rename(columns=rename_dict)
+
+        # Remove PyRanges-specific columns
+        overlaps_df = overlaps_df.drop(columns=['tss_id', 'peak_id'], errors='ignore')
+
+        # Convert to list of dicts for compatibility
+        overlaps = overlaps_df.to_dict('records')
+
+        print(f"\nFound {len(overlaps)} overlaps between TSS regions and differential peaks (within matching celltypes)")
+    else:
+        overlaps = []
+        print("No overlaps found!")
 
 # Convert to DataFrame and save
 if overlaps:

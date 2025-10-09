@@ -14,7 +14,7 @@ eqtl = pd.read_csv('Data/source/eQTL/all.vcf', sep='\t')
 eqtl_info = pd.read_csv('Data/source/eQTL/info.csv', sep=',')
 # %% read in results
 eqtl_h5 = h5py.File(f'Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1_res_epoch_150.h5', 'r')
-log_square = eqtl_h5['results/local_log_square'][:]
+log_square = eqtl_h5['results/log_square'][:]
 eqtl_info_df = pd.DataFrame({'chr': eqtl_h5['variants/chr'][:],
                              'pos': eqtl_h5['variants/pos'][:],
                              'ref': eqtl_h5['variants/ref'][:],
@@ -95,11 +95,11 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
 track_results['celltype'] = track_results['exp'].str.split('_').str[:-1].str.join('_')
 track_results['mod'] = track_results['exp'].str.split('_').str[-1]
 # %% save results
-track_results.to_csv('Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1.track_local_results.csv')
+track_results.to_csv('Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1.track_results.csv')
 # %%
-track_results = pd.read_csv('Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1.track_local_results.csv', index_col=0)
+track_results = pd.read_csv('Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1.track_results.csv', index_col=0)
 # %% Add borzoi results
-borzoi = pd.read_csv('Data/source/eQTL/borzoi_track_local_results.csv', index_col=0)
+borzoi = pd.read_csv('Data/source/eQTL/borzoi_track_results.csv', index_col=0)
 track_results = pd.concat([track_results, borzoi])
 # %% Add chrombpnet results
 chrombpnet = pd.read_csv('Data/source/eQTL/chrombpnet_miniatlas_ATAC_results.csv', index_col=0)
