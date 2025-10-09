@@ -13,7 +13,7 @@ os.chdir(f'{PWD}/../')
 eqtl = pd.read_csv('Data/source/eQTL/all.vcf', sep='\t')
 eqtl_info = pd.read_csv('Data/source/eQTL/info.csv', sep=',')
 # %% read in results
-eqtl_h5 = h5py.File(f'Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1_res.h5', 'r')
+eqtl_h5 = h5py.File(f'Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1_res_epoch_150.h5', 'r')
 log_square = eqtl_h5['results/local_log_square'][:]
 eqtl_info_df = pd.DataFrame({'chr': eqtl_h5['variants/chr'][:],
                              'pos': eqtl_h5['variants/pos'][:],

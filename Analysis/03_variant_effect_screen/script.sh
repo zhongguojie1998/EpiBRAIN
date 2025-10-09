@@ -161,9 +161,17 @@ RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/${H5_BASENAME}_chunk_results"
 
 if [ "$MODE" = "ssh" ]; then
     # SSH to each machine and run jobs
+    CURRENT_MACHINE=$(hostname)
     for machine in "${MACHINE_ARRAY[@]}"; do
         echo "Submitting jobs to $machine"
-        ssh "$machine" "cd $PWD; bash $JOB_SCRIPT_PATH/run_all_${machine}.sh" &
+        if [ "$machine" = "$CURRENT_MACHINE" ]; then
+            # Run locally if machine is current machine
+            echo "Running locally on $machine (current machine)"
+            bash "$JOB_SCRIPT_PATH/run_all_${machine}.sh" &
+        else
+            # SSH to remote machine
+            ssh "$machine" "cd $PWD; bash $JOB_SCRIPT_PATH/run_all_${machine}.sh" &
+        fi
     done
 else
     # SLURM submission
