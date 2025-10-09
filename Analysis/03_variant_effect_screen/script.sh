@@ -75,7 +75,7 @@ done
 # Set defaults
 EXPERIMENT=${EXPERIMENT:-"variant_effect_screen"}
 CHUNKS=${CHUNKS:-1}
-JOB_SCRIPT_PATH=${JOB_SCRIPT_PATH:-"$(dirname "$H5_FILE")/job_script"}
+JOB_SCRIPT_PATH=${JOB_SCRIPT_PATH:-"${H5_FILE%.h5}_chunk_results"}
 MACHINES=${MACHINES:-"turing,neumann,euler"}
 MODE=${MODE:-"slurm"}
 
@@ -164,7 +164,7 @@ if [ "$MODE" = "ssh" ]; then
     done
 else
     # SLURM submission
-    RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/chunk_results"
+    RESULTS_DIR="${H5_FILE%.h5}_chunk_results"
     for ((i=0; i<$CHUNKS; i++)); do
         # Check if chunk results already exist
         files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
@@ -186,7 +186,7 @@ else
 fi
 
 # wait for all chunks to complete
-RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/chunk_results"
+RESULTS_DIR="${H5_FILE%.h5}_chunk_results"
 echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
 
 # Timeout based on input type
