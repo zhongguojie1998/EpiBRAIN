@@ -75,7 +75,8 @@ done
 # Set defaults
 EXPERIMENT=${EXPERIMENT:-"variant_effect_screen"}
 CHUNKS=${CHUNKS:-1}
-JOB_SCRIPT_PATH=${JOB_SCRIPT_PATH:-"${H5_FILE%.h5}_chunk_results"}
+H5_BASENAME=$(basename "$H5_FILE" .h5)
+JOB_SCRIPT_PATH=${JOB_SCRIPT_PATH:-"$(dirname "$H5_FILE")/${H5_BASENAME}_job_script"}
 MACHINES=${MACHINES:-"turing,neumann,euler"}
 MODE=${MODE:-"slurm"}
 
@@ -156,15 +157,24 @@ python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
     -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path --use_head human
 
 # Job submission based on mode
+RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/${H5_BASENAME}_chunk_results"
+
 if [ "$MODE" = "ssh" ]; then
     # SSH to each machine and run jobs
+    CURRENT_MACHINE=$(hostname)
     for machine in "${MACHINE_ARRAY[@]}"; do
         echo "Submitting jobs to $machine"
-        ssh "$machine" "cd $PWD; bash $JOB_SCRIPT_PATH/run_all_${machine}.sh" &
+        if [ "$machine" = "$CURRENT_MACHINE" ]; then
+            # Run locally if machine is current machine
+            echo "Running locally on $machine (current machine)"
+            bash "$JOB_SCRIPT_PATH/run_all_${machine}.sh" &
+        else
+            # SSH to remote machine
+            ssh "$machine" "cd $PWD; bash $JOB_SCRIPT_PATH/run_all_${machine}.sh" &
+        fi
     done
 else
     # SLURM submission
-    RESULTS_DIR="${H5_FILE%.h5}_chunk_results"
     for ((i=0; i<$CHUNKS; i++)); do
         # Check if chunk results already exist
         files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
@@ -186,7 +196,6 @@ else
 fi
 
 # wait for all chunks to complete
-RESULTS_DIR="${H5_FILE%.h5}_chunk_results"
 echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
 
 # Timeout based on input type
