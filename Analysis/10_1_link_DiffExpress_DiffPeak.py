@@ -254,5 +254,35 @@ if overlaps:
     print(f"Columns: {overlap_df.columns.tolist()}")
 else:
     print("No overlaps found!")
-
+    
+# Convert to bed files
+overlap_df_bed = overlap_df[['Chromosome', 'start_tss', 'end_tss', 'tss_strand', 'tss_celltype', 'tss_logFC']]
+overlap_df_bed = overlap_df_bed.rename(columns={
+    'Chromosome': 'chrom',
+    'start_tss': 'start',
+    'end_tss': 'end',
+    'tss_strand': 'strand',
+    'tss_celltype': 'track'
+})
+overlap_df_bed = overlap_df_bed.drop_duplicates()
+overlap_df_bed['start'] = overlap_df_bed['start'].astype(int)
+overlap_df_bed['end'] = overlap_df_bed['end'].astype(int)
+# change celltype to the track of H3K27Ac
+overlap_df_bed['track'] = 'MiniAtlas-' + overlap_df_bed['track'].str.replace(' ', '_') + '_K27Ac'
+# add negative tracks
+overlap_df_bed['track_neg'] = 'all'
+# filter by tss_logFC
+overlap_df_bed_filter = overlap_df_bed[overlap_df_bed['tss_logFC'] > 2].copy()
+overlap_df_bed_other = overlap_df_bed[overlap_df_bed['tss_logFC'] <= 2].copy()
+print(f"\nFiltered overlap bed entries with tss_logFC <= 2: {len(overlap_df_bed_other)} entries")
+# drop tss_logFC
+overlap_df_bed_filter = overlap_df_bed_filter.drop(columns=['tss_logFC'])
+print(f"\nFiltered overlap bed entries with tss_logFC > 2: {len(overlap_df_bed_filter)} entries")
+overlap_df_bed_filter.to_csv('Data/source/DiffPeak/DiffPeak.overlap.DiffTss.filter.bed', sep='\t', index=False, header=False)
+# drop tss_logFC
+overlap_df_bed_other = overlap_df_bed_other.drop(columns=['tss_logFC'])
+overlap_df_bed_other.to_csv('Data/source/DiffPeak/DiffPeak.overlap.DiffTss.other.bed', sep='\t', index=False, header=False)
+# drop tss_logFC
+overlap_df_bed = overlap_df_bed.drop(columns=['tss_logFC'])
+overlap_df_bed.to_csv('Data/source/DiffPeak/DiffPeak.overlap.DiffTss.bed', sep='\t', index=False, header=False)
 print("\nDone!")

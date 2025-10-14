@@ -53,7 +53,7 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
     else:
         continue
     # filter eqtl_organ and eqtl_organ_info by biotype_to_keep
-    eqtl_organ_info = eqtl_organ_info.loc[eqtl_organ_info['biotype'].isin(biotype_to_keep)]
+    eqtl_organ_info = eqtl_organ_info.loc[(eqtl_organ_info['biotype'].isin(biotype_to_keep)) | (eqtl_organ['INFO'] == 'negative')]
     eqtl_organ = eqtl_organ.loc[eqtl_organ_info.index]
     eqtl_organ['group'] = eqtl_organ_info['group'].groupby(eqtl_organ_info['variant_id']).first().loc[eqtl_organ['ID']].values
     # drop duplicates
@@ -61,6 +61,7 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
     eqtl_scores = log_square[eqtl_info_df.index.get_indexer(eqtl_organ_unique['ID'])]
     # load track annotations
     track_anno = pd.read_csv('borzoi.published.targets.txt', index_col=0, sep='\t')
+    track_anno['modality'] = track_anno['file'].str.split('/').str[6]
     track_anno['organ'] = organ
     # get overall precision recall
     for group in ['all', '<3k', '3k-12k', '12k-35k', '>35k']:
@@ -71,8 +72,7 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
                 # auroc
                 auroc = sklearn.metrics.roc_auc_score(label, eqtl_scores[:, i])
                 # auprc
-                precision, recall, _ = sklearn.metrics.precision_recall_curve(label, eqtl_scores[:, i])
-                auprc = sklearn.metrics.auc(recall, precision)
+                auprc = sklearn.metrics.average_precision_score(label, eqtl_scores[:, i])
                 positives = (eqtl_organ_unique['INFO'] == 'positive').sum()
                 negatives = (eqtl_organ_unique['INFO'] == 'negative').sum()
             else:
@@ -80,15 +80,40 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
                 auroc = sklearn.metrics.roc_auc_score(label[eqtl_organ_unique['group'] == group],
                                                       eqtl_scores[eqtl_organ_unique['group'] == group, i])
                 # auprc
-                precision, recall, _ = sklearn.metrics.precision_recall_curve(label[eqtl_organ_unique['group'] == group],
-                                                                              eqtl_scores[eqtl_organ_unique['group'] == group, i])
-                auprc = sklearn.metrics.auc(recall, precision)
+                auprc = sklearn.metrics.average_precision_score(label[eqtl_organ_unique['group'] == group],
+                                                                eqtl_scores[eqtl_organ_unique['group'] == group, i])
                 positives = (eqtl_organ_unique['INFO'][eqtl_organ_unique['group'] == group] == 'positive').sum()
                 negatives = (eqtl_organ_unique['INFO'][eqtl_organ_unique['group'] == group] == 'negative').sum()
             track_anno.loc[idx, 'AUROC'] = auroc
             track_anno.loc[idx, 'AUPRC'] = auprc
             track_anno.loc[idx, f'n_pos'] = positives
             track_anno.loc[idx, f'n_neg'] = negatives
+        for i, modality in enumerate(track_anno['modality'].unique()):
+            modality_idx = track_anno.index[track_anno['modality'] == modality].values
+            # L2 norm across modality_idx
+            modality_merged = np.linalg.norm(eqtl_scores[:, modality_idx], axis=1)
+            if group == 'all':
+                # auroc
+                auroc = sklearn.metrics.roc_auc_score(label, modality_merged)
+                # auprc
+                auprc = sklearn.metrics.average_precision_score(label, modality_merged)
+                positives = (eqtl_organ_unique['INFO'] == 'positive').sum()
+                negatives = (eqtl_organ_unique['INFO'] == 'negative').sum()
+            else:
+                # auroc
+                auroc = sklearn.metrics.roc_auc_score(label[eqtl_organ_unique['group'] == group],
+                                                      modality_merged[eqtl_organ_unique['group'] == group])
+                # auprc
+                auprc = sklearn.metrics.average_precision_score(label[eqtl_organ_unique['group'] == group],
+                                                                modality_merged[eqtl_organ_unique['group'] == group])
+                positives = (eqtl_organ_unique['INFO'][eqtl_organ_unique['group'] == group] == 'positive').sum()
+                negatives = (eqtl_organ_unique['INFO'][eqtl_organ_unique['group'] == group] == 'negative').sum()
+            track_results = pd.concat([track_results,
+                                       pd.DataFrame({'identifier': f'borzoi_{modality}', 'modality': modality,
+                                                     'organ': organ, 'group': group,
+                                                     'AUROC': auroc, 'AUPRC': auprc,
+                                                     f'n_pos': positives, f'n_neg': negatives},
+                                                    index=[0])], ignore_index=True)
         track_results = pd.concat([track_results, track_anno])
 # %% add annotation
 track_results['celltype'] = track_results['exp'].str.split('_').str[:-1].str.join('_')

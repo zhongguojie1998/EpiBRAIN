@@ -28,8 +28,46 @@ brain_organs = ['Brain_Amygdala', 'Brain_Anterior_cingulate_cortex_BA24', 'Brain
                 'Brain_Hippocampus', 'Brain_Hypothalamus', 'Brain_Nucleus_accumbens_basal_ganglia', 'Brain_Putamen_basal_ganglia',
                 'Brain_Spinal_cord_cervical_c-1', 'Brain_Substantia_nigra']
 basal_ganglia_organs = ['Brain_Caudate_basal_ganglia', 'Brain_Nucleus_accumbens_basal_ganglia', 'Brain_Putamen_basal_ganglia']
-# %%
+
+# %% Define helper function to compute metrics
 import sklearn
+
+def compute_metrics(label, scores, eqtl_organ_unique, group):
+    """
+    Compute AUROC, AUPRC, and positive/negative counts for a given group.
+
+    Parameters:
+    -----------
+    label : array-like
+        Binary labels (0 or 1)
+    scores : array-like
+        Prediction scores
+    eqtl_organ_unique : pd.DataFrame
+        DataFrame containing eQTL information with 'INFO' and 'group' columns
+    group : str
+        Group name ('all' for all data, or specific group like '<3k', '3k-12k', etc.)
+
+    Returns:
+    --------
+    tuple: (auroc, auprc, positives, negatives)
+    """
+    if group == 'all':
+        # Compute metrics on all data
+        auroc = sklearn.metrics.roc_auc_score(label, scores)
+        auprc = sklearn.metrics.average_precision_score(label, scores)
+        positives = (eqtl_organ_unique['INFO'] == 'positive').sum()
+        negatives = (eqtl_organ_unique['INFO'] == 'negative').sum()
+    else:
+        # Compute metrics for specific group
+        group_mask = eqtl_organ_unique['group'] == group
+        auroc = sklearn.metrics.roc_auc_score(label[group_mask], scores[group_mask])
+        auprc = sklearn.metrics.average_precision_score(label[group_mask], scores[group_mask])
+        positives = (eqtl_organ_unique['INFO'][group_mask] == 'positive').sum()
+        negatives = (eqtl_organ_unique['INFO'][group_mask] == 'negative').sum()
+
+    return auroc, auprc, positives, negatives
+
+# %%
 track_results = pd.DataFrame()
 for organ in ['All', 'Brain', 'Basal_ganglia']:
     # if is directory
@@ -54,7 +92,7 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
     else:
         continue
     # filter eqtl_organ and eqtl_organ_info by biotype_to_keep
-    eqtl_organ_info = eqtl_organ_info.loc[eqtl_organ_info['biotype'].isin(biotype_to_keep)]
+    eqtl_organ_info = eqtl_organ_info.loc[(eqtl_organ_info['biotype'].isin(biotype_to_keep)) | (eqtl_organ['INFO'] == 'negative')]
     eqtl_organ = eqtl_organ.loc[eqtl_organ_info.index]
     eqtl_organ['group'] = eqtl_organ_info['group'].groupby(eqtl_organ_info['variant_id']).first().loc[eqtl_organ['ID']].values
     # drop duplicates
@@ -68,28 +106,33 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
         track_anno['group'] = group
         label = (eqtl_organ_unique['INFO'].values == 'positive').astype(int)
         for i, idx in enumerate(track_anno.index):
-            if group == 'all':
-                # auroc
-                auroc = sklearn.metrics.roc_auc_score(label, eqtl_scores[:, i])
-                # auprc
-                precision, recall, _ = sklearn.metrics.precision_recall_curve(label, eqtl_scores[:, i])
-                auprc = sklearn.metrics.auc(recall, precision)
-                positives = (eqtl_organ_unique['INFO'] == 'positive').sum()
-                negatives = (eqtl_organ_unique['INFO'] == 'negative').sum()
-            else:
-                # auroc
-                auroc = sklearn.metrics.roc_auc_score(label[eqtl_organ_unique['group'] == group],
-                                                      eqtl_scores[eqtl_organ_unique['group'] == group, i])
-                # auprc
-                precision, recall, _ = sklearn.metrics.precision_recall_curve(label[eqtl_organ_unique['group'] == group],
-                                                                              eqtl_scores[eqtl_organ_unique['group'] == group, i])
-                auprc = sklearn.metrics.auc(recall, precision)
-                positives = (eqtl_organ_unique['INFO'][eqtl_organ_unique['group'] == group] == 'positive').sum()
-                negatives = (eqtl_organ_unique['INFO'][eqtl_organ_unique['group'] == group] == 'negative').sum()
+            auroc, auprc, positives, negatives = compute_metrics(label, eqtl_scores[:, i], eqtl_organ_unique, group)
             track_anno.loc[idx, 'AUROC'] = auroc
             track_anno.loc[idx, 'AUPRC'] = auprc
             track_anno.loc[idx, f'n_pos'] = positives
             track_anno.loc[idx, f'n_neg'] = negatives
+        for i, modality in enumerate(track_anno['modality'].unique()):
+            modality_idx = track_anno.index[track_anno['modality'] == modality].values
+            # L2 norm across modality_idx
+            modality_merged = np.linalg.norm(eqtl_scores[:, modality_idx], axis=1)
+            auroc, auprc, positives, negatives = compute_metrics(label, modality_merged, eqtl_organ_unique, group)
+            track_results = pd.concat([track_results,
+                                       pd.DataFrame({'exp': f'bican_{modality}', 'modality': modality, 'celltype': 'ALL',
+                                                     'organ': organ, 'group': group,
+                                                     'AUROC': auroc, 'AUPRC': auprc,
+                                                     f'n_pos': positives, f'n_neg': negatives},
+                                                    index=[0])], ignore_index=True)
+        for i, modality in enumerate(track_anno['celltype'].unique()):
+            modality_idx = track_anno.index[(track_anno['celltype'] == modality) & (track_anno['modality'].str.contains('RNA') == False)].values
+            # L2 norm across modality_idx
+            modality_merged = np.linalg.norm(eqtl_scores[:, modality_idx], axis=1)
+            auroc, auprc, positives, negatives = compute_metrics(label, modality_merged, eqtl_organ_unique, group)
+            track_results = pd.concat([track_results,
+                                       pd.DataFrame({'exp': f'bican_celltype_{modality}', 'modality': 'ALL', 'celltype': modality,
+                                                     'organ': organ, 'group': group,
+                                                     'AUROC': auroc, 'AUPRC': auprc,
+                                                     f'n_pos': positives, f'n_neg': negatives},
+                                                    index=[0])], ignore_index=True)
         track_results = pd.concat([track_results, track_anno])
 # %% add annotation
 track_results['celltype'] = track_results['exp'].str.split('_').str[:-1].str.join('_')

@@ -1,4 +1,19 @@
 # %%
+"""
+Transcript-level RNA expression performance analysis.
+
+This script evaluates model predictions at the gene/transcript level by:
+1. Loading model predictions for RNA tracks
+2. Extracting gene/transcript coordinates from GTF file
+3. Computing average expression for each gene/transcript
+4. Calculating correlation metrics
+
+Modes:
+- USE_EXON_ONLY = False: Uses full transcript ranges (including introns), one entry per transcript
+- USE_EXON_ONLY = True: Aggregates by gene (combining all isoforms) and uses only exon bins,
+                        excluding introns. This gives more biologically meaningful gene expression.
+"""
+
 import sys
 import os
 PWD = '/gpfs/commons/groups/ren_lab/guojiezhong/BICAN'
@@ -15,28 +30,41 @@ import matplotlib.pyplot as plt
 
 def process_sequence(args):
     """Process a single sequence - extract transcripts and compute predictions."""
-    i, row, test_preds, test_labels, pred_rna_idxes, label_rna_idxes = args
+    i, row, test_preds, test_labels, pred_rna_idxes, label_rna_idxes, use_exon_only = args
     chr = row['chr']
     start = row['start'] + 1023
     end = row['end'] - 1024
 
-    # Get transcript info
-    df = get_transcripts_in_region(f"{chr}:{start}-{end}")
+    # Get gene/transcript info
+    # When use_exon_only=True, returns gene-aggregated data with exon bins
+    # When use_exon_only=False, returns transcript-level data
+    df = get_transcripts_in_region(f"{chr}:{start}-{end}", return_exon_bins_only=use_exon_only)
 
     # Get predictions for this sequence (i-th test sequence)
     pred = test_preds[i]  # Shape: (16320, num_tracks)
     label = test_labels[i]  # Shape: (16320, num_tracks)
 
-    # Process each gene in this sequence
+    # Process each gene/transcript in this sequence
     seq_predictions = []
     seq_labels = []
 
     for _, r in df.iterrows():
-        gene_start_bin = r['start_bin_idx']
-        gene_end_bin = r['end_bin_idx']
-        # get the predictions for this gene
-        gene_pred = pred[gene_start_bin:gene_end_bin+1, pred_rna_idxes]
-        gene_label = label[gene_start_bin:gene_end_bin+1, label_rna_idxes]
+        if use_exon_only:
+            # Use only exon bins (already aggregated by gene)
+            if 'exon_bins' in r and len(r['exon_bins']) > 0:
+                exon_bins = r['exon_bins']
+                gene_pred = pred[exon_bins, :][:, pred_rna_idxes]
+                gene_label = label[exon_bins, :][:, label_rna_idxes]
+            else:
+                # Skip genes with no exon bins
+                continue
+        else:
+            # Use all bins from start to end (original behavior for transcripts)
+            gene_start_bin = r['start_bin_idx']
+            gene_end_bin = r['end_bin_idx']
+            gene_pred = pred[gene_start_bin:gene_end_bin+1, pred_rna_idxes]
+            gene_label = label[gene_start_bin:gene_end_bin+1, label_rna_idxes]
+
         # average over bins, transform back -1 + np.sqrt(1 + seq_cov)
         gene_pred_mean = ((gene_pred + 1)**2-1).mean(axis=0, keepdims=True)
         gene_label_mean = ((gene_label + 1)**2-1).mean(axis=0, keepdims=True)
@@ -76,12 +104,17 @@ if __name__ == '__main__':
     print(f"RNA tracks: {len(pred_rna_idxes)}")
 
     # %%
+    # Set to True to use only exon bins for gene expression calculation
+    # Set to False to use all bins (including introns) - original behavior
+    USE_EXON_ONLY = True  # Change this to True to use exon-only mode
+
     # Prepare arguments for parallel processing
-    args_list = [(i, row, test_preds, test_labels, pred_rna_idxes, label_rna_idxes) for i, row in info.iterrows()]
+    args_list = [(i, row, test_preds, test_labels, pred_rna_idxes, label_rna_idxes, USE_EXON_ONLY) for i, row in info.iterrows()]
 
     # Use joblib to process sequences in parallel
     # n_jobs=-1 uses all available CPU cores
-    print("Processing sequences in parallel...")
+    mode_str = "exon-only" if USE_EXON_ONLY else "full transcript"
+    print(f"Processing sequences in parallel (mode: {mode_str})...")
     results = Parallel(n_jobs=36, verbose=10)(
         delayed(process_sequence)(args) for args in args_list
     )
@@ -107,18 +140,22 @@ if __name__ == '__main__':
     raw_labels = np.concatenate(raw_labels, axis=0)
 
     print("Saving results...")
-    np.save('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_raw_predictions.npy', raw_predictions)
-    np.save('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_raw_labels.npy', raw_labels)
-    np.save('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_gene_predictions.npy', predictions)
-    np.save('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_gene_labels.npy', labels)
-    gene_info.to_csv('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_gene_info.csv', index=False)
+    # Add suffix based on mode
+    suffix = "_exon" if USE_EXON_ONLY else ""
+    np.save(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_raw_predictions{suffix}.npy', raw_predictions)
+    np.save(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_raw_labels{suffix}.npy', raw_labels)
+    np.save(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_gene_predictions{suffix}.npy', predictions)
+    np.save(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_gene_labels{suffix}.npy', labels)
+    gene_info.to_csv(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_gene_info{suffix}.csv', index=False)
 
     # %% make plots
-    raw_predictions = np.load('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_raw_predictions.npy')
-    raw_labels = np.load('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_raw_labels.npy')
-    predictions = np.load('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_gene_predictions.npy')
-    labels = np.load('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_gene_labels.npy')
-    gene_info = pd.read_csv('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_gene_info.csv')
+    # Load saved results (update suffix if running separately)
+    suffix = "_exon" if USE_EXON_ONLY else ""
+    raw_predictions = np.load(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_raw_predictions{suffix}.npy')
+    raw_labels = np.load(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_raw_labels{suffix}.npy')
+    predictions = np.load(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_gene_predictions{suffix}.npy')
+    labels = np.load(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_gene_labels{suffix}.npy')
+    gene_info = pd.read_csv(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_gene_info{suffix}.csv')
 
     # %% compute correlations
     print("Computing correlations...")
@@ -138,9 +175,16 @@ if __name__ == '__main__':
     pred_rna_track_info['raw_corr_pearson'] = raw_corr_pearsons
     pred_rna_track_info['raw_corr_spearman'] = raw_corr_spearmans
 
-    # %% compute the correlations for each genes with longest transcripts
-    gene_info['length'] = gene_info['end_bin_idx'] - gene_info['start_bin_idx']
-    gene_info_canonical = gene_info.sort_values('length', ascending=False).drop_duplicates('geneName')
+    # %% compute the correlations for canonical genes
+    # Note: When USE_EXON_ONLY=True, gene_info is already aggregated by gene (all isoforms combined)
+    # When USE_EXON_ONLY=False, gene_info contains individual transcripts
+    if USE_EXON_ONLY:
+        # Already aggregated by gene, no need to filter
+        gene_info_canonical = gene_info.copy()
+    else:
+        # For transcript-level data, keep only the longest transcript per gene
+        gene_info['length'] = gene_info['end_bin_idx'] - gene_info['start_bin_idx']
+        gene_info_canonical = gene_info.sort_values('length', ascending=False).drop_duplicates('geneName')
 
     # %%
     corr_pearsons, corr_spearmans = [], []
@@ -154,8 +198,8 @@ if __name__ == '__main__':
     pred_rna_track_info['corr_canonical_spearman'] = corr_spearmans
 
     # Save correlation results
-    pred_rna_track_info.to_csv('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_correlations.csv', index=False)
-    print("Saved correlation results to RNA_correlations.csv")
+    pred_rna_track_info.to_csv(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_correlations{suffix}.csv', index=False)
+    print(f"Saved correlation results to RNA_correlations{suffix}.csv")
 
     # %% plot
     cell_type_info = pd.read_csv('Data/data_config/basal_ganglia_miniatlas_drop_celltype_v1.csv', index_col=0)
@@ -169,10 +213,11 @@ if __name__ == '__main__':
     # add diagnal line using sns
     sns.lineplot(x=[0, 1], y=[0, 1], color='k', linestyle='--', ax=ax)
     ax.set_xlabel('RNA 32bp Pearson Correlation')
-    ax.set_ylabel('RNA canonical transcript Pearson Correlation')
+    ylabel = 'RNA gene (exon-only) Pearson Correlation' if USE_EXON_ONLY else 'RNA canonical transcript Pearson Correlation'
+    ax.set_ylabel(ylabel)
     plt.tight_layout()
-    plt.savefig('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_correlation_scatter.png', dpi=300)
-    print("Saved correlation scatter plot")
+    plt.savefig(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_correlation_scatter{suffix}.png', dpi=300)
+    print(f"Saved correlation scatter plot to RNA_correlation_scatter{suffix}.png")
 
     # %% visualize a certain cell type
     fig, ax = plt.subplots(figsize=(5, 5))
@@ -185,10 +230,11 @@ if __name__ == '__main__':
                     ax=ax, alpha=0.5)
     ax.set_xlabel(f'log1p(Predictions) - {example_trial}')
     ax.set_ylabel(f'log1p(Labels) - {example_trial}')
-    ax.set_title(f'Gene-level predictions vs labels\nSpearman: {pred_rna_track_info.iloc[example_rna_idx]["corr_canonical_spearman"]:.3f}')
+    title_prefix = 'Gene-level (exon-only)' if USE_EXON_ONLY else 'Gene-level'
+    ax.set_title(f'{title_prefix} predictions vs labels\nSpearman: {pred_rna_track_info.iloc[example_rna_idx]["corr_canonical_spearman"]:.3f}')
     plt.tight_layout()
-    plt.savefig('Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_example_scatter.png', dpi=300)
-    print("Saved example scatter plot")
+    plt.savefig(f'Res/basal_ganglia_miniatlas_drop_celltype_v1/RNA_example_scatter{suffix}.png', dpi=300)
+    print(f"Saved example scatter plot to RNA_example_scatter{suffix}.png")
 
     print("\nDone!")
 

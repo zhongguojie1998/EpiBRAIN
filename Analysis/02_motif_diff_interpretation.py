@@ -36,18 +36,21 @@ def which_bins(s_idx: int, e_idx: int, window_size: int):
     return np.array(range(bin_start, bin_end + 1))
 
 class ModelWrapper(torch.nn.Module):
-    def __init__(self, model, output_key, target_dim, bin_range):
+    def __init__(self, model, output_key, target_pos_dim, target_neg_dims, bin_range):
         super().__init__()
         self.model = model
         self.output_key = output_key
-        self.target_dim = target_dim
+        self.target_pos_dim = target_pos_dim
+        self.target_neg_dims = target_neg_dims
         self.bin_range = bin_range
         
     def forward(self, x):
         output_dict = self.model(x)
         output = output_dict[self.output_key]
         # [batch, N, dim] -> [batch]
-        return output[:, self.bin_range, self.target_dim].mean(dim=1) 
+        output_pos = output[:, self.bin_range, self.target_pos_dim].mean(dim=1)
+        output_neg = output[:, self.bin_range, :].mean(dim=1)[:, self.target_neg_dims].mean(dim=1)
+        return output_pos - output_neg
 
 def process_region_chunk(args):
     (
@@ -64,7 +67,15 @@ def process_region_chunk(args):
         save_raw,
         prefix,
         use_head,
+        num_threads,
     ) = args
+
+    # Set torch threads for CPU
+    if device == "cpu" and num_threads is not None:
+        torch.set_num_threads(num_threads)
+        # Also set environment variables for BLAS/LAPACK libraries
+        os.environ["OMP_NUM_THREADS"] = str(num_threads)
+        os.environ["MKL_NUM_THREADS"] = str(num_threads)
 
     save_base = f"{res_base}/{exp_name}/analysis_{chk}/raw_data"
 
@@ -105,18 +116,32 @@ def process_region_chunk(args):
 
     # Process each region in the chunk
     for idx in range(len(region_chunk_data)):
-        chr_name, start, end, _, trial = region_chunk_data.iloc[idx, [0, 1, 2, 3, 4]]
+        chr_name, start, end, _, trial_pos, trial_neg = region_chunk_data.iloc[idx, [0, 1, 2, 3, 4, 5]]
+        if pd.isna(trial_neg):
+            trial_neg = "all"
+        # other wise the trial_neg should be a str like "trial1;trial2;trial3"
         name_base = (
-            f"{prefix}_{chr_name}_{start}_{end}_{trial}"
+            f"{prefix}_{chr_name}_{start}_{end}_{trial_pos}_{trial_neg.replace(';', '-')}"
             if prefix is not None
-            else f"{chr_name}_{start}_{end}_{trial}"
+            else f"{chr_name}_{start}_{end}_{trial_pos}_{trial_neg.replace(';', '-')}"
         )
 
         try:
-            trial_dim = int(label_meta.dim[label_meta['trial'] == trial].values[0])
+            trial_pos_dim = int(label_meta.dim[label_meta['trial'] == trial_pos].values[0])
         except:
-            logger.warning(f"{trial} cannot be found in label meta, skip")
+            logger.warning(f"{trial_pos} cannot be found in label meta, skip")
             continue
+        
+        # get negative trial dims
+        trial_pos_modality = label_meta.modality[label_meta['trial'] == trial_pos].values[0]
+        if trial_neg == "all":
+            trial_neg_dims = label_meta.dim[(label_meta['trial'] != trial_pos) & (label_meta['modality'] == trial_pos_modality)].values
+        else:
+            neg_trials = trial_neg.split(';')
+            trial_neg_dims = label_meta.dim[label_meta['trial'].isin(neg_trials)].values
+            if len(trial_neg_dims) == 0:
+                logger.warning(f"No valid negative trials found in {trial_neg}, skip")
+                continue
 
         if not chr_name in STD_CHR:
             continue
@@ -147,7 +172,7 @@ def process_region_chunk(args):
             pred_res = model(
                 test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), use_head
             )
-            pred_res_trial = pred_res.detach().cpu().numpy()[0, :, trial_dim]
+            pred_res_trial = pred_res.detach().cpu().numpy()[0, :, trial_pos_dim]
             del pred_res
 
         # Clear GPU cache after model prediction
@@ -175,9 +200,9 @@ def process_region_chunk(args):
                 pool_width=myconfig.data.preprocess.window_size,
                 kept_num_after_crop=myconfig.data.preprocess.n_window,
                 seqs_cov_file=label_h5,
-                genome_cov_file=data_config.loc[trial, "file"],
+                genome_cov_file=data_config.loc[trial_pos, "file"],
                 umap_npy_path=unmap_npy,
-                **data_config.loc[trial, ["sum_stat", "baseline_pct", "umap_pct", "scale", "clip", "clip_soft"]].to_dict(),
+                **data_config.loc[trial_pos, ["sum_stat", "baseline_pct", "umap_pct", "scale", "clip", "clip_soft"]].to_dict(),
             )
             with h5py.File(label_h5, "r") as f:
                 label_trial = f["targets"][0]
@@ -186,11 +211,11 @@ def process_region_chunk(args):
             continue
 
         plot_data = [label_trial, pred_res_trial]
-        plot_title = [f"{trial} Target", f"{trial} Pred"]
+        plot_title = [f"{trial_pos} Target", f"{trial_pos} Pred"]
 
         # prepare model wrapper, will sum the output over the interested bins
         model.zero_grad()
-        model_wrapper = ModelWrapper(model, use_head, trial_dim, bin_range)
+        model_wrapper = ModelWrapper(model, use_head, trial_pos_dim, trial_neg_dims, bin_range)
         # init deep lift with new model wrapper
         dl_model = DeepLift(model_wrapper, multiply_by_inputs=False, eps=1e-7)
         
@@ -199,7 +224,7 @@ def process_region_chunk(args):
 
         for baseline_type, baseline_seq_onehot in baseline_seq_onehots:
             identifier = f"{name_base}_{baseline_type}"
-            if not os.path.exists(f"{save_base}/interp/{identifier}.pt") or force_restart:
+            if not os.path.exists(f"{save_base}/interp_diff/{identifier}.pt") or force_restart:
                 # clean up before new attribution
                 dl_model.model.zero_grad()
                 nan_occur = False
@@ -230,9 +255,9 @@ def process_region_chunk(args):
                     torch.cuda.empty_cache()
                     
                 if save_raw:
-                    torch.save(attribution_cpu, f"{save_base}/interp/{identifier}.pt")
+                    torch.save(attribution_cpu, f"{save_base}/interp_diff/{identifier}.pt")
             else:
-                attribution_cpu = torch.load(f"{save_base}/interp/{identifier}.pt")
+                attribution_cpu = torch.load(f"{save_base}/interp_diff/{identifier}.pt")
                 if not torch.isfinite(attribution_cpu).all():
                     logger.warning(f"NAN occur in {identifier}")
                     nan_occur = True
@@ -303,7 +328,7 @@ def process_region_chunk(args):
 
         plt.tight_layout()
         plt.savefig(
-            f"{res_base}/{exp_name}/analysis_{chk}/plot/interp/{name_base}.png",
+            f"{res_base}/{exp_name}/analysis_{chk}/plot/interp_diff/{name_base}.png",
             dpi=300,
             bbox_inches="tight",
         )
@@ -344,6 +369,7 @@ def process_region_chunk(args):
     default="gpu",
 )
 @click.option("--num_processes", type=int, default=4, help="Number of subprocess to use for parallel processing")
+@click.option("--num_threads", type=int, default=None, help="Number of threads per process for CPU mode (default: 1 if num_processes>1, else use all available)")
 @click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
 def main(
     region_bed,
@@ -358,14 +384,15 @@ def main(
     save_raw,
     processor,
     num_processes,
+    num_threads,
     use_head,
 ):
     LOG_BASE = os.path.abspath(log_base)
     CHK_BASE = os.path.abspath(chk_base)
     RES_BASE = os.path.abspath(res_base)
 
-    os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp", exist_ok=True)
-    os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/interp", exist_ok=True)
+    os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp_diff", exist_ok=True)
+    os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/interp_diff", exist_ok=True)
     os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label", exist_ok=True)
 
     logger = BaseLogger(name="Interpretation", level=logging.INFO)
@@ -374,17 +401,22 @@ def main(
     region_df = pd.read_csv(region_bed, header=None, sep="\t")
     region_df["todo"] = True
     for i in range(len(region_df)):
-        chr_name, start, end, _, trial = region_df.iloc[i, [0, 1, 2, 3, 4]]
+        # region df is chr, start, end, name, trial+, trial- (optional)
+        chr_name, start, end, _, trial_pos, trial_neg = region_df.iloc[i, [0, 1, 2, 3, 4, 5]]
+        # if trial_neg is nan, default is use all trials as negative
+        if pd.isna(trial_neg):
+            trial_neg = "all"
+        # other wise the trial_neg should be a str like "trial1;trial2;trial3"
         name_base = (
-            f"{prefix}_{chr_name}_{start}_{end}_{trial}"
+            f"{prefix}_{chr_name}_{start}_{end}_{trial_pos}_{trial_neg.replace(';', '-')}"
             if prefix is not None
-            else f"{chr_name}_{start}_{end}_{trial}"
+            else f"{chr_name}_{start}_{end}_{trial_pos}_{trial_neg.replace(';', '-')}"
         )
         # Check if all output files exist
         output_files_exist = (
-            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp/{name_base}.png") and
-            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_mseqs_unmap.npy") and
-            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_label.h5")
+            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp_diff/{name_base}.png") and
+            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/interp_diff/{name_base}_mseqs_unmap.npy") and
+            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/interp_diff/{name_base}_label.h5")
         )
         region_df.at[i, 'todo'] = not output_files_exist or force_restart
         if not region_df.at[i, 'todo']:
@@ -411,6 +443,25 @@ def main(
         )
         num_processes = available_devices
 
+    # Determine thread count for CPU mode
+    if processor == "cpu":
+        if num_threads is None:
+            # If multiple processes, use 1 thread per process to avoid oversubscription
+            # If single process, use all available CPUs
+            if num_processes > 1:
+                num_threads_per_process = 1
+            else:
+                num_threads_per_process = None  # Let PyTorch use all available
+        else:
+            num_threads_per_process = num_threads
+
+        if num_threads_per_process is not None:
+            logger.info(f"Using {num_threads_per_process} threads per process for CPU mode")
+        else:
+            logger.info(f"Using all available CPUs for single process mode")
+    else:
+        num_threads_per_process = None
+
     # Multi-Process parallel processing
     logger.info(f"Processing with {num_processes} processes")
 
@@ -418,21 +469,18 @@ def main(
     chunks = []
     n = len(region_df)
 
-    if processor == "gpu":
-        base = n // num_processes
-        extra = n % num_processes
-        start = 0
-        for i in range(num_processes):
-            size = base + (1 if i < extra else 0)
-            end = start + size
-            if start < end:
-                chunk = region_df.iloc[start:end].copy()
-                chunks.append(chunk)
-            start = end
-    elif processor == "cpu":
-        for i in range(n):
-            chunk = region_df.iloc[i : i + 1].copy()
+    # Use the same chunking strategy for both CPU and GPU
+    # Divide regions evenly among num_processes
+    base = n // num_processes
+    extra = n % num_processes
+    start = 0
+    for i in range(num_processes):
+        size = base + (1 if i < extra else 0)
+        end = start + size
+        if start < end:
+            chunk = region_df.iloc[start:end].copy()
             chunks.append(chunk)
+        start = end
 
     logger.info(f"Split {len(region_df)} regions into {len(chunks)} chunks")
     for chunk in chunks:
@@ -455,14 +503,15 @@ def main(
             save_raw,
             prefix,
             use_head,
+            num_threads_per_process,
         )
         process_args.append(args)
 
     # Run parallel processing
     logger.info("Starting processing...")
-    if processor == "gpu" and num_processes > 1:
-        mp.set_start_method("spawn", force=True)
     if num_processes > 1:
+        # Use spawn to avoid issues with model weight sharing
+        mp.set_start_method("spawn", force=True)
         with mp.Pool(processes=num_processes) as pool:
             pool.map(process_region_chunk, process_args)
     else:

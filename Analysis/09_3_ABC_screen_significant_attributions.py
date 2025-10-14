@@ -1,13 +1,34 @@
 #!/usr/bin/env python
 """
-Extract attribution scores from .pt files for ABC enhancer-gene connections.
+Extract attribution scores from .pt files for all peaks overlapping with attribution windows.
 
-For each ABC connection, loads the corresponding attribution file and extracts
-max, sum, and min attribution scores for the enhancer region.
+This script creates a unified "non_abc" dataframe containing all ATAC peaks that overlap
+with .pt files, along with their attribution scores and distance to TSS. Optionally annotates
+peaks with ABC connection information to distinguish ABC enhancers from non-ABC peaks.
+
+Workflow:
+1. Scans all .pt files in the base directory
+2. For each file, finds overlapping ATAC peaks from the provided BED file
+3. Calculates:
+   - 6 attribution scores per peak: max_score, sum_score, min_score (raw and binned)
+   - Distance from peak center to TSS (extracted from .pt filename)
+4. Creates the "non_abc" dataframe with all results
+5. (Optional) Annotates with ABC connection info using --abc_file
+
+Output columns:
+- pt_file, chr, tss, celltype, modality
+- peak_chr, peak_start, peak_end, peak_center, distance_to_tss
+- max_score, sum_score, min_score (raw attribution scores)
+- max_bin_score, sum_bin_score, min_bin_score (binned attribution scores)
+- is_abc, abc_gene, abc_score, abc_class (if ABC annotation provided)
 
 Usage:
-    python 09_3_ABC_screen_significant_attributions.py -f <fasta_file> -o <output.tsv> -m K27Ac
-    python 09_3_ABC_screen_significant_attributions.py -f <fasta_file> -o <output.tsv> -m ATAC -j 16
+    # Basic usage - all peaks
+    python 09_3_ABC_screen_significant_attributions.py -f genome.fa -o results.tsv
+
+    # With ABC annotation
+    python 09_3_ABC_screen_significant_attributions.py -f genome.fa -o results.tsv \\
+        --abc_file Data/source/ABC/H3K27ac_abc_filtcelltype_conns.txt
 """
 
 import os
@@ -19,6 +40,7 @@ import pandas as pd
 import click
 from pathlib import Path
 from joblib import Parallel, delayed
+from glob import glob
 
 # Add Model directory to path
 ROOT = Path(__file__).parent.parent
@@ -33,7 +55,7 @@ def load_and_process_pt_file(pt_file, fasta_file, window_size=32):
 
     Returns:
     --------
-    tuple : (file_chrom, bin_starts, pooled_scores) or None if error
+    tuple : (file_chrom, context_start, raw_scores, bin_starts, pooled_scores) or None if error
     """
     if not os.path.exists(pt_file):
         return None
@@ -73,26 +95,47 @@ def load_and_process_pt_file(pt_file, fasta_file, window_size=32):
         # Multiply by sequence to get actual contributions
         attribution_weighted = attribution_np * test_seq_onehot_np
 
-        # Sum across nucleotides
-        scores = np.sum(attribution_weighted, axis=1)
+        # Sum across nucleotides to get raw scores
+        raw_scores = np.sum(attribution_weighted, axis=1)
 
         # Pool into bins
-        n_bins = len(scores) // window_size
-        pooled_scores = scores[:n_bins * window_size].reshape(n_bins, window_size).mean(axis=1)
+        n_bins = len(raw_scores) // window_size
+        pooled_scores = raw_scores[:n_bins * window_size].reshape(n_bins, window_size).mean(axis=1)
 
         # Calculate bin positions
         bin_starts = context_start + np.arange(n_bins) * window_size
 
-        return file_chrom, bin_starts, pooled_scores
+        return file_chrom, context_start, raw_scores, bin_starts, pooled_scores
 
     except Exception as e:
         print(f"Error loading {pt_file}: {e}")
         return None
 
 
-def extract_scores_from_processed_data(bin_starts, pooled_scores, enhancer_start, enhancer_end):
+def extract_raw_scores(context_start, raw_scores, enhancer_start, enhancer_end):
     """
-    Extract max, sum, min scores for a given enhancer region from pre-processed data.
+    Extract max, sum, min scores for a given enhancer region from raw (non-binned) scores.
+    """
+    # Calculate indices in the raw scores array
+    start_idx = enhancer_start - context_start
+    end_idx = enhancer_end - context_start
+
+    # Ensure indices are within bounds
+    if start_idx < 0 or end_idx > len(raw_scores) or start_idx >= end_idx:
+        return None
+
+    enhancer_scores = raw_scores[start_idx:end_idx]
+
+    return {
+        'max_score': float(np.max(enhancer_scores)),
+        'sum_score': float(np.sum(enhancer_scores)),
+        'min_score': float(np.min(enhancer_scores)),
+    }
+
+
+def extract_binned_scores(bin_starts, pooled_scores, enhancer_start, enhancer_end):
+    """
+    Extract max, sum, min scores for a given enhancer region from binned scores.
     """
     # Find bins that overlap with the enhancer region
     enhancer_mask = (bin_starts >= enhancer_start) & (bin_starts < enhancer_end)
@@ -103,9 +146,9 @@ def extract_scores_from_processed_data(bin_starts, pooled_scores, enhancer_start
     enhancer_scores = pooled_scores[enhancer_mask]
 
     return {
-        'max_score': float(np.max(enhancer_scores)),
-        'sum_score': float(np.sum(enhancer_scores)),
-        'min_score': float(np.min(enhancer_scores)),
+        'max_bin_score': float(np.max(enhancer_scores)),
+        'sum_bin_score': float(np.sum(enhancer_scores)),
+        'min_bin_score': float(np.min(enhancer_scores)),
     }
 
 
@@ -124,41 +167,502 @@ def process_single_pt_file_group(pt_file, group_df, fasta_file):
 
     Returns:
     --------
-    list : List of tuples (idx, max_score, sum_score, min_score, file_found, filename)
+    list : List of tuples (idx, max_score, sum_score, min_score, max_bin_score, sum_bin_score, min_bin_score, file_found, filename)
     """
     results = []
     filename = os.path.basename(pt_file)
 
-    # Load and process the .pt file once
-    processed_data = load_and_process_pt_file(pt_file, fasta_file)
+    try:
+        # Load and process the .pt file once
+        processed_data = load_and_process_pt_file(pt_file, fasta_file)
 
-    if processed_data is None:
-        # File not found or error - mark all rows as not found
+        if processed_data is None:
+            # File not found or error - mark all rows as not found
+            for idx, row in group_df.iterrows():
+                results.append((idx, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, False, ''))
+            return results
+
+        _file_chrom, context_start, raw_scores, bin_starts, pooled_scores = processed_data
+
+        # Extract scores for all enhancers in this file
         for idx, row in group_df.iterrows():
-            results.append((idx, np.nan, np.nan, np.nan, False, ''))
-        return results
+            try:
+                # Extract raw scores
+                raw_result = extract_raw_scores(
+                    context_start, raw_scores, row['start.x'], row['end.x']
+                )
 
-    _file_chrom, bin_starts, pooled_scores = processed_data
+                # Extract binned scores
+                binned_result = extract_binned_scores(
+                    bin_starts, pooled_scores, row['start.x'], row['end.x']
+                )
 
-    # Extract scores for all enhancers in this file
-    for idx, row in group_df.iterrows():
-        result = extract_scores_from_processed_data(
-            bin_starts, pooled_scores, row['start.x'], row['end.x']
-        )
+                if raw_result is not None and binned_result is not None:
+                    results.append((
+                        idx,
+                        raw_result['max_score'],
+                        raw_result['sum_score'],
+                        raw_result['min_score'],
+                        binned_result['max_bin_score'],
+                        binned_result['sum_bin_score'],
+                        binned_result['min_bin_score'],
+                        True,
+                        filename
+                    ))
+                else:
+                    results.append((idx, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, False, ''))
+            except Exception as e:
+                print(f"Error processing row {idx}: {e}")
+                results.append((idx, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, False, ''))
 
-        if result is not None:
-            results.append((
-                idx,
-                result['max_score'],
-                result['sum_score'],
-                result['min_score'],
-                True,
-                filename
-            ))
-        else:
-            results.append((idx, np.nan, np.nan, np.nan, False, ''))
+    except Exception as e:
+        print(f"Error processing file {pt_file}: {e}")
+        # Mark all rows as not found
+        for idx, row in group_df.iterrows():
+            results.append((idx, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, False, ''))
 
     return results
+
+
+def process_single_pt_file_for_peaks(pt_file, peaks_df, fasta_file):
+    """
+    Process a single .pt file and extract scores for all overlapping peaks.
+
+    Parameters:
+    -----------
+    pt_file : str
+        Path to .pt file
+    peaks_df : pd.DataFrame
+        DataFrame containing all peaks (chr, start, end)
+    fasta_file : str
+        Path to reference genome FASTA file
+
+    Returns:
+    --------
+    list : List of dicts containing peak results
+    """
+    results = []
+    filename = os.path.basename(pt_file)
+
+    try:
+        # Parse filename to extract TSS location
+        # Pattern: {chrom}_{start}_{end}_MiniAtlas-{celltype}_{modality}_random.pt
+        match = re.match(r'(chr\w+)_(\d+)_(\d+)_MiniAtlas-(.+?)_(\w+)_random\.pt', filename)
+        if not match:
+            return results
+
+        file_chrom = match.group(1)
+        file_start = int(match.group(2))
+        file_end = int(match.group(3))
+        celltype = match.group(4)
+        modality = match.group(5)
+
+        # TSS is at the midpoint
+        tss = (file_start + file_end) // 2
+
+        # Load and process the .pt file
+        processed_data = load_and_process_pt_file(pt_file, fasta_file)
+        if processed_data is None:
+            return results
+
+        _file_chrom, context_start, raw_scores, bin_starts, pooled_scores = processed_data
+
+        # Filter peaks to those on the same chromosome
+        chrom_peaks = peaks_df[peaks_df['chr'] == file_chrom].copy()
+
+        if len(chrom_peaks) == 0:
+            return results
+
+        # Find overlapping peaks
+        # A peak overlaps if it intersects with [context_start, context_start + len(raw_scores)]
+        context_end = context_start + len(raw_scores)
+
+        for _, peak in chrom_peaks.iterrows():
+            peak_start = peak['start']
+            peak_end = peak['end']
+
+            # Check for overlap
+            if peak_end <= context_start or peak_start >= context_end:
+                continue  # No overlap
+
+            # Calculate peak center
+            peak_center = (peak_start + peak_end) // 2
+
+            # Calculate distance from peak center to TSS
+            distance_to_tss = abs(peak_center - tss)
+
+            # Extract raw scores
+            raw_result = extract_raw_scores(
+                context_start, raw_scores, peak_start, peak_end
+            )
+
+            # Extract binned scores
+            binned_result = extract_binned_scores(
+                bin_starts, pooled_scores, peak_start, peak_end
+            )
+
+            if raw_result is not None and binned_result is not None:
+                result = {
+                    'pt_file': filename,
+                    'chr': file_chrom,
+                    'tss': tss,
+                    'celltype': celltype,
+                    'modality': modality,
+                    'peak_chr': peak['chr'],
+                    'peak_start': peak_start,
+                    'peak_end': peak_end,
+                    'peak_center': peak_center,
+                    'distance_to_tss': distance_to_tss,
+                    'max_score': raw_result['max_score'],
+                    'sum_score': raw_result['sum_score'],
+                    'min_score': raw_result['min_score'],
+                    'max_bin_score': binned_result['max_bin_score'],
+                    'sum_bin_score': binned_result['sum_bin_score'],
+                    'min_bin_score': binned_result['min_bin_score']
+                }
+
+                # Add peak name and score if available
+                if 'name' in peak:
+                    result['peak_name'] = peak['name']
+                if 'score' in peak:
+                    result['peak_score'] = peak['score']
+
+                results.append(result)
+
+    except Exception as e:
+        print(f"Error processing file {pt_file}: {e}")
+
+    return results
+
+
+def _process_match_key_group(match_key, non_abc_subset, abc_rows_data):
+    """
+    Process a single match_key group to find ABC annotations.
+
+    Parameters:
+    -----------
+    match_key : str
+        The match key for this group
+    non_abc_subset : pd.DataFrame
+        Subset of non_abc_df with this match_key
+    abc_rows_data : list of dict
+        ABC row data as dictionaries (chrom.x, start.x, end.x, TargetGene, ABC.Score)
+
+    Returns:
+    --------
+    list : List of tuples (idx, is_abc, abc_gene, abc_score, abc_celltype)
+    """
+    results = []
+
+    # Extract celltype from match_key (format: chr_start_end_celltype)
+    celltype = match_key.rsplit('_', 1)[-1]
+
+    # For each ABC enhancer, find overlapping peaks
+    for abc_row in abc_rows_data:
+        # Check for peak overlap with enhancer [start.x, end.x]
+        overlap_mask = (
+            (non_abc_subset['peak_chr'] == abc_row['chrom.x']) &
+            (non_abc_subset['peak_start'] < abc_row['end.x']) &
+            (non_abc_subset['peak_end'] > abc_row['start.x'])
+        )
+
+        # Get matching indices
+        matching_indices = non_abc_subset.index[overlap_mask].tolist()
+
+        for idx in matching_indices:
+            results.append((
+                idx,
+                True,  # is_abc
+                abc_row.get('TargetGene', ''),
+                abc_row.get('ABC.Score', np.nan),
+                celltype  # Use celltype from match_key
+            ))
+
+    return results
+
+
+def _process_match_key_group_direct(match_key, abc_grouped, non_abc_grouped, cols_to_extract):
+    """
+    Process a single match_key group to find ABC annotations.
+    Does data preparation and processing in one step.
+
+    Parameters:
+    -----------
+    match_key : str
+        The match key for this group
+    abc_grouped : pd.DataFrameGroupBy
+        Grouped ABC dataframe
+    non_abc_grouped : pd.DataFrameGroupBy
+        Grouped non_abc dataframe
+    cols_to_extract : list
+        Columns to extract from ABC rows
+
+    Returns:
+    --------
+    list : List of tuples (idx, is_abc, abc_gene, abc_score, abc_celltype)
+    """
+    # Get the groups for this match_key
+    abc_rows = abc_grouped.get_group(match_key)
+    non_abc_subset = non_abc_grouped.get_group(match_key)
+
+    # Convert ABC rows to list of dicts
+    abc_rows_data = abc_rows[cols_to_extract].to_dict('records')
+
+    # Call the original processing function
+    return _process_match_key_group(match_key, non_abc_subset, abc_rows_data)
+
+
+def annotate_with_abc(non_abc_df, abc_file, n_jobs=-1):
+    """
+    Annotate the non_abc dataframe with ABC connection information.
+
+    Matches peaks in non_abc with ABC enhancers by:
+    1. Constructing expected .pt filename from ABC data
+    2. Matching peak coordinates with ABC enhancer coordinates
+    3. Using parallel processing for efficiency
+
+    The .pt filename pattern is: {chrom}_{tss_start}_{tss_end}_MiniAtlas-{celltype}_{modality}_random.pt
+    where tss_start = start.y - 511 and tss_end = start.y + 512
+
+    Parameters:
+    -----------
+    non_abc_df : pd.DataFrame
+        DataFrame from process_all_peaks() containing peak-level attribution scores
+    abc_file : str
+        Path to ABC connections file
+    n_jobs : int
+        Number of parallel jobs (default: -1 = all CPUs)
+
+    Returns:
+    --------
+    pd.DataFrame : non_abc_df with additional ABC annotation columns
+    """
+    print(f"\nAnnotating with ABC connections from: {abc_file}")
+    abc = pd.read_csv(abc_file, sep='\t')
+    print(f"Loaded {len(abc)} ABC connections")
+
+    # Create a match key from ABC data
+    # The .pt filename is constructed as: {chrom}_{start.y-511}_{start.y+512}_MiniAtlas-{CellType}_{modality}_random.pt
+    # We need to match: enhancer chr, celltype, tss location, and check peak overlap
+
+    # Add columns to ABC for matching
+    abc['tss_start'] = abc['start.y'] - 511
+    abc['tss_end'] = abc['start.y'] + 512
+    abc['match_key'] = (
+        abc['chrom.x'].astype(str) + '_' +
+        abc['tss_start'].astype(str) + '_' +
+        abc['tss_end'].astype(str) + '_' +
+        abc['CellType'].astype(str)
+    )
+
+    # Create match key in non_abc_df
+    # Extract components from pt_file: chr_start_end_MiniAtlas-celltype_modality_random.pt
+    # We'll match on chr_start_end_celltype
+    non_abc_df['match_key'] = (
+        non_abc_df['chr'].astype(str) + '_' +
+        (non_abc_df['tss'] - 511).astype(str) + '_' +  # Reconstruct tss_start
+        (non_abc_df['tss'] + 512).astype(str) + '_' +  # Reconstruct tss_end
+        non_abc_df['celltype'].astype(str)
+    )
+
+    # Initialize ABC annotation columns
+    non_abc_df['is_abc'] = False
+    non_abc_df['abc_gene'] = ''
+    non_abc_df['abc_score'] = np.nan
+    non_abc_df['abc_class'] = ''
+
+    # Group ABC by match_key for efficient lookup
+    abc_grouped = abc.groupby('match_key')
+
+    # Get unique match keys that exist in both dataframes
+    common_match_keys = set(non_abc_df['match_key'].unique()) & set(abc_grouped.groups.keys())
+
+    print(f"Found {len(common_match_keys)} common match keys to process")
+
+    if len(common_match_keys) == 0:
+        print("Warning: No matching keys found between non_abc and ABC data")
+        non_abc_df = non_abc_df.drop(columns=['match_key'])
+        return non_abc_df
+
+    # Determine which columns are available in ABC data
+    required_cols = ['chrom.x', 'start.x', 'end.x']
+    optional_cols = ['TargetGene', 'ABC.Score']
+    cols_to_extract = required_cols + [col for col in optional_cols if col in abc.columns]
+
+    # Pre-group non_abc_df for efficient lookup (avoids repeated DataFrame filtering)
+    non_abc_grouped = non_abc_df.groupby('match_key')
+
+    # Process in parallel - data preparation is done inside each worker
+    print(f"Processing ABC annotations in parallel with {n_jobs if n_jobs > 0 else 'all'} CPUs...")
+    all_results = Parallel(n_jobs=n_jobs, backend='loky', verbose=5)(
+        delayed(_process_match_key_group_direct)(match_key, abc_grouped, non_abc_grouped, cols_to_extract)
+        for match_key in common_match_keys
+    )
+
+    # Flatten results and update dataframe
+    print("Updating annotations...")
+    matched_count = 0
+    for results in all_results:
+        for idx, is_abc, abc_gene, abc_score, abc_celltype in results:
+            matched_count += 1
+            non_abc_df.at[idx, 'is_abc'] = is_abc
+            non_abc_df.at[idx, 'abc_gene'] = abc_gene
+            non_abc_df.at[idx, 'abc_score'] = abc_score
+            non_abc_df.at[idx, 'abc_class'] = abc_celltype  # Store celltype in abc_class column
+
+    # Clean up temporary column
+    non_abc_df = non_abc_df.drop(columns=['match_key'])
+
+    print(f"Matched {matched_count} peak-file pairs to ABC connections ({matched_count/len(non_abc_df)*100:.1f}%)")
+    print(f"ABC peaks: {non_abc_df['is_abc'].sum()}, Non-ABC peaks: {(~non_abc_df['is_abc']).sum()}")
+
+    return non_abc_df
+
+
+def process_all_peaks(bed_file, fasta_file, output_file, n_jobs=-1, base_dir="Res/basal_ganglia_miniatlas_drop_celltype_v1/analysis_150/raw_data/interp", abc_file=None, test=False, modality=None):
+    """
+    Process all .pt files and extract attribution scores for overlapping peaks.
+    Creates the "non_abc" dataframe containing all peaks.
+    Optionally annotates with ABC connection information.
+
+    Parameters:
+    -----------
+    bed_file : str
+        Path to BED file with peaks (e.g., merged_all_peaks.bed)
+    fasta_file : str
+        Path to reference genome FASTA file
+    output_file : str
+        Path to output TSV file
+    n_jobs : int
+        Number of parallel jobs (default: -1 = all CPUs)
+    base_dir : str
+        Base directory containing .pt attribution files
+    abc_file : str, optional
+        Path to ABC connections file for annotation
+    test : bool, optional
+        If True, only process first 1000 .pt files (default: False)
+    modality : str, optional
+        Filter .pt files by modality (e.g., 'ATAC', 'K27Ac'). If None, process all modalities.
+    """
+    # Load peaks BED file
+    print(f"Loading peaks from: {bed_file}")
+    peaks = pd.read_csv(bed_file, sep='\t', header=None)
+
+    # Assign column names based on number of columns
+    if len(peaks.columns) >= 5:
+        peaks.columns = ['chr', 'start', 'end', 'name', 'score'] + [f'col{i}' for i in range(5, len(peaks.columns))]
+    elif len(peaks.columns) >= 4:
+        peaks.columns = ['chr', 'start', 'end', 'name'] + [f'col{i}' for i in range(4, len(peaks.columns))]
+    else:
+        peaks.columns = ['chr', 'start', 'end'] + [f'col{i}' for i in range(3, len(peaks.columns))]
+
+    # Ensure chr is string type
+    peaks['chr'] = peaks['chr'].astype(str)
+    print(f"Loaded {len(peaks)} peaks")
+
+    # Find all .pt files in base directory
+    print(f"Searching for .pt files in: {base_dir}")
+    pt_files = glob(os.path.join(base_dir, "*.pt"))
+    print(f"Found {len(pt_files)} .pt files (all modalities)")
+
+    # Filter by modality if specified
+    if modality:
+        # Filter files that contain the modality in their filename
+        # Filename pattern: {chrom}_{start}_{end}_MiniAtlas-{celltype}_{modality}_random.pt
+        pt_files = [f for f in pt_files if f"_{modality}_random.pt" in f]
+        print(f"Filtered to {len(pt_files)} .pt files with modality '{modality}'")
+
+    # Limit to first 1000 files if test mode
+    if test and len(pt_files) > 1000:
+        print(f"TEST MODE: Limiting to first 1000 .pt files")
+        pt_files = pt_files[:1000]
+
+    if len(pt_files) == 0:
+        print("Warning: No .pt files found!")
+        return
+
+    # Process files in parallel
+    print(f"Processing .pt files in parallel with {n_jobs if n_jobs > 0 else 'all'} CPUs...")
+
+    all_results = Parallel(
+        n_jobs=n_jobs,
+        verbose=10,
+        backend='loky',
+        timeout=300  # 5 minute timeout per file
+    )(
+        delayed(process_single_pt_file_for_peaks)(pt_file, peaks, fasta_file)
+        for pt_file in pt_files
+    )
+
+    # Flatten results
+    print("Aggregating results...")
+    flat_results = []
+    for file_results in all_results:
+        flat_results.extend(file_results)
+
+    # Create dataframe
+    non_abc = pd.DataFrame(flat_results)
+
+    # Save results
+    non_abc.to_csv(output_file, sep='\t', index=False)
+    
+    if len(non_abc) == 0:
+        print("Warning: No overlapping peaks found!")
+        return non_abc
+
+    # Optionally annotate with ABC connections
+    if abc_file:
+        non_abc = annotate_with_abc(non_abc, abc_file, n_jobs=n_jobs)
+
+    # Save results
+    non_abc.to_csv(output_file, sep='\t', index=False)
+
+    # Print summary
+    print(f"\n{'='*80}")
+    print(f"Summary:")
+    print(f"  Total .pt files processed: {len(pt_files)}")
+    print(f"  Total peaks: {len(peaks)}")
+    print(f"  Total overlapping peak-file pairs: {len(non_abc)}")
+    if len(non_abc) > 0:
+        print(f"  Unique peaks with overlaps: {non_abc[['peak_chr', 'peak_start', 'peak_end']].drop_duplicates().shape[0]}")
+        print(f"  Unique .pt files with overlaps: {non_abc['pt_file'].nunique()}")
+        if 'is_abc' in non_abc.columns:
+            print(f"\n  ABC annotation:")
+            print(f"    ABC peaks: {non_abc['is_abc'].sum()} ({non_abc['is_abc'].sum()/len(non_abc)*100:.1f}%)")
+            print(f"    Non-ABC peaks: {(~non_abc['is_abc']).sum()} ({(~non_abc['is_abc']).sum()/len(non_abc)*100:.1f}%)")
+        print(f"\n  Distance to TSS statistics:")
+        print(f"    Mean: {non_abc['distance_to_tss'].mean():.1f} bp")
+        print(f"    Median: {non_abc['distance_to_tss'].median():.1f} bp")
+        print(f"    Min: {non_abc['distance_to_tss'].min()} bp")
+        print(f"    Max: {non_abc['distance_to_tss'].max()} bp")
+    print(f"\nResults saved to: {output_file}")
+    print(f"{'='*80}\n")
+
+    # Print statistics for attribution scores
+    if len(non_abc) > 0:
+        print("\nRaw attribution score statistics:")
+        print(f"  Max score - mean: {non_abc['max_score'].mean():.4f}, std: {non_abc['max_score'].std():.4f}")
+        print(f"  Sum score - mean: {non_abc['sum_score'].mean():.4f}, std: {non_abc['sum_score'].std():.4f}")
+        print(f"  Min score - mean: {non_abc['min_score'].mean():.4f}, std: {non_abc['min_score'].std():.4f}")
+
+        print("\nBinned attribution score statistics:")
+        print(f"  Max bin score - mean: {non_abc['max_bin_score'].mean():.4f}, std: {non_abc['max_bin_score'].std():.4f}")
+        print(f"  Sum bin score - mean: {non_abc['sum_bin_score'].mean():.4f}, std: {non_abc['sum_bin_score'].std():.4f}")
+        print(f"  Min bin score - mean: {non_abc['min_bin_score'].mean():.4f}, std: {non_abc['min_bin_score'].std():.4f}")
+
+        print("\nTop 10 peaks by max raw score:")
+        top_max = non_abc.nlargest(10, 'max_score')
+        print(top_max[['peak_chr', 'peak_start', 'peak_end', 'celltype', 'modality', 'distance_to_tss',
+                       'max_score', 'sum_score', 'min_score', 'max_bin_score', 'sum_bin_score', 'min_bin_score']].to_string(index=False))
+
+    return non_abc
+
+
+def process_non_abc_peaks(bed_file, fasta_file, output_file, n_jobs=-1, base_dir="Res/basal_ganglia_miniatlas_drop_celltype_v1/analysis_150/raw_data/interp", modality=None):
+    """
+    Deprecated: Use process_all_peaks() instead.
+    """
+    return process_all_peaks(bed_file, fasta_file, output_file, n_jobs, base_dir, abc_file=None, test=False, modality=modality)
 
 
 def process_abc_file(abc_file, fasta_file, output_file, n_jobs=-1, modality='K27Ac', base_dir="Res/basal_ganglia_miniatlas_drop_celltype_v1/analysis_150/raw_data/interp"):
@@ -206,14 +710,23 @@ def process_abc_file(abc_file, fasta_file, output_file, n_jobs=-1, modality='K27
     abc['max_score'] = np.nan
     abc['sum_score'] = np.nan
     abc['min_score'] = np.nan
+    abc['max_bin_score'] = np.nan
+    abc['sum_bin_score'] = np.nan
+    abc['min_bin_score'] = np.nan
     abc['file_found'] = False
     abc['pt_filename'] = ''
 
     # Process files in parallel
     print(f"Processing .pt files in parallel with {n_jobs if n_jobs > 0 else 'all'} CPUs...")
 
-    # Use joblib to process file groups in parallel
-    all_results = Parallel(n_jobs=n_jobs, verbose=10)(
+    # Use joblib to process file groups in parallel with memory management
+    # Use loky backend with timeout to handle memory issues better
+    all_results = Parallel(
+        n_jobs=n_jobs,
+        verbose=10,
+        backend='loky',
+        timeout=300  # 5 minute timeout per file
+    )(
         delayed(process_single_pt_file_group)(pt_file, group_df, fasta_file)
         for pt_file, group_df in grouped
     )
@@ -222,12 +735,15 @@ def process_abc_file(abc_file, fasta_file, output_file, n_jobs=-1, modality='K27
     print("Updating results...")
     files_found = 0
     for file_results in all_results:
-        if any(result[4] for result in file_results):  # Check if any file_found is True
+        if any(result[7] for result in file_results):  # Check if any file_found is True
             files_found += 1
-        for idx, max_score, sum_score, min_score, file_found, filename in file_results:
+        for idx, max_score, sum_score, min_score, max_bin_score, sum_bin_score, min_bin_score, file_found, filename in file_results:
             abc.at[idx, 'max_score'] = max_score
             abc.at[idx, 'sum_score'] = sum_score
             abc.at[idx, 'min_score'] = min_score
+            abc.at[idx, 'max_bin_score'] = max_bin_score
+            abc.at[idx, 'sum_bin_score'] = sum_bin_score
+            abc.at[idx, 'min_bin_score'] = min_bin_score
             abc.at[idx, 'file_found'] = file_found
             abc.at[idx, 'pt_filename'] = filename
 
@@ -252,31 +768,75 @@ def process_abc_file(abc_file, fasta_file, output_file, n_jobs=-1, modality='K27
     # Print statistics for successfully processed connections
     if n_found > 0:
         valid_data = abc[abc['file_found']]
-        print("\nAttribution score statistics (for found files):")
+        print("\nRaw attribution score statistics (for found files):")
         print(f"  Max score - mean: {valid_data['max_score'].mean():.4f}, std: {valid_data['max_score'].std():.4f}")
         print(f"  Sum score - mean: {valid_data['sum_score'].mean():.4f}, std: {valid_data['sum_score'].std():.4f}")
         print(f"  Min score - mean: {valid_data['min_score'].mean():.4f}, std: {valid_data['min_score'].std():.4f}")
 
-        print("\nTop 10 connections by max score:")
+        print("\nBinned attribution score statistics (for found files):")
+        print(f"  Max bin score - mean: {valid_data['max_bin_score'].mean():.4f}, std: {valid_data['max_bin_score'].std():.4f}")
+        print(f"  Sum bin score - mean: {valid_data['sum_bin_score'].mean():.4f}, std: {valid_data['sum_bin_score'].std():.4f}")
+        print(f"  Min bin score - mean: {valid_data['min_bin_score'].mean():.4f}, std: {valid_data['min_bin_score'].std():.4f}")
+
+        print("\nTop 10 connections by max raw score:")
         top_max = valid_data.nlargest(10, 'max_score')
-        print(top_max[['chrom.x', 'start.x', 'end.x', 'CellType', 'max_score', 'sum_score', 'min_score', 'pt_filename']].to_string(index=False))
+        print(top_max[['chrom.x', 'start.x', 'end.x', 'CellType', 'max_score', 'sum_score', 'min_score',
+                       'max_bin_score', 'sum_bin_score', 'min_bin_score', 'pt_filename']].to_string(index=False))
 
 
 @click.command()
-@click.option('-a', '--abc_file', type=str, default='Data/source/ABC/H3K27ac_abc_filtcelltype_conns.txt',
-              help='ABC connections file (default: Data/source/ABC/H3K27ac_abc_filtcelltype_conns.txt)')
+@click.option('-a', '--abc_file', type=str, default=None,
+              help='ABC connections file for annotation (optional)')
 @click.option('-f', '--fasta', 'fasta_file', required=True, type=str, help='Reference genome FASTA file')
 @click.option('-o', '--output', type=str, required=True, help='Output TSV file')
 @click.option('-j', '--n_jobs', type=int, default=-1,
               help='Number of parallel jobs (default: -1 = all CPUs)')
-@click.option('-m', '--modality', type=str, default='K27Ac',
-              help='Modality name for .pt files (default: K27Ac)')
 @click.option('-b', '--base_dir', type=str,
               default='Res/basal_ganglia_miniatlas_drop_celltype_v1/analysis_150/raw_data/interp',
               help='Base directory containing .pt attribution files')
-def main(abc_file, fasta_file, output, n_jobs, modality, base_dir):
-    """Extract attribution scores from .pt files for ABC enhancer-gene connections."""
-    process_abc_file(abc_file, fasta_file, output, n_jobs, modality, base_dir)
+@click.option('--bed_file', type=str, default='Data/source/MiniAtlas_ATAC_peak/merged_all_peaks.bed',
+              help='BED file with peaks (default: Data/source/MiniAtlas_ATAC_peak/merged_all_peaks.bed)')
+@click.option('-m', '--modality', type=str, default=None,
+              help='Filter by modality (e.g., ATAC, K27Ac). If not specified, process all modalities.')
+@click.option('--test', is_flag=True, default=False,
+              help='Test mode: only process first 1000 .pt files')
+def main(abc_file, fasta_file, output, n_jobs, base_dir, bed_file, modality, test):
+    """
+    Extract attribution scores from .pt files for all peaks overlapping with attribution windows.
+
+    This script creates a unified "non_abc" dataframe containing all ATAC peaks that overlap
+    with .pt files, along with their attribution scores and distance to TSS.
+
+    If --abc_file is provided, the script will annotate peaks to distinguish ABC enhancers
+    from non-ABC peaks.
+
+    Examples:
+
+        # Basic usage - all peaks without ABC annotation
+        python 09_3_ABC_screen_significant_attributions.py \\
+            -f genome.fa -o results.tsv \\
+            --bed_file Data/source/MiniAtlas_ATAC_peak/merged_all_peaks.bed
+
+        # Filter by modality (ATAC only)
+        python 09_3_ABC_screen_significant_attributions.py \\
+            -f genome.fa -o results_atac.tsv \\
+            --bed_file Data/source/MiniAtlas_ATAC_peak/merged_all_peaks.bed \\
+            -m ATAC
+
+        # With ABC annotation and K27Ac modality
+        python 09_3_ABC_screen_significant_attributions.py \\
+            -f genome.fa -o results_k27ac.tsv \\
+            --bed_file Data/source/MiniAtlas_ATAC_peak/merged_all_peaks.bed \\
+            --abc_file Data/source/ABC/H3K27ac_abc_filtcelltype_conns.txt \\
+            -m K27Ac
+
+        # Test mode - only process first 1000 .pt files
+        python 09_3_ABC_screen_significant_attributions.py \\
+            -f genome.fa -o results_test.tsv \\
+            --bed_file Data/source/MiniAtlas_ATAC_peak/merged_all_peaks.bed \\
+            --test
+    """
+    process_all_peaks(bed_file, fasta_file, output, n_jobs, base_dir, abc_file, test, modality)
 
 
 if __name__ == '__main__':

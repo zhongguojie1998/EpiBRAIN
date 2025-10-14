@@ -25,6 +25,7 @@ Res
 
 # other files
 hostfile
+*.tsv
 
 # slurm output
 *.out
