@@ -18,13 +18,14 @@ import numpy as np
 base_cmap = plt.get_cmap("tab20")
 
 
-def apply_transform(data, transform_type="none"):
+def apply_transform(data, transform_type="none", label_meta=None):
     """
     Apply transformation to data.
 
     Args:
         data: numpy array of shape (n_samples, n_features)
-        transform_type: str, one of "none", "log", "quantile", "log_quantile"
+        transform_type: str, one of "none", "log", "quantile", "log_quantile", "log_quantile_substract_mean"
+        label_meta: pandas DataFrame with trial metadata, required for "log_quantile_substract_mean"
 
     Returns:
         Transformed data
@@ -46,6 +47,25 @@ def apply_transform(data, transform_type="none"):
         # Apply log transformation followed by quantile normalization
         data = np.log1p(np.maximum(data, 0))
         data = quantile_transform(data, output_distribution='normal', n_quantiles=min(1000, data.shape[0]))
+
+    elif transform_type == "log_quantile_substract_mean":
+        if label_meta is None:
+            raise ValueError("label_meta is required for log_quantile_substract_mean transform")
+
+        # Apply log transformation followed by quantile normalization
+        data = np.log1p(np.maximum(data, 0))
+        data = quantile_transform(data, output_distribution='normal', n_quantiles=min(1000, data.shape[0]))
+
+        # Extract modality information from trial names
+        # Assuming trial names are in format: celltype_modality
+        modalities = label_meta["trial"].str.rsplit("_", n=1).str[-1]
+
+        # Subtract mean for each modality separately (bin-wise within each modality)
+        for modality in modalities.unique():
+            modality_mask = (modalities == modality).values
+            modality_indices = np.where(modality_mask)[0]
+            # Subtract mean across cell types within this modality for each bin
+            data[:, modality_indices] = data[:, modality_indices] - data[:, modality_indices].mean(axis=1, keepdims=True)
 
     else:
         raise ValueError(f"Unknown transform_type: {transform_type}")
@@ -78,13 +98,15 @@ def calculate_trial_metrics(trial_data):
 @click.option("-s", "--splits", multiple=True, type=str, default=["Test"])
 @click.option("--res_base", required=True, default="./Res")
 @click.option("--log_base", required=True, default="./logs")
+@click.option("--data_base", required=True, default="./Data")
 @click.option("--use_mp", is_flag=True, default=False, help="Enable multiprocessing for metric calculation")
 @click.option("--n_processes", type=int, default=None, help="Number of processes to use (default: CPU count)")
-@click.option("--transform", multiple=True, type=click.Choice(['none', 'log', 'quantile', 'log_quantile']),
+@click.option("--transform", multiple=True, type=click.Choice(['none', 'log', 'quantile', 'log_quantile', 'log_quantile_substract_mean']),
               default=['none'], help="Data transformation(s) to apply before calculating correlation (can specify multiple)")
-def main(exp_name, chk, splits, res_base, log_base, use_mp, n_processes, transform):
+def main(exp_name, chk, splits, res_base, log_base, data_base, use_mp, n_processes, transform):
     LOG_BASE = os.path.abspath(f"{log_base}/{exp_name}/")
     RES_BASE = os.path.abspath(res_base)
+    DATA_BASE = os.path.abspath(f"{data_base}/")
 
     os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot", exist_ok=True)
     os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data", exist_ok=True)
@@ -106,8 +128,14 @@ def main(exp_name, chk, splits, res_base, log_base, use_mp, n_processes, transfo
 
         # Load predictions once
         test_res = torch.load(f"{RES_BASE}/{exp_name}/{split}_preds_epoch_{chk}.pt")
+        # Get original shapes for sequence-level correlation
+        test_pred_3d = test_res["pred"]['regression'][:, :, label_meta['dim']]  # (n_samples, n_windows, n_trials)
+        n_samples = test_pred_3d.shape[0]
+        n_windows = test_pred_3d.shape[1]
+        n_trials = test_pred_3d.shape[2]
+
         test_label_orig = test_res["label"]['regression'].reshape(-1, len(label_meta))
-        test_pred_orig = test_res["pred"]['regression'][:, :, label_meta['dim']].reshape(-1, len(label_meta))
+        test_pred_orig = test_pred_3d.reshape(-1, len(label_meta))
 
         # Initialize dataframe to store all metrics for all transforms
         all_metrics = pd.DataFrame(index=label_meta["trial"])
@@ -121,8 +149,8 @@ def main(exp_name, chk, splits, res_base, log_base, use_mp, n_processes, transfo
                 test_label_np = test_label_orig.numpy()
                 test_pred_np = test_pred_orig.numpy()
 
-                test_label_np = apply_transform(test_label_np, trans)
-                test_pred_np = apply_transform(test_pred_np, trans)
+                test_label_np = apply_transform(test_label_np, trans, label_meta=label_meta)
+                test_pred_np = apply_transform(test_pred_np, trans, label_meta=label_meta)
 
                 test_label = torch.from_numpy(test_label_np)
                 test_pred = torch.from_numpy(test_pred_np)
@@ -135,8 +163,53 @@ def main(exp_name, chk, splits, res_base, log_base, use_mp, n_processes, transfo
             metric_cols = {
                 "MSE": f"MSE{col_suffix}",
                 "MAE": f"MAE{col_suffix}",
-                "PearsonR": f"PearsonR{col_suffix}"
+                "PearsonR": f"PearsonR{col_suffix}",
+                "AvgSeqPearsonR": f"AvgSeqPearsonR{col_suffix}"
             }
+
+            # Calculate sequence-level correlation metric
+            # Reshape to (n_samples, n_windows, n_trials) for sequence-level correlation
+            test_label_3d = test_label.reshape(n_samples, n_windows, n_trials)
+            test_pred_3d = test_pred.reshape(n_samples, n_windows, n_trials)
+
+            # Calculate correlation for each sequence and trial using vectorized operations
+            # Convert to numpy if needed
+            if isinstance(test_label_3d, torch.Tensor):
+                label_np = test_label_3d.numpy()
+            else:
+                label_np = test_label_3d
+            if isinstance(test_pred_3d, torch.Tensor):
+                pred_np = test_pred_3d.numpy()
+            else:
+                pred_np = test_pred_3d
+
+            # Center the data (subtract mean along window dimension)
+            label_centered = label_np - label_np.mean(axis=1, keepdims=True)
+            pred_centered = pred_np - pred_np.mean(axis=1, keepdims=True)
+
+            # Compute Pearson correlation using vectorized operations
+            numerator = (label_centered * pred_centered).sum(axis=1)  # (n_samples, n_trials)
+            denominator = np.sqrt((label_centered ** 2).sum(axis=1) * (pred_centered ** 2).sum(axis=1))
+            seq_corrs = numerator / denominator  # (n_samples, n_trials)
+
+            # Find best sequence (averaged across all trials)
+            avg_corr_per_seq = np.nanmean(seq_corrs, axis=1)  # Average across trials for each sequence
+            best_seq_idx = test_res["index"].cpu().numpy()[np.argmax(avg_corr_per_seq)]
+            best_seq_corr = avg_corr_per_seq[np.argmax(avg_corr_per_seq)]
+            seq_info = pd.read_csv(f"{DATA_BASE}/{exp_name}/sequences.bed", sep="\t", header=None,
+                                   names=["chrom", "start", "end", "split"])
+            seq_info = seq_info[seq_info["split"] == split.lower()].reset_index(drop=True)
+            best_seq = seq_info.iloc[best_seq_idx]
+            seq_corrs_df = pd.DataFrame(seq_corrs, columns=label_meta["trial"])
+            seq_corrs_df['chrom'] = seq_info['chrom'].iloc[test_res["index"].cpu().numpy()].values
+            seq_corrs_df['start'] = seq_info['start'].iloc[test_res["index"].cpu().numpy()].values
+            seq_corrs_df['end'] = seq_info['end'].iloc[test_res["index"].cpu().numpy()].values
+            seq_corrs_df.to_csv(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_avg_sequence_correlation{col_suffix}.csv", index=False)
+            print(f"    Best sequence: index={best_seq_idx}, avg_correlation={best_seq_corr:.4f}")
+            print(f"    Best sequence info: {best_seq['chrom']}:{best_seq['start']}-{best_seq['end']}")
+
+            # Average across trials for each sequence, then average across sequences
+            avg_seq_pearsonr_per_trial = np.mean(seq_corrs, axis=0)  # Average across sequences for each trial
 
             if use_mp:
                 # Prepare data for multiprocessing
@@ -166,6 +239,10 @@ def main(exp_name, chk, splits, res_base, log_base, use_mp, n_processes, transfo
                     all_metrics.loc[trial_name, metric_cols["MSE"]] = mse
                     all_metrics.loc[trial_name, metric_cols["MAE"]] = mae
                     all_metrics.loc[trial_name, metric_cols["PearsonR"]] = pearsonr_val
+
+                # Store sequence-level correlation for each trial
+                for i, trial_name in enumerate(label_meta["trial"]):
+                    all_metrics.loc[trial_name, metric_cols["AvgSeqPearsonR"]] = avg_seq_pearsonr_per_trial[i]
             else:
                 # Original sequential approach
                 for i in tqdm(label_meta.index, desc=f"    Calculating metrics ({trans})"):
@@ -176,6 +253,7 @@ def main(exp_name, chk, splits, res_base, log_base, use_mp, n_processes, transfo
                     all_metrics.loc[trial_name, metric_cols["MSE"]] = mean_squared_error(trail_label, trail_pred)
                     all_metrics.loc[trial_name, metric_cols["MAE"]] = mean_absolute_error(trail_label, trail_pred)
                     all_metrics.loc[trial_name, metric_cols["PearsonR"]] = pearsonr(trail_label, trail_pred)[0]
+                    all_metrics.loc[trial_name, metric_cols["AvgSeqPearsonR"]] = avg_seq_pearsonr_per_trial[i]
 
         # Save all metrics to single CSV file
         all_metrics.to_csv(metric_file)

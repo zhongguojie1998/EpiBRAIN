@@ -13,17 +13,47 @@ import pickle
 import numpy as np
 from tqdm import tqdm
 from joblib import Parallel, delayed, cpu_count
+from sklearn.preprocessing import quantile_transform
 
 base_cmap = plt.get_cmap("tab20")
+
+
+def apply_transform(data, transform_type="none"):
+    """
+    Apply transformation to data.
+
+    Args:
+        data: numpy array of shape (n_samples, n_features)
+        transform_type: str, one of "none", "log", "log_quantile"
+
+    Returns:
+        Transformed data
+    """
+    if transform_type == "none":
+        return data
+
+    data = data.copy()
+
+    if transform_type == "log":
+        # Apply log1p transformation (log(1 + x))
+        data = np.log1p(np.maximum(data, 0))
+
+    elif transform_type == "log_quantile":
+        # Apply log transformation followed by quantile normalization
+        data = np.log1p(np.maximum(data, 0))
+        data = quantile_transform(data, output_distribution='normal', n_quantiles=min(1000, data.shape[0]))
+
+    else:
+        raise ValueError(f"Unknown transform_type: {transform_type}")
+
+    return data
 
 
 def calculate_modality_metrics_batch(mod_name, label_data, pred_data):
     """
     Calculate Pearson correlation for all samples of one modality using vectorized operations
-    Calculates both raw scale and log scale correlations
     label_data, pred_data: [n_samples, n_celltypes] arrays
     """
-    # RAW SCALE CORRELATION
     # Center the data (subtract mean along celltype axis)
     label_centered = label_data - label_data.mean(axis=1, keepdims=True)
     pred_centered = pred_data - pred_data.mean(axis=1, keepdims=True)
@@ -39,40 +69,14 @@ def calculate_modality_metrics_batch(mod_name, label_data, pred_data):
 
     # Handle division by zero (constant arrays)
     with np.errstate(divide='ignore', invalid='ignore'):
-        pearsonr_vals_raw = numerator / denominator
-        pearsonr_vals_raw = np.where(np.isfinite(pearsonr_vals_raw), pearsonr_vals_raw, np.nan)
+        pearsonr_vals = numerator / denominator
+        pearsonr_vals = np.where(np.isfinite(pearsonr_vals), pearsonr_vals, np.nan)
 
-    # LOG SCALE CORRELATION
-    # Use log1p (log(1+x)) to handle zeros and ensure all values are positive
-    label_log = np.log1p(np.abs(label_data))
-    pred_log = np.log1p(np.abs(pred_data))
+    # Calculate label statistics
+    label_vars = label_data.var(axis=1)
+    label_means = label_data.mean(axis=1)
 
-    # Center the log-transformed data
-    label_log_centered = label_log - label_log.mean(axis=1, keepdims=True)
-    pred_log_centered = pred_log - pred_log.mean(axis=1, keepdims=True)
-
-    # Calculate standard deviations for log-transformed data
-    label_log_std = label_log.std(axis=1)
-    pred_log_std = pred_log.std(axis=1)
-
-    # Vectorized Pearson correlation for log scale
-    numerator_log = (label_log_centered * pred_log_centered).sum(axis=1)
-    denominator_log = n_celltypes * label_log_std * pred_log_std
-
-    # Handle division by zero
-    with np.errstate(divide='ignore', invalid='ignore'):
-        pearsonr_vals_log = numerator_log / denominator_log
-        pearsonr_vals_log = np.where(np.isfinite(pearsonr_vals_log), pearsonr_vals_log, np.nan)
-
-    # Calculate label statistics (raw scale)
-    label_vars_raw = label_data.var(axis=1)
-    label_means_raw = label_data.mean(axis=1)
-
-    # Calculate label statistics (log scale)
-    label_vars_log = label_log.var(axis=1)
-    label_means_log = label_log.mean(axis=1)
-
-    return mod_name, (pearsonr_vals_raw, pearsonr_vals_log, label_vars_raw, label_means_raw, label_vars_log, label_means_log)
+    return mod_name, (pearsonr_vals, label_vars, label_means)
 
 # %%
 @click.command()
@@ -82,12 +86,18 @@ def calculate_modality_metrics_batch(mod_name, label_data, pred_data):
 @click.option("--res_base", required=True, default="./Res")
 @click.option("--log_base", required=True, default="./logs")
 @click.option("--n_processes", type=int, default=None, help="Number of processes to use (default: CPU count)")
-def main(exp_name, chk, splits, res_base, log_base, n_processes):
+@click.option("--transform", multiple=True, type=click.Choice(['none', 'log', 'log_quantile']),
+              default=['none'], help="Data transformation(s) to apply before calculating correlation (can specify multiple)")
+def main(exp_name, chk, splits, res_base, log_base, n_processes, transform):
     LOG_BASE = os.path.abspath(f"{log_base}/{exp_name}/")
     RES_BASE = os.path.abspath(res_base)
 
     os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot", exist_ok=True)
     os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data", exist_ok=True)
+
+    # Convert transform tuple to list
+    transform_list = list(transform)
+    print(f"Using transformations: {transform_list}")
 
     # load label meta info
     label_meta = pd.read_csv(f"{LOG_BASE}/regression_label_meta.csv", index_col=None)
@@ -96,17 +106,25 @@ def main(exp_name, chk, splits, res_base, log_base, n_processes):
 
     # calculate correlation and other metrics
     for split in splits:
-        if not os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric_across_celltypes.csv"):
+        for trans in transform_list:
+            metric_file = f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric_across_celltypes_{trans}.csv"
+            if os.path.exists(metric_file):
+                print(f"Skipping {split} with transform {trans}: file already exists")
+                continue
             print(f"Calculate metric for {split}")
 
             test_res = torch.load(f"{RES_BASE}/{exp_name}/{split}_preds_epoch_{chk}.pt")
             # Convert to numpy arrays to avoid deprecation warnings
-            test_label = test_res["label"]['regression'].reshape(-1, test_res["label"]['regression'].shape[-1]).cpu().numpy()
-            test_pred = test_res["pred"]['regression'].reshape(-1, test_res["pred"]['regression'].shape[-1]).cpu().numpy()
+            test_label_orig = test_res["label"]['regression'].reshape(-1, test_res["label"]['regression'].shape[-1]).cpu().numpy()
+            test_pred_orig = test_res["pred"]['regression'].reshape(-1, test_res["pred"]['regression'].shape[-1]).cpu().numpy()
+
+            # Apply transformation
+            print(f"  Applying transform: {trans}")
+            test_label = apply_transform(test_label_orig, trans)
+            test_pred = apply_transform(test_pred_orig, trans)
 
             metric = pd.DataFrame(index=label_meta["modality"].unique(),
-                                  columns=["PearsonR_raw:mean", "PearsonR_raw:std", "PearsonR_raw:median", "PearsonR_raw:25%", "PearsonR_raw:75%",
-                                           "PearsonR_log:mean", "PearsonR_log:std", "PearsonR_log:median", "PearsonR_log:25%", "PearsonR_log:75%"])
+                                  columns=["PearsonR:mean", "PearsonR:std", "PearsonR:median", "PearsonR:25%", "PearsonR:75%"])
 
             # Precompute modality indices and prepare batched data
             modality_data = {}
@@ -137,58 +155,49 @@ def main(exp_name, chk, splits, res_base, log_base, n_processes):
             )
 
             # Store results
-            metric_dict = {mod: {"pearsonr_raw": [], "pearsonr_log": [],
-                                 "label_mean_raw": [], "label_var_raw": [],
-                                 "label_mean_log": [], "label_var_log": []} for mod in metric.index}
-            for mod_name, (pearsonr_vals_raw, pearsonr_vals_log, label_vars_raw, label_means_raw, label_vars_log, label_means_log) in results:
-                metric_dict[mod_name]["pearsonr_raw"] = pearsonr_vals_raw.tolist()
-                metric_dict[mod_name]["pearsonr_log"] = pearsonr_vals_log.tolist()
-                metric_dict[mod_name]["label_mean_raw"] = label_means_raw.tolist()
-                metric_dict[mod_name]["label_var_raw"] = label_vars_raw.tolist()
-                metric_dict[mod_name]["label_mean_log"] = label_means_log.tolist()
-                metric_dict[mod_name]["label_var_log"] = label_vars_log.tolist()
-            with open(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric_across_celltypes.pkl", "wb") as f:
+            metric_dict = {mod: {"pearsonr": [], "label_mean": [], "label_var": []} for mod in metric.index}
+            for mod_name, (pearsonr_vals, label_vars, label_means) in results:
+                metric_dict[mod_name]["pearsonr"] = pearsonr_vals.tolist()
+                metric_dict[mod_name]["label_mean"] = label_means.tolist()
+                metric_dict[mod_name]["label_var"] = label_vars.tolist()
+
+            pkl_file = f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric_across_celltypes_{trans}.pkl"
+            with open(pkl_file, "wb") as f:
                 pickle.dump(metric_dict, f)
+
             for mod in metric.index:
-                # Raw scale metrics
-                pearsonr_vals_raw = np.array(metric_dict[mod]["pearsonr_raw"])
+                pearsonr_vals = np.array(metric_dict[mod]["pearsonr"])
                 # remove nan values
-                pearsonr_vals_raw = pearsonr_vals_raw[~np.isnan(pearsonr_vals_raw)]
-                if pearsonr_vals_raw.size > 0:
-                    metric.loc[mod, "PearsonR_raw:mean"] = np.mean(pearsonr_vals_raw)
-                    metric.loc[mod, "PearsonR_raw:std"] = np.std(pearsonr_vals_raw)
-                    metric.loc[mod, "PearsonR_raw:median"] = np.median(pearsonr_vals_raw)
-                    metric.loc[mod, "PearsonR_raw:25%"] = np.percentile(pearsonr_vals_raw, 25)
-                    metric.loc[mod, "PearsonR_raw:75%"] = np.percentile(pearsonr_vals_raw, 75)
+                pearsonr_vals = pearsonr_vals[~np.isnan(pearsonr_vals)]
+                if pearsonr_vals.size > 0:
+                    metric.loc[mod, "PearsonR:mean"] = np.mean(pearsonr_vals)
+                    metric.loc[mod, "PearsonR:std"] = np.std(pearsonr_vals)
+                    metric.loc[mod, "PearsonR:median"] = np.median(pearsonr_vals)
+                    metric.loc[mod, "PearsonR:25%"] = np.percentile(pearsonr_vals, 25)
+                    metric.loc[mod, "PearsonR:75%"] = np.percentile(pearsonr_vals, 75)
 
-                # Log scale metrics
-                pearsonr_vals_log = np.array(metric_dict[mod]["pearsonr_log"])
-                # remove nan values
-                pearsonr_vals_log = pearsonr_vals_log[~np.isnan(pearsonr_vals_log)]
-                if pearsonr_vals_log.size > 0:
-                    metric.loc[mod, "PearsonR_log:mean"] = np.mean(pearsonr_vals_log)
-                    metric.loc[mod, "PearsonR_log:std"] = np.std(pearsonr_vals_log)
-                    metric.loc[mod, "PearsonR_log:median"] = np.median(pearsonr_vals_log)
-                    metric.loc[mod, "PearsonR_log:25%"] = np.percentile(pearsonr_vals_log, 25)
-                    metric.loc[mod, "PearsonR_log:75%"] = np.percentile(pearsonr_vals_log, 75)
-
-            metric.to_csv(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric_across_celltypes.csv")
+            metric.to_csv(metric_file)
 
     # %% plot (modality level)
     for split in splits:
-        print(f"Plot metric (modality level) for {split}")
+        for trans in transform_list:
+            print(f"Plot metric (modality level) for {split} with transform {trans}")
 
-        with open(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric_across_celltypes.pkl", "rb") as f:
-            metric_dict = pickle.load(f)
-            
-        metric = pd.read_csv(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric_across_celltypes.csv", index_col=0)
+            pkl_file = f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric_across_celltypes_{trans}.pkl"
+            if not os.path.exists(pkl_file):
+                print(f"Skipping plotting for {split} {trans}: file not found")
+                continue
 
-        # Plot for both raw and log scale
-        for scale in ["raw", "log"]:
+            with open(pkl_file, "rb") as f:
+                metric_dict = pickle.load(f)
+
+            metric_file = f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric_across_celltypes_{trans}.csv"
+            metric = pd.read_csv(metric_file, index_col=0)
+
             # prepare data for plotting
             plot_df = pd.DataFrame(columns=["modality", "PearsonR"])
             for mod in metric.index:
-                pearsonr_vals = np.array(metric_dict[mod][f"pearsonr_{scale}"])
+                pearsonr_vals = np.array(metric_dict[mod]["pearsonr"])
                 pearsonr_vals = pearsonr_vals[~np.isnan(pearsonr_vals)]
                 temp_df = pd.DataFrame({"modality": [mod]*len(pearsonr_vals), "PearsonR": pearsonr_vals})
                 plot_df = pd.concat([plot_df, temp_df], ignore_index=True)
@@ -207,25 +216,25 @@ def main(exp_name, chk, splits, res_base, log_base, n_processes):
 
             # Adjust legend position (optional - may not be needed with y-axis labels)
             ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", borderaxespad=0.0, ncol=1, title="Modality")
-            ax.set_title(f"Pearson Correlation - {scale.capitalize()} Scale ({split} Set)")
+            transform_label = "Raw" if trans == "none" else trans.replace("_", " ").title()
+            ax.set_title(f"Pearson Correlation - {transform_label} ({split} Set)")
             fig.tight_layout()
             fig.savefig(
-                f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/{split}_pearsonr_{scale}_across_cell_types.png",
+                f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/{split}_pearsonr_{trans}_across_cell_types.png",
                 dpi=300,
                 bbox_inches="tight",
             )
             plt.close(fig)
-        # %% plot correlation between mean/var and pearsonr
-        for stat in ["mean", "var"]:
-            for scale in ["raw", "log"]:
+            # %% plot correlation between mean/var and pearsonr
+            for stat in ["mean", "var"]:
                 fig, ax = plt.subplots(figsize=(8, 6))
                 for i, mod in enumerate(metric.index):
-                    pearsonr_vals = np.array(metric_dict[mod][f"pearsonr_{scale}"])
+                    pearsonr_vals = np.array(metric_dict[mod]["pearsonr"])
                     pearsonr_vals = pearsonr_vals[~np.isnan(pearsonr_vals)]
                     if len(pearsonr_vals) == 0:
                         continue
-                    # Use label stats that match the scale
-                    label_stats = np.array(metric_dict[mod][f"label_{stat}_{scale}"])
+                    # Use label stats
+                    label_stats = np.array(metric_dict[mod][f"label_{stat}"])
                     label_stats = label_stats[~np.isnan(label_stats)]
                     if len(label_stats) == 0:
                         continue
@@ -242,29 +251,30 @@ def main(exp_name, chk, splits, res_base, log_base, n_processes):
                         label=mod,
                         s=10,
                     )
-                ax.set_xlabel(f"Label {stat.capitalize()} ({scale.capitalize()} Scale)")
-                ax.set_ylabel(f"PearsonR ({scale.capitalize()} Scale)")
-                ax.set_title(f"PearsonR ({scale.capitalize()}) vs Label {stat.capitalize()} ({split} Set)")
+                transform_label = "Raw" if trans == "none" else trans.replace("_", " ").title()
+                ax.set_xlabel(f"Label {stat.capitalize()} ({transform_label})")
+                ax.set_ylabel(f"PearsonR ({transform_label})")
+                ax.set_title(f"PearsonR ({transform_label}) vs Label {stat.capitalize()} ({split} Set)")
                 ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", borderaxespad=0.0, ncol=1, title="Modality")
                 fig.tight_layout()
                 fig.savefig(
-                    f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/{split}_pearsonr_{scale}_vs_label_{stat}_{scale}.png",
+                    f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/{split}_pearsonr_{trans}_vs_label_{stat}.png",
                     dpi=300,
                     bbox_inches="tight",
                 )
                 plt.close(fig)
-        # %% plot by mean-var and color by pearsonr (separate plots for each modality)
-        for scale in ["raw", "log"]:
+
+            # %% plot by mean-var and color by pearsonr (separate plots for each modality)
             for i, mod in enumerate(metric.index):
-                pearsonr_vals = np.array(metric_dict[mod][f"pearsonr_{scale}"])
+                pearsonr_vals = np.array(metric_dict[mod]["pearsonr"])
                 pearsonr_vals = pearsonr_vals[~np.isnan(pearsonr_vals)]
                 if len(pearsonr_vals) == 0:
                     continue
-                label_means = np.array(metric_dict[mod][f"label_mean_{scale}"])
+                label_means = np.array(metric_dict[mod]["label_mean"])
                 label_means = label_means[~np.isnan(label_means)]
                 if len(label_means) == 0:
                     continue
-                label_vars = np.array(metric_dict[mod][f"label_var_{scale}"])
+                label_vars = np.array(metric_dict[mod]["label_var"])
                 label_vars = label_vars[~np.isnan(label_vars)]
                 if len(label_vars) == 0:
                     continue
@@ -286,9 +296,10 @@ def main(exp_name, chk, splits, res_base, log_base, n_processes):
                     vmin=-1,
                     vmax=1,
                 )
-                ax.set_xlabel(f"Label Mean ({scale.capitalize()} Scale)")
-                ax.set_ylabel(f"Label Variance ({scale.capitalize()} Scale)")
-                ax.set_title(f"Label Mean-Variance Colored by PearsonR ({scale.capitalize()})\n{mod} ({split} Set)")
+                transform_label = "Raw" if trans == "none" else trans.replace("_", " ").title()
+                ax.set_xlabel(f"Label Mean ({transform_label})")
+                ax.set_ylabel(f"Label Variance ({transform_label})")
+                ax.set_title(f"Label Mean-Variance Colored by PearsonR ({transform_label})\n{mod} ({split} Set)")
                 cbar = plt.colorbar(sc, ax=ax)
                 cbar.set_label("PearsonR")
                 fig.tight_layout()
@@ -296,7 +307,7 @@ def main(exp_name, chk, splits, res_base, log_base, n_processes):
                 # Create safe filename
                 safe_mod = mod.replace('/', '_').replace(' ', '_')
                 fig.savefig(
-                    f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/{split}_{safe_mod}_label_mean_var_colored_by_pearsonr_{scale}.png",
+                    f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/{split}_{safe_mod}_label_mean_var_colored_by_pearsonr_{trans}.png",
                     dpi=300,
                     bbox_inches="tight",
                 )

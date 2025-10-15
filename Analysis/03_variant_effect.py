@@ -43,7 +43,9 @@ def process_vcf_chunk(args):
     myconfig = load_config(config_name=config_path)
     logger = BaseLogger(name=f"Variant Effect-{device}", level=logging.INFO)
     data_config = pd.read_csv(f"{myconfig.data.preprocess.trial_summary_path}", index_col=0)
-    label_meta = pd.read_csv(f"{myconfig.data.storage_path}/label_meta.csv", index_col=1)
+    label_meta = pd.read_csv(f"{myconfig.logging.log_dir}/regression_label_meta.csv", index_col=1)
+    # set index
+    label_meta = label_meta.set_index("trial")
 
     # Setup model
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -127,14 +129,13 @@ def process_vcf_chunk(args):
                 seqs_cov_file=label_h5,
                 genome_cov_file=data_config.loc[i, "file"],
                 umap_npy_path=unmap_npy,
-                **data_config.loc[i].drop(["exp", "file"]).to_dict(),
+                **data_config.loc[i].drop(["exp", "file", "celltype", "celltype_n", "modality", "atlas_name", "task"]).to_dict(),
             )
             with h5py.File(label_h5, "r") as f:
                 label_trial[data_config.loc[i, "exp"]] = f["targets"][0]
         labels = np.zeros((myconfig.data.preprocess.n_window, len(label_meta)))
-        for k,v in label_trial.items():
-            dim = label_meta.loc[k, "dim"]
-            labels[:, dim] = v
+        for i, (k,v) in enumerate(label_trial.items()):
+            labels[:, i] = v
 
         with h5py.File(f"{save_base}/{name_base}.h5", "w") as f:
             data_group = f.create_group("data")

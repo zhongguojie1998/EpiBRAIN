@@ -371,73 +371,31 @@ def annotate_with_diffpeak(non_diffpeak_df, diffpeak_file, n_jobs=-1):
 
     # Create match key from DiffPeak data
     # The .pt filename uses: {Chromosome}_{start_tss}_{end_tss}_MiniAtlas-{tss_celltype}_{modality}_all_random.pt
-    diffpeak['match_key'] = (
-        diffpeak['Chromosome'].astype(str) + '_' +
-        diffpeak['start_tss'].astype(int).astype(str) + '_' +
-        diffpeak['end_tss'].astype(int).astype(str) + '_' +
-        diffpeak['tss_celltype'].astype(str)
-    )
+    diffpeak['ID'] = diffpeak['tss_celltype'] + ":" + diffpeak['Chromosome'] + ':' + \
+        diffpeak['start_tss'].astype(int).astype(str) + '-' + diffpeak['end_tss'].astype(int).astype(str) + ":" + \
+        diffpeak['peak_start'].astype(int).astype(str) + '-' + diffpeak['peak_end'].astype(int).astype(str)
 
     # Create match key in non_diffpeak_df
-    non_diffpeak_df['match_key'] = (
-        non_diffpeak_df['chr'].astype(str) + '_' +
-        non_diffpeak_df['tss_start'].astype(str) + '_' +
-        non_diffpeak_df['tss_end'].astype(str) + '_' +
-        non_diffpeak_df['celltype'].astype(str)
-    )
+    non_diffpeak_df['ID'] = non_diffpeak_df['celltype'] + ":" + non_diffpeak_df['chr'] + ':' + \
+        non_diffpeak_df['tss_start'].astype(int).astype(str) + '-' + non_diffpeak_df['tss_end'].astype(int).astype(str) + ":" + \
+        non_diffpeak_df['peak_start'].astype(int).astype(str) + '-' + non_diffpeak_df['peak_end'].astype(int).astype(str)
 
-    # Initialize DiffPeak annotation columns
-    non_diffpeak_df['is_diffpeak'] = False
-    non_diffpeak_df['diffpeak_gene'] = ''
-    non_diffpeak_df['diffpeak_padj'] = np.nan
-    non_diffpeak_df['diffpeak_log2fc'] = np.nan
-    non_diffpeak_df['diffpeak_celltype'] = ''
-
-    # Group DiffPeak by match_key for efficient lookup
-    diffpeak_grouped = diffpeak.groupby('match_key')
-
-    # Get unique match keys that exist in both dataframes
-    common_match_keys = set(non_diffpeak_df['match_key'].unique()) & set(diffpeak_grouped.groups.keys())
-
-    print(f"Found {len(common_match_keys)} common match keys to process")
-
-    if len(common_match_keys) == 0:
-        print("Warning: No matching keys found between non_diffpeak and DiffPeak data")
-        non_diffpeak_df = non_diffpeak_df.drop(columns=['match_key'])
-        return non_diffpeak_df
-
-    # Determine which columns are available
-    required_cols = ['Chromosome', 'start_peak', 'end_peak']
-    optional_cols = ['tss_gene', 'padj', 'log2FoldChange']
-    cols_to_extract = required_cols + [col for col in optional_cols if col in diffpeak.columns]
-
-    # Pre-group non_diffpeak_df for efficient lookup (avoids repeated DataFrame filtering)
-    non_diffpeak_grouped = non_diffpeak_df.groupby('match_key')
-
-    # Process in parallel - data preparation is done inside each worker
-    print(f"Processing DiffPeak annotations in parallel with {n_jobs if n_jobs > 0 else 'all'} CPUs...")
-    all_results = Parallel(n_jobs=n_jobs, backend='loky', verbose=5)(
-        delayed(_process_match_key_group_diffpeak_direct)(match_key, diffpeak_grouped, non_diffpeak_grouped, cols_to_extract)
-        for match_key in common_match_keys
-    )
-
-    # Flatten results and update dataframe
-    print("Updating annotations...")
-    matched_count = 0
-    for results in all_results:
-        for idx, is_diffpeak, gene, padj, log2fc, celltype in results:
-            matched_count += 1
-            non_diffpeak_df.at[idx, 'is_diffpeak'] = is_diffpeak
-            non_diffpeak_df.at[idx, 'diffpeak_gene'] = gene
-            non_diffpeak_df.at[idx, 'diffpeak_padj'] = padj
-            non_diffpeak_df.at[idx, 'diffpeak_log2fc'] = log2fc
-            non_diffpeak_df.at[idx, 'diffpeak_celltype'] = celltype
-
-    # Clean up temporary column
-    non_diffpeak_df = non_diffpeak_df.drop(columns=['match_key'])
-
-    print(f"Matched {matched_count} peak-file pairs to DiffPeak data ({matched_count/len(non_diffpeak_df)*100:.1f}%)")
-    print(f"DiffPeak peaks: {non_diffpeak_df['is_diffpeak'].sum()}, Non-DiffPeak peaks: {(~non_diffpeak_df['is_diffpeak']).sum()}")
+    # drop duplicats in diffpeak
+    diffpeak = diffpeak.drop_duplicates(subset='ID', keep='first')
+    diffpeak = diffpeak.set_index('ID')
+    
+    # Set index for non_abc_df and remove any duplicate indices (keep first)
+    non_diffpeak_df = non_diffpeak_df.set_index('ID')
+    if non_diffpeak_df.index.duplicated().any():
+        print(f"Warning: Found {non_diffpeak_df.index.duplicated().sum()} duplicate IDs in non_diffpeak_df, keeping first occurrence")
+        non_diffpeak_df = non_diffpeak_df[~non_diffpeak_df.index.duplicated(keep='first')]
+    
+    # directly map by index
+    non_diffpeak_df['is_diffpeak'] = non_diffpeak_df.index.isin(diffpeak.index)
+    non_diffpeak_df['diffpeak_gene'] = diffpeak['tss_gene'].reindex(non_diffpeak_df.index).values
+    non_diffpeak_df['diffpeak_padj'] = diffpeak['peak_adjusted p-value'].reindex(non_diffpeak_df.index).values
+    non_diffpeak_df['diffpeak_log2fc'] = diffpeak['peak_log2(fold_change)'].reindex(non_diffpeak_df.index).values
+    non_diffpeak_df['diffpeak_celltype'] = diffpeak['tss_celltype'].reindex(non_diffpeak_df.index).values
 
     return non_diffpeak_df
 
@@ -509,28 +467,30 @@ def process_all_peaks(bed_file, fasta_file, output_file, n_jobs=-1,
     # Process files in parallel
     print(f"Processing .pt files in parallel with {n_jobs if n_jobs > 0 else 'all'} CPUs...")
 
-    all_results = Parallel(
-        n_jobs=n_jobs,
-        verbose=10,
-        backend='loky',
-        timeout=300  # 5 minute timeout per file
-    )(
-        delayed(process_single_pt_file_for_peaks)(pt_file, peaks, fasta_file)
-        for pt_file in pt_files
-    )
+    # all_results = Parallel(
+    #     n_jobs=n_jobs,
+    #     verbose=10,
+    #     backend='loky',
+    #     timeout=300  # 5 minute timeout per file
+    # )(
+    #     delayed(process_single_pt_file_for_peaks)(pt_file, peaks, fasta_file)
+    #     for pt_file in pt_files
+    # )
 
-    # Flatten results
-    print("Aggregating results...")
-    flat_results = []
-    for file_results in all_results:
-        flat_results.extend(file_results)
+    # # Flatten results
+    # print("Aggregating results...")
+    # flat_results = []
+    # for file_results in all_results:
+    #     flat_results.extend(file_results)
 
-    # Create dataframe
-    non_diffpeak = pd.DataFrame(flat_results)
+    # # Create dataframe
+    # non_diffpeak = pd.DataFrame(flat_results)
 
-    # Save results
-    non_diffpeak.to_csv(output_file, sep='\t', index=False)
-    
+    # # Save results
+    # non_diffpeak.to_csv(output_file, sep='\t', index=False)
+
+    non_diffpeak = pd.read_csv(output_file, sep='\t')
+
     if len(non_diffpeak) == 0:
         print("Warning: No overlapping peaks found!")
         return non_diffpeak

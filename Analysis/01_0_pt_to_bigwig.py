@@ -21,6 +21,7 @@ import pyBigWig
 import numpy as np
 from pathlib import Path
 from tqdm import tqdm
+from joblib import Parallel, delayed
 
 # Add Model directory to path
 ROOT = Path(__file__).parent.parent
@@ -178,9 +179,8 @@ def write_single_bigwig_per_trial(predictions, regions_df, trial_idx, trial_name
     # Extract predictions for this trial
     trial_preds = predictions[:, :, trial_idx].numpy()  # shape: (n_samples, n_windows)
 
-    # Create BigWig file
-    bw = pyBigWig.open(output_file, "w")
-    bw.addHeader(list(chrom_sizes.items()))
+    # Collect all entries first (need to sort before writing)
+    all_entries = []
 
     # Process each region
     for idx, row in tqdm(regions_df.iterrows(), total=len(regions_df),
@@ -201,26 +201,102 @@ def write_single_bigwig_per_trial(predictions, regions_df, trial_idx, trial_name
         pred_start = region_start + (region_end - region_start - pred_length) // 2
 
         # Create coordinates for each window
-        starts = []
-        ends = []
-        values = []
-
         for i, value in enumerate(region_preds):
             window_start = pred_start + i * window_size
             window_end = window_start + window_size
 
             # Only include windows that fall within reasonable chromosome bounds
             if window_start >= 0 and window_end <= chrom_sizes.get(chrom, 300000000):
-                starts.append(int(window_start))
-                ends.append(int(window_end))
-                values.append(float(value))
+                all_entries.append((chrom, int(window_start), int(window_end), float(value)))
 
-        # Write to BigWig
-        if len(starts) > 0:
-            bw.addEntries([chrom] * len(starts), starts, ends=ends, values=values)
+    # Sort entries by chromosome and start position
+    # Create a chromosome order based on chrom_sizes
+    chrom_order = {chrom: i for i, chrom in enumerate(chrom_sizes.keys())}
+    all_entries.sort(key=lambda x: (chrom_order.get(x[0], 999), x[1]))
+
+    # Group entries by chromosome for writing
+    from itertools import groupby
+
+    # Create BigWig file
+    bw = pyBigWig.open(output_file, "w")
+    bw.addHeader(list(chrom_sizes.items()))
+
+    # Write entries chromosome by chromosome
+    for chrom, chrom_entries in groupby(all_entries, key=lambda x: x[0]):
+        chrom_entries = list(chrom_entries)
+        if len(chrom_entries) > 0:
+            chroms = [e[0] for e in chrom_entries]
+            starts = [e[1] for e in chrom_entries]
+            ends = [e[2] for e in chrom_entries]
+            values = [e[3] for e in chrom_entries]
+            bw.addEntries(chroms, starts, ends=ends, values=values)
 
     bw.close()
     print(f"Created: {output_file}")
+
+
+def export_trial(test_pred, regions_df, label_meta, trial_idx, output_dir,
+                 chrom_sizes, window_size, per_chrom):
+    """
+    Worker function for exporting a single trial to BigWig format.
+
+    Parameters:
+    -----------
+    test_pred : torch.Tensor
+        Predictions tensor
+    regions_df : pd.DataFrame
+        DataFrame with genomic regions
+    label_meta : pd.DataFrame
+        Label metadata
+    trial_idx : int
+        Index of the trial to export
+    output_dir : str
+        Output directory
+    chrom_sizes : dict
+        Chromosome sizes
+    window_size : int
+        Window size in bp
+    per_chrom : bool
+        Whether to create separate files per chromosome
+
+    Returns:
+    --------
+    str : Trial name that was exported
+    """
+    trial_name = label_meta.loc[trial_idx, 'trial']
+
+    if per_chrom:
+        # Check if all chromosome files already exist
+        chroms = regions_df['chr'].unique()
+        all_exist = True
+        for chrom in chroms:
+            output_bw = os.path.join(output_dir, f"{trial_name}_{chrom}.bw")
+            if not os.path.exists(output_bw):
+                all_exist = False
+                break
+
+        if all_exist:
+            print(f"Skipping {trial_name}: all chromosome files already exist")
+            return trial_name
+
+        # Create separate BigWig files per chromosome
+        write_predictions_to_bigwig(
+            test_pred, regions_df, trial_idx, trial_name,
+            output_dir, chrom_sizes, window_size
+        )
+    else:
+        # Check if single BigWig file already exists
+        output_file = os.path.join(output_dir, f"{trial_name}.bw")
+        if os.path.exists(output_file):
+            print(f"Skipping {trial_name}: file already exists")
+            return trial_name
+
+        # Create single BigWig file per trial
+        write_single_bigwig_per_trial(
+            test_pred, regions_df, trial_idx, trial_name,
+            output_file, chrom_sizes, window_size
+        )
+    return trial_name
 
 
 @click.command()
@@ -238,8 +314,10 @@ def write_single_bigwig_per_trial(predictions, regions_df, trial_idx, trial_name
 @click.option("--window_size", type=int, default=32, help="Size of genomic bins in bp (default: 32)")
 @click.option("--data_path", type=str, default=None,
               help="Path to data directory (default: derived from log_base)")
+@click.option("--n_jobs", type=int, default=None,
+              help="Number of parallel jobs (default: use all CPU cores)")
 def main(exp_name, chk, split, res_base, log_base, output_dir, fasta_file,
-         trials, per_chrom, window_size, data_path):
+         trials, per_chrom, window_size, data_path, n_jobs):
     """
     Convert model predictions from .pt files to BigWig format at 32bp resolution.
     """
@@ -289,7 +367,7 @@ def main(exp_name, chk, split, res_base, log_base, output_dir, fasta_file,
     print(f"Loading genomic regions from: {sequences_bed}")
     df = pd.read_csv(sequences_bed, sep="\t", header=None)
     df.columns = ["chr", "start", "end", "split"]
-    regions_df = df[df["split"] == split].reset_index(drop=True)
+    regions_df = df[df["split"] == split.lower()].reset_index(drop=True)
 
     # Filter regions based on indices in predictions
     pred_indices = test_res["index"].cpu().numpy()
@@ -317,23 +395,19 @@ def main(exp_name, chk, split, res_base, log_base, output_dir, fasta_file,
 
     print(f"Exporting {len(trial_indices)} trials to BigWig format")
 
-    # Export each trial
-    for i, trial_idx in enumerate(tqdm(trial_indices, desc="Exporting trials")):
-        trial_name = label_meta.loc[trial_idx, 'trial']
+    # Export trials in parallel
+    if n_jobs is None:
+        n_jobs = os.cpu_count()
+    n_jobs = min(n_jobs, len(trial_indices))
+    print(f"Using {n_jobs} parallel jobs")
 
-        if per_chrom:
-            # Create separate BigWig files per chromosome
-            write_predictions_to_bigwig(
-                test_pred, regions_df, trial_idx, trial_name,
-                output_dir, chrom_sizes, window_size
-            )
-        else:
-            # Create single BigWig file per trial
-            output_file = os.path.join(output_dir, f"{trial_name}.bw")
-            write_single_bigwig_per_trial(
-                test_pred, regions_df, trial_idx, trial_name,
-                output_file, chrom_sizes, window_size
-            )
+    Parallel(n_jobs=n_jobs, verbose=10)(
+        delayed(export_trial)(
+            test_pred, regions_df, label_meta, trial_idx, output_dir,
+            chrom_sizes, window_size, per_chrom
+        )
+        for trial_idx in tqdm(trial_indices, desc="Exporting trials")
+    )
 
     print(f"\nDone! BigWig files saved to: {output_dir}")
 

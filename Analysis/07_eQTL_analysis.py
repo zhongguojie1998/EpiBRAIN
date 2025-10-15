@@ -6,6 +6,8 @@ import os
 import sys
 from multiprocessing import Pool
 from functools import partial
+import seaborn as sns
+import matplotlib.pyplot as plt
 PWD = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(f'{PWD}/../')
 os.chdir(f'{PWD}/../')
@@ -14,7 +16,7 @@ eqtl = pd.read_csv('Data/source/eQTL/all.vcf', sep='\t')
 eqtl_info = pd.read_csv('Data/source/eQTL/info.csv', sep=',')
 # %% read in results
 eqtl_h5 = h5py.File(f'Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1_res_epoch_150.h5', 'r')
-log_square = eqtl_h5['results/log_square'][:]
+log_square = eqtl_h5['results/local_log_square'][:]
 eqtl_info_df = pd.DataFrame({'chr': eqtl_h5['variants/chr'][:],
                              'pos': eqtl_h5['variants/pos'][:],
                              'ref': eqtl_h5['variants/ref'][:],
@@ -28,7 +30,7 @@ brain_organs = ['Brain_Amygdala', 'Brain_Anterior_cingulate_cortex_BA24', 'Brain
                 'Brain_Hippocampus', 'Brain_Hypothalamus', 'Brain_Nucleus_accumbens_basal_ganglia', 'Brain_Putamen_basal_ganglia',
                 'Brain_Spinal_cord_cervical_c-1', 'Brain_Substantia_nigra']
 basal_ganglia_organs = ['Brain_Caudate_basal_ganglia', 'Brain_Nucleus_accumbens_basal_ganglia', 'Brain_Putamen_basal_ganglia']
-
+cortex_organs = ['Brain_Anterior_cingulate_cortex_BA24', 'Brain_Cortex', 'Brain_Frontal_Cortex_BA9']
 # %% Define helper function to compute metrics
 import sklearn
 
@@ -69,7 +71,7 @@ def compute_metrics(label, scores, eqtl_organ_unique, group):
 
 # %%
 track_results = pd.DataFrame()
-for organ in ['All', 'Brain', 'Basal_ganglia']:
+for organ in ['All', 'Brain', 'Basal_ganglia', 'Cortex']:
     # if is directory
     if organ == 'All':
         eqtl_organ = pd.read_csv(f'Data/source/eQTL/all.vcf', sep='\t')
@@ -89,6 +91,11 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
         eqtl_organ_info = pd.read_csv(f'Data/source/eQTL/info.csv')
         eqtl_organ_info = eqtl_organ_info[eqtl_organ_info['tissue'].isin(basal_ganglia_organs)]
         eqtl_organ = eqtl_organ.loc[eqtl_organ_info.index]
+    elif organ == 'Cortex':
+        eqtl_organ = pd.read_csv(f'Data/source/eQTL/all.vcf', sep='\t')
+        eqtl_organ_info = pd.read_csv(f'Data/source/eQTL/info.csv')
+        eqtl_organ_info = eqtl_organ_info[eqtl_organ_info['tissue'].isin(cortex_organs)]
+        eqtl_organ = eqtl_organ.loc[eqtl_organ_info.index]
     else:
         continue
     # filter eqtl_organ and eqtl_organ_info by biotype_to_keep
@@ -99,7 +106,7 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
     eqtl_organ_unique = eqtl_organ.drop_duplicates(subset=['#CHROM', 'REF', 'POS', 'ALT'])
     eqtl_scores = log_square[eqtl_info_df.index.get_indexer(eqtl_organ_unique['ID'])]
     # load track annotations
-    track_anno = pd.read_csv('./Data/data_config/basel_ganglia_complete_v1.csv', index_col=0)
+    track_anno = pd.read_csv('./logs/basal_ganglia_miniatlas_drop_celltype_v1/regression_label_meta.csv')
     track_anno['organ'] = organ
     # get overall precision recall
     for group in ['all', '<3k', '3k-12k', '12k-35k', '>35k']:
@@ -122,8 +129,10 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
                                                      'AUROC': auroc, 'AUPRC': auprc,
                                                      f'n_pos': positives, f'n_neg': negatives},
                                                     index=[0])], ignore_index=True)
-        for i, modality in enumerate(track_anno['celltype'].unique()):
-            modality_idx = track_anno.index[(track_anno['celltype'] == modality) & (track_anno['modality'].str.contains('RNA') == False)].values
+        for i, modality in enumerate(track_anno['cell_type'].unique()):
+            modality_idx = track_anno.index[(track_anno['cell_type'] == modality) & 
+                                            (track_anno['modality'].str.contains('RNA') == False) &
+                                            (track_anno['modality'].str.contains('K9Me3') == False)].values
             # L2 norm across modality_idx
             modality_merged = np.linalg.norm(eqtl_scores[:, modality_idx], axis=1)
             auroc, auprc, positives, negatives = compute_metrics(label, modality_merged, eqtl_organ_unique, group)
@@ -135,27 +144,65 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
                                                     index=[0])], ignore_index=True)
         track_results = pd.concat([track_results, track_anno])
 # %% add annotation
-track_results['celltype'] = track_results['exp'].str.split('_').str[:-1].str.join('_')
-track_results['mod'] = track_results['exp'].str.split('_').str[-1]
+track_results.loc[track_results['exp'].isna(), 'exp'] = track_results['trial'][track_results['exp'].isna()].copy()
 # %% save results
 track_results.to_csv('Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1.track_results.csv')
 # %%
 track_results = pd.read_csv('Data/source/eQTL/basal_ganglia_miniatlas_drop_celltype_v1.track_results.csv', index_col=0)
 # %% Add borzoi results
 borzoi = pd.read_csv('Data/source/eQTL/borzoi_track_results.csv', index_col=0)
+borzoi['exp'] = borzoi['identifier'].copy()
+borzoi.loc[borzoi['identifier'].str.startswith('borzoi'), 'celltype'] = 'ALL'
 track_results = pd.concat([track_results, borzoi])
 # %% Add chrombpnet results
 chrombpnet = pd.read_csv('Data/source/eQTL/chrombpnet_miniatlas_ATAC_results.csv', index_col=0)
 chrombpnet['mod'] = 'chrombpnet'
+chrombpnet.loc[chrombpnet['exp'].str.startswith('ATAC'), 'celltype'] = 'ALL'
 track_results = pd.concat([track_results, chrombpnet])
+# %% split bican/borzoi/ATAC and track results
+track_results_model = track_results[track_results['exp'].str.startswith(('bican', 'borzoi', 'ATAC'))].copy()
+track_results_track = track_results[~track_results['exp'].str.startswith(('bican', 'borzoi', 'ATAC'))].copy()
+track_results_track.loc[track_results_track['mod'].isna(), 'mod'] = track_results_track['modality'][track_results_track['mod'].isna()].copy()
+track_results_celltype = track_results_model[track_results_model['celltype'] != 'ALL'].copy()
+track_results_overall = track_results_model[track_results_model['celltype'] == 'ALL'].copy()
 # %% plot
-import seaborn as sns
-import matplotlib.pyplot as plt
-organs = ['All', 'Brain', 'Basal_ganglia']
+organs = ['All', 'Brain', 'Basal_ganglia', 'Cortex']
 for organ in organs:
     fig, ax = plt.subplots(figsize=(10, 6))
     # drop na values
-    to_plot = track_results[track_results['organ'] == organ].copy().dropna(axis=0, subset=['AUPRC', 'AUROC'])
+    to_plot = track_results_track[track_results_track['organ'] == organ].copy().dropna(axis=0, subset=['AUPRC', 'AUROC'])
     sns.violinplot(data=to_plot, x='group', y='AUROC', hue='mod', ax=ax)
     ax.set_title(organ)
+# %% plot cell type performances
+organ = 'Basal_ganglia'
+fig, ax = plt.subplots(figsize=(10, 6))
+to_plot = track_results_celltype[(track_results_celltype['organ'] == organ) & 
+                                 (track_results_celltype['group'] == 'all')].copy().dropna(axis=0, subset=['AUPRC', 'AUROC'])
+# rank by AUROC
+to_plot = to_plot.sort_values(by='AUROC', ascending=False)
+to_plot['type'] = 'borzoi'
+to_plot.loc[to_plot['exp'].str.contains('bican_celltype_BasalGanglia'), 'type'] = 'bican:BasalGanglia'
+to_plot.loc[to_plot['exp'].str.contains('bican_celltype_MiniAtlas'), 'type'] = 'bican:MiniAtlas'
+to_plot.loc[to_plot['exp'] == 'ATAC', 'type'] = 'chrombpnet'
+to_plot['exp'] = to_plot['exp'].str.replace('bican_celltype_', '')
+sns.barplot(data=to_plot, x='exp', y='AUROC', hue='type', ax=ax)
+# rotate x labels
+ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
+ax.set_title(organ)
+# %% plot overall model performances
+organ = 'Basal_ganglia'
+fig, ax = plt.subplots(figsize=(10, 6))
+to_plot = track_results_overall[(track_results_overall['organ'] == organ) & 
+                                (track_results_overall['group'] == 'all')].copy().dropna(axis=0, subset=['AUPRC', 'AUROC'])
+# rank by AUROC
+to_plot = to_plot.sort_values(by='AUROC', ascending=False)
+to_plot['type'] = 'borzoi'
+to_plot.loc[to_plot['exp'].str.contains('bican'), 'type'] = 'bican'
+to_plot.loc[to_plot['exp'] == 'ATAC', 'type'] = 'chrombpnet'
+to_plot['exp'] = to_plot['exp'].str.replace('bican_celltype_', '')
+sns.barplot(data=to_plot, x='exp', y='AUROC', hue='type', ax=ax)
+# rotate x labels
+ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
+ax.set_title(organ)
+
 # %%

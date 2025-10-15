@@ -335,94 +335,19 @@ def process_single_pt_file_for_peaks(pt_file, peaks_df, fasta_file):
     return results
 
 
-def _process_match_key_group(match_key, non_abc_subset, abc_rows_data):
-    """
-    Process a single match_key group to find ABC annotations.
-
-    Parameters:
-    -----------
-    match_key : str
-        The match key for this group
-    non_abc_subset : pd.DataFrame
-        Subset of non_abc_df with this match_key
-    abc_rows_data : list of dict
-        ABC row data as dictionaries (chrom.x, start.x, end.x, TargetGene, ABC.Score)
-
-    Returns:
-    --------
-    list : List of tuples (idx, is_abc, abc_gene, abc_score, abc_celltype)
-    """
-    results = []
-
-    # Extract celltype from match_key (format: chr_start_end_celltype)
-    celltype = match_key.rsplit('_', 1)[-1]
-
-    # For each ABC enhancer, find overlapping peaks
-    for abc_row in abc_rows_data:
-        # Check for peak overlap with enhancer [start.x, end.x]
-        overlap_mask = (
-            (non_abc_subset['peak_chr'] == abc_row['chrom.x']) &
-            (non_abc_subset['peak_start'] < abc_row['end.x']) &
-            (non_abc_subset['peak_end'] > abc_row['start.x'])
-        )
-
-        # Get matching indices
-        matching_indices = non_abc_subset.index[overlap_mask].tolist()
-
-        for idx in matching_indices:
-            results.append((
-                idx,
-                True,  # is_abc
-                abc_row.get('TargetGene', ''),
-                abc_row.get('ABC.Score', np.nan),
-                celltype  # Use celltype from match_key
-            ))
-
-    return results
-
-
-def _process_match_key_group_direct(match_key, abc_grouped, non_abc_grouped, cols_to_extract):
-    """
-    Process a single match_key group to find ABC annotations.
-    Does data preparation and processing in one step.
-
-    Parameters:
-    -----------
-    match_key : str
-        The match key for this group
-    abc_grouped : pd.DataFrameGroupBy
-        Grouped ABC dataframe
-    non_abc_grouped : pd.DataFrameGroupBy
-        Grouped non_abc dataframe
-    cols_to_extract : list
-        Columns to extract from ABC rows
-
-    Returns:
-    --------
-    list : List of tuples (idx, is_abc, abc_gene, abc_score, abc_celltype)
-    """
-    # Get the groups for this match_key
-    abc_rows = abc_grouped.get_group(match_key)
-    non_abc_subset = non_abc_grouped.get_group(match_key)
-
-    # Convert ABC rows to list of dicts
-    abc_rows_data = abc_rows[cols_to_extract].to_dict('records')
-
-    # Call the original processing function
-    return _process_match_key_group(match_key, non_abc_subset, abc_rows_data)
-
-
 def annotate_with_abc(non_abc_df, abc_file, n_jobs=-1):
     """
     Annotate the non_abc dataframe with ABC connection information.
 
     Matches peaks in non_abc with ABC enhancers by:
-    1. Constructing expected .pt filename from ABC data
-    2. Matching peak coordinates with ABC enhancer coordinates
-    3. Using parallel processing for efficiency
+    1. Matching chr, tss coordinates, celltype, and peak coordinates
+    2. Using direct pandas index operations for efficiency
 
-    The .pt filename pattern is: {chrom}_{tss_start}_{tss_end}_MiniAtlas-{celltype}_{modality}_random.pt
-    where tss_start = start.y - 511 and tss_end = start.y + 512
+    This uses a fast index-based matching approach similar to annotate_with_diffpeak()
+    in 10_3_screen_DiffPeak_attributions.py. By creating unique IDs that include all
+    matching criteria (celltype, chr, tss, and peak coordinates), we can use pandas'
+    optimized index operations (.isin() and .reindex()) instead of parallel processing
+    with overlap checks. This is much faster for large datasets.
 
     Parameters:
     -----------
@@ -431,7 +356,7 @@ def annotate_with_abc(non_abc_df, abc_file, n_jobs=-1):
     abc_file : str
         Path to ABC connections file
     n_jobs : int
-        Number of parallel jobs (default: -1 = all CPUs)
+        Number of parallel jobs (default: -1 = all CPUs, currently unused but kept for API compatibility)
 
     Returns:
     --------
@@ -441,78 +366,45 @@ def annotate_with_abc(non_abc_df, abc_file, n_jobs=-1):
     abc = pd.read_csv(abc_file, sep='\t')
     print(f"Loaded {len(abc)} ABC connections")
 
-    # Create a match key from ABC data
-    # The .pt filename is constructed as: {chrom}_{start.y-511}_{start.y+512}_MiniAtlas-{CellType}_{modality}_random.pt
-    # We need to match: enhancer chr, celltype, tss location, and check peak overlap
-
-    # Add columns to ABC for matching
+    # Create ID from ABC data
+    # ID includes: celltype, chr, tss coordinates, and peak coordinates
+    # The .pt filename uses: {chrom}_{start.y-511}_{start.y+512}_MiniAtlas-{CellType}_{modality}_random.pt
     abc['tss_start'] = abc['start.y'] - 511
     abc['tss_end'] = abc['start.y'] + 512
-    abc['match_key'] = (
-        abc['chrom.x'].astype(str) + '_' +
-        abc['tss_start'].astype(str) + '_' +
-        abc['tss_end'].astype(str) + '_' +
-        abc['CellType'].astype(str)
-    )
+    abc['ID'] = abc['CellType'] + ":" + abc['chrom.x'] + ':' + \
+        abc['tss_start'].astype(int).astype(str) + '-' + abc['tss_end'].astype(int).astype(str) + ":" + \
+        abc['start.x'].astype(int).astype(str) + '-' + abc['end.x'].astype(int).astype(str)
 
-    # Create match key in non_abc_df
-    # Extract components from pt_file: chr_start_end_MiniAtlas-celltype_modality_random.pt
-    # We'll match on chr_start_end_celltype
-    non_abc_df['match_key'] = (
-        non_abc_df['chr'].astype(str) + '_' +
-        (non_abc_df['tss'] - 511).astype(str) + '_' +  # Reconstruct tss_start
-        (non_abc_df['tss'] + 512).astype(str) + '_' +  # Reconstruct tss_end
-        non_abc_df['celltype'].astype(str)
-    )
+    # Create ID in non_abc_df
+    # Match format: celltype:chr:tss_start-tss_end:peak_start-peak_end
+    non_abc_df['ID'] = non_abc_df['celltype'] + ":" + non_abc_df['chr'] + ':' + \
+        (non_abc_df['tss'] - 511).astype(int).astype(str) + '-' + \
+        (non_abc_df['tss'] + 512).astype(int).astype(str) + ":" + \
+        non_abc_df['peak_start'].astype(int).astype(str) + '-' + \
+        non_abc_df['peak_end'].astype(int).astype(str)
 
-    # Initialize ABC annotation columns
-    non_abc_df['is_abc'] = False
-    non_abc_df['abc_gene'] = ''
-    non_abc_df['abc_score'] = np.nan
-    non_abc_df['abc_class'] = ''
+    # Drop duplicates in ABC based on ID (keep first occurrence)
+    # Use drop_duplicates on the ID column BEFORE setting it as index to avoid duplicate index values
+    abc = abc.drop_duplicates(subset='ID', keep='first')
+    abc = abc.set_index('ID')
 
-    # Group ABC by match_key for efficient lookup
-    abc_grouped = abc.groupby('match_key')
+    # Set index for non_abc_df and remove any duplicate indices (keep first)
+    non_abc_df = non_abc_df.set_index('ID')
+    if non_abc_df.index.duplicated().any():
+        print(f"Warning: Found {non_abc_df.index.duplicated().sum()} duplicate IDs in non_abc_df, keeping first occurrence")
+        non_abc_df = non_abc_df[~non_abc_df.index.duplicated(keep='first')]
 
-    # Get unique match keys that exist in both dataframes
-    common_match_keys = set(non_abc_df['match_key'].unique()) & set(abc_grouped.groups.keys())
+    # Directly map by index using pandas operations
+    print("Mapping ABC annotations using direct index matching...")
+    non_abc_df['is_abc'] = non_abc_df.index.isin(abc.index)
+    non_abc_df['abc_gene'] = abc['TargetGene'].reindex(non_abc_df.index).values if 'TargetGene' in abc.columns else ''
+    non_abc_df['abc_score'] = abc['ABC.Score'].reindex(non_abc_df.index).values if 'ABC.Score' in abc.columns else np.nan
+    non_abc_df['abc_class'] = abc['CellType'].reindex(non_abc_df.index).values if 'CellType' in abc.columns else ''
 
-    print(f"Found {len(common_match_keys)} common match keys to process")
+    # Reset index to restore original dataframe structure
+    non_abc_df = non_abc_df.reset_index(drop=True)
 
-    if len(common_match_keys) == 0:
-        print("Warning: No matching keys found between non_abc and ABC data")
-        non_abc_df = non_abc_df.drop(columns=['match_key'])
-        return non_abc_df
-
-    # Determine which columns are available in ABC data
-    required_cols = ['chrom.x', 'start.x', 'end.x']
-    optional_cols = ['TargetGene', 'ABC.Score']
-    cols_to_extract = required_cols + [col for col in optional_cols if col in abc.columns]
-
-    # Pre-group non_abc_df for efficient lookup (avoids repeated DataFrame filtering)
-    non_abc_grouped = non_abc_df.groupby('match_key')
-
-    # Process in parallel - data preparation is done inside each worker
-    print(f"Processing ABC annotations in parallel with {n_jobs if n_jobs > 0 else 'all'} CPUs...")
-    all_results = Parallel(n_jobs=n_jobs, backend='loky', verbose=5)(
-        delayed(_process_match_key_group_direct)(match_key, abc_grouped, non_abc_grouped, cols_to_extract)
-        for match_key in common_match_keys
-    )
-
-    # Flatten results and update dataframe
-    print("Updating annotations...")
-    matched_count = 0
-    for results in all_results:
-        for idx, is_abc, abc_gene, abc_score, abc_celltype in results:
-            matched_count += 1
-            non_abc_df.at[idx, 'is_abc'] = is_abc
-            non_abc_df.at[idx, 'abc_gene'] = abc_gene
-            non_abc_df.at[idx, 'abc_score'] = abc_score
-            non_abc_df.at[idx, 'abc_class'] = abc_celltype  # Store celltype in abc_class column
-
-    # Clean up temporary column
-    non_abc_df = non_abc_df.drop(columns=['match_key'])
-
+    matched_count = non_abc_df['is_abc'].sum()
     print(f"Matched {matched_count} peak-file pairs to ABC connections ({matched_count/len(non_abc_df)*100:.1f}%)")
     print(f"ABC peaks: {non_abc_df['is_abc'].sum()}, Non-ABC peaks: {(~non_abc_df['is_abc']).sum()}")
 

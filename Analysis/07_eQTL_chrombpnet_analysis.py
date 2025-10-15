@@ -25,7 +25,7 @@ brain_organs = ['Brain_Amygdala', 'Brain_Anterior_cingulate_cortex_BA24', 'Brain
                 'Brain_Hippocampus', 'Brain_Hypothalamus', 'Brain_Nucleus_accumbens_basal_ganglia', 'Brain_Putamen_basal_ganglia',
                 'Brain_Spinal_cord_cervical_c-1', 'Brain_Substantia_nigra']
 basal_ganglia_organs = ['Brain_Caudate_basal_ganglia', 'Brain_Nucleus_accumbens_basal_ganglia', 'Brain_Putamen_basal_ganglia']
-
+cortex_organs = ['Brain_Anterior_cingulate_cortex_BA24', 'Brain_Cortex', 'Brain_Frontal_Cortex_BA9']
 # %% Define helper function to compute metrics
 import sklearn
 
@@ -66,7 +66,7 @@ def compute_metrics(label, scores, eqtl_organ_unique, group):
 
 # %%
 result_df = pd.DataFrame()
-for organ in ['All', 'Brain', 'Basal_ganglia']:
+for organ in ['All', 'Brain', 'Basal_ganglia', 'Cortex']:
     # if is directory
     if organ == 'All':
         eqtl_organ = pd.read_csv(f'Data/source/eQTL/all.vcf', sep='\t')
@@ -85,6 +85,11 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
         eqtl_organ = pd.read_csv(f'Data/source/eQTL/all.vcf', sep='\t')
         eqtl_organ_info = pd.read_csv(f'Data/source/eQTL/info.csv')
         eqtl_organ_info = eqtl_organ_info[eqtl_organ_info['tissue'].isin(basal_ganglia_organs)]
+        eqtl_organ = eqtl_organ.loc[eqtl_organ_info.index]
+    elif organ == 'Cortex':
+        eqtl_organ = pd.read_csv(f'Data/source/eQTL/all.vcf', sep='\t')
+        eqtl_organ_info = pd.read_csv(f'Data/source/eQTL/info.csv')
+        eqtl_organ_info = eqtl_organ_info[eqtl_organ_info['tissue'].isin(cortex_organs)]
         eqtl_organ = eqtl_organ.loc[eqtl_organ_info.index]
     else:
         continue
@@ -125,7 +130,7 @@ for organ in ['All', 'Brain', 'Basal_ganglia']:
             label = (eqtl_organ_unique['INFO'].values == 'positive').astype(int)
             auroc, auprc, positives, negatives = compute_metrics(label, eqtl_scores, eqtl_organ_unique, group)
             result_df = pd.concat([result_df,
-                                   pd.DataFrame({'exp': cell_type, 'organ': organ, 'group': group,
+                                   pd.DataFrame({'exp': cell_type, 'modality': 'ATAC', 'organ': organ, 'group': group,
                                                  'AUROC': auroc, 'AUPRC': auprc,
                                                  'positives': positives, 'negatives': negatives},
                                                 index=[0])], ignore_index=True)

@@ -43,12 +43,23 @@ def extract_gene_id(attributes: str) -> str:
     match = re.search(r'gene_id "([^"]+)"', attributes)
     return match.group(1) if match else ""
 
+def extract_gene_type(attributes: str) -> str:
+    """Extract gene_type (or gene_biotype) from GTF attributes column."""
+    # Try gene_type first (newer GENCODE versions)
+    match = re.search(r'gene_type "([^"]+)"', attributes)
+    if match:
+        return match.group(1)
+    # Fall back to gene_biotype (older GENCODE versions)
+    match = re.search(r'gene_biotype "([^"]+)"', attributes)
+    return match.group(1) if match else ""
+
 def overlaps(region_start: int, region_end: int, transcript_start: int, transcript_end: int) -> bool:
     """Check if two genomic intervals overlap."""
     return not (region_end < transcript_start or region_start > transcript_end)
 
 def get_transcripts_in_region(region: str, gtf_file: str = "Data/source/gencode.v48.annotation.gtf.gz", window_size=32, n_window=None,
-                              filter_to_full_transcript=False, filter_to_longest=False, return_exon_bins_only=False) -> pd.DataFrame:
+                              filter_to_full_transcript=False, filter_to_longest=False, return_exon_bins_only=False,
+                              filter_protein_coding=False) -> pd.DataFrame:
     """
     Extract all transcripts that overlap with given genomic region.
 
@@ -61,12 +72,13 @@ def get_transcripts_in_region(region: str, gtf_file: str = "Data/source/gencode.
         filter_to_longest: Keep only longest transcript per gene
         return_exon_bins_only: If True, aggregate by gene_id and return exon bin indices for each gene
                                (combines all exons from all transcripts/isoforms of the same gene)
+        filter_protein_coding: If True, only include protein_coding genes (default: False)
 
     Returns:
         When return_exon_bins_only=False (default):
-            DataFrame with columns: transcriptID, geneName, chr, start, end, start_bin_idx, end_bin_idx
+            DataFrame with columns: transcriptID, geneName, geneType, chr, start, end, start_bin_idx, end_bin_idx
         When return_exon_bins_only=True:
-            DataFrame aggregated by gene with columns: geneID, geneName, chr, start, end,
+            DataFrame aggregated by gene with columns: geneID, geneName, geneType, chr, start, end,
             start_bin_idx, end_bin_idx, exon_bins, num_exon_bins
             The 'exon_bins' column contains a list of bin indices corresponding to exons from
             ALL transcripts/isoforms of that gene (union of all exons).
@@ -116,6 +128,11 @@ def get_transcripts_in_region(region: str, gtf_file: str = "Data/source/gencode.
                     transcript_id = extract_transcript_id(attributes)
                     gene_name = extract_gene_name(attributes)
                     gene_id = extract_gene_id(attributes)
+                    gene_type = extract_gene_type(attributes)
+
+                    # Apply protein_coding filter if requested
+                    if filter_protein_coding and gene_type != "protein_coding":
+                        continue
 
                     if transcript_id:
                         if filter_to_full_transcript:
@@ -138,6 +155,7 @@ def get_transcripts_in_region(region: str, gtf_file: str = "Data/source/gencode.
                                 gene_info[gene_id] = {
                                     'geneID': gene_id,
                                     'geneName': gene_name,
+                                    'geneType': gene_type,
                                     'chr': transcript_chr,
                                     'start': transcript_start,
                                     'end': transcript_end,
@@ -158,6 +176,7 @@ def get_transcripts_in_region(region: str, gtf_file: str = "Data/source/gencode.
                             transcripts.append({
                                 'transcriptID': transcript_id,
                                 'geneName': gene_name,
+                                'geneType': gene_type,
                                 'chr': transcript_chr,
                                 'start': transcript_start,
                                 'end': transcript_end,
@@ -268,11 +287,21 @@ if __name__ == "__main__":
     result_exons = get_transcripts_in_region(example_region, return_exon_bins_only=True)
     if not result_exons.empty:
         print(f"Found {len(result_exons)} genes with exon information:")
-        print(result_exons[['geneID', 'geneName', 'start_bin_idx', 'end_bin_idx', 'num_exon_bins']].head(5))
+        print(result_exons[['geneID', 'geneName', 'geneType', 'start_bin_idx', 'end_bin_idx', 'num_exon_bins']].head(5))
         print("\nExample exon bins for first gene:")
         if len(result_exons) > 0:
             print(f"  Gene: {result_exons.iloc[0]['geneName']} ({result_exons.iloc[0]['geneID']})")
+            print(f"  Gene type: {result_exons.iloc[0]['geneType']}")
             print(f"  Full range: bins {result_exons.iloc[0]['start_bin_idx']} to {result_exons.iloc[0]['end_bin_idx']}")
             print(f"  Exon bins: {result_exons.iloc[0]['exon_bins'][:20]}..." if len(result_exons.iloc[0]['exon_bins']) > 20 else f"  Exon bins: {result_exons.iloc[0]['exon_bins']}")
             print(f"  Number of exon bins: {result_exons.iloc[0]['num_exon_bins']}")
             print(f"  Note: Exon bins include all exons from all transcripts/isoforms of this gene")
+
+    # Usage with protein_coding filter
+    print("\n\nExample with protein_coding genes only:")
+    result_protein = get_transcripts_in_region(example_region, return_exon_bins_only=True, filter_protein_coding=True)
+    if not result_protein.empty:
+        print(f"Found {len(result_protein)} protein-coding genes:")
+        print(result_protein[['geneID', 'geneName', 'geneType', 'num_exon_bins']].head(5))
+    else:
+        print("No protein-coding genes found in this region")
