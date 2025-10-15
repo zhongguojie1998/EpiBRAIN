@@ -236,6 +236,13 @@ class DNASeqModelTrainer:
             self.local_rank = rank
         self.world_size = world_size
         self.should_log = (self.world_size > 1 and self.rank == 0) or self.world_size == 1
+        # Set device: if rank is "cpu" or "cuda:X", use it directly; otherwise treat as device id
+        if isinstance(self.local_rank, str):
+            self.device = self.local_rank
+        elif torch.cuda.is_available():
+            self.device = self.local_rank
+        else:
+            self.device = "cpu"
 
         # set up model and data, make sure the logic aligned
         self.model_data_align()
@@ -433,12 +440,17 @@ class DNASeqModelTrainer:
             self.model.load_state_dict(self.checkpoint["model_state_dict"])
 
         # send the model to training device
-        self.model = self.model.to(self.local_rank, non_blocking=True)
+        self.model = self.model.to(self.device, non_blocking=True)
         if self.world_size > 1:
             # Add DDP wrapper
-            self.model = DDP(
-                self.model, device_ids=[self.local_rank], static_graph=True, find_unused_parameters=True
-            )
+            if torch.cuda.is_available():
+                self.model = DDP(
+                    self.model, device_ids=[self.local_rank], static_graph=True, find_unused_parameters=True
+                )
+            else:
+                self.model = DDP(
+                    self.model, static_graph=True, find_unused_parameters=True
+                )
 
             # If applicable, add gradient compression hook
             if self.training_config.use_grad_compression:
@@ -581,13 +593,13 @@ class DNASeqModelTrainer:
             # pred[head_name] shape: [batch, seq_len, total_tracks]
             task_pred = pred[head_name]
             # Get corresponding labels
-            task_label = label[task_type].to(self.local_rank, non_blocking=True)
+            task_label = label[task_type].to(self.device, non_blocking=True)
             # Compute loss
             if "transcripts" in loss_name:
                 # get transcripts masks
                 if "transcripts_mask" in label:
                     transcripts_mask = label["transcripts_mask"].to(
-                        self.local_rank, non_blocking=True, dtype=task_pred.dtype
+                        self.device, non_blocking=True, dtype=task_pred.dtype
                     )  # total_transcripts x bsz x n_window
                 else:
                     raise ValueError(f"Transcripts mask not found in label for loss {loss_name}")
@@ -737,7 +749,7 @@ class DNASeqModelTrainer:
         else:
             load_file = self.training_config.load_checkpoint
         self.checkpoint = torch.load(
-            load_file, map_location=torch.device(self.local_rank)
+            load_file, map_location=torch.device(self.device)
         )
 
         # since this is first called in the model initialization pipeline, the model and optimizers loads the checkpoint in their own functions instead of here
@@ -794,7 +806,7 @@ class DNASeqModelTrainer:
 
             # seq_embedding shape [batch, L, 4]
             # label is now a dictionary {task_type: tensor}
-            seq_embedding = seq_embedding.to(self.local_rank, non_blocking=True)
+            seq_embedding = seq_embedding.to(self.device, non_blocking=True)
             # pred is now a dictionary {head_name: tensor}
             pred = self.model(
                 seq_embedding.permute(0, 2, 1),
@@ -861,7 +873,7 @@ class DNASeqModelTrainer:
         self.inference_model.eval()
 
         if log_loss:
-            running_loss_local = torch.tensor(0.0, device=self.local_rank)
+            running_loss_local = torch.tensor(0.0, device=self.device)
         if save_pred and save_method == "merge":
             preds = {}
             labels = {}
@@ -870,7 +882,7 @@ class DNASeqModelTrainer:
         tm_metrics, metric_name_dict = get_metric_collection(
             prefix=f"{log_prefix}/", config=self.head_data_setting
         )
-        tm_metrics.to(self.local_rank)
+        tm_metrics.to(self.device)
         tm_metrics.reset()
 
         dataloader = self.data_func[log_prefix.lower()]["data_loader"]
@@ -879,7 +891,7 @@ class DNASeqModelTrainer:
             for i, (seq_embedding, label, ind) in enumerate(dataloader):
                 # seq_embedding shape [batch, L, 4]
                 # label is now a dictionary {task_type: tensor}
-                seq_embedding = seq_embedding.to(self.local_rank, non_blocking=True)
+                seq_embedding = seq_embedding.to(self.device, non_blocking=True)
                 # pred is now a dictionary {head_name: tensor}
                 pred = self.inference_model(
                     seq_embedding.permute(0, 2, 1),
@@ -919,7 +931,7 @@ class DNASeqModelTrainer:
                     label_meta = head_data["label_meta"].reset_index().set_index("trial")
                     for trial in label_meta.index:
                         pred_dim, label_dim = label_meta.loc[trial, ["dim", "label_dim"]]
-                        label_subset = label[task_type][:, :, label_dim].to(self.local_rank, non_blocking=True)
+                        label_subset = label[task_type][:, :, label_dim].to(self.device, non_blocking=True)
                         pred_subset = pred[head_name][:, :, pred_dim, ...]
                         B, L = pred_subset.shape[:2]
                         # Update metrics for this head
@@ -935,13 +947,13 @@ class DNASeqModelTrainer:
                     # get transcripts masks
                     if "transcripts_mask" in label:
                         transcripts_mask = label["transcripts_mask"].to(
-                            self.local_rank, non_blocking=True, dtype=pred_subset.dtype
+                            self.device, non_blocking=True, dtype=pred_subset.dtype
                         )  # total_transcripts x bsz x n_window
                         # TODO: split the transcript info to minus strand and plus strand, and handle them separately
                         for mod in label_meta['modality'][label_meta["modality"].str.contains("RNA")].unique():
                             cell_data = label_meta[label_meta["modality"] == mod]
                             pred_subset = pred[head_name][:, :, cell_data["dim"].tolist(), ...]  # bsz x n_window x cell_types
-                            label_subset = label[task_type][:, :, cell_data["label_dim"].tolist(), ...].to(self.local_rank, non_blocking=True)  # bsz x n_window x cell_types
+                            label_subset = label[task_type][:, :, cell_data["label_dim"].tolist(), ...].to(self.device, non_blocking=True)  # bsz x n_window x cell_types
                             pred_transcripts, label_transcripts = self.compute_transcripts(
                                 pred_subset, label_subset, transcripts_mask, cell_data
                             ) # shape of total_transcripts x cell_types_tracks
@@ -964,7 +976,7 @@ class DNASeqModelTrainer:
                     for mod in label_meta['modality'][~label_meta["modality"].str.contains("RNA")].unique():
                         cell_data = label_meta[label_meta["modality"] == mod]
                         pred_subset = pred[head_name][:, :, cell_data["dim"].tolist(), ...]  # bsz x n_window x cell_types
-                        label_subset = label[task_type][:, :, cell_data["label_dim"].tolist(), ...].to(self.local_rank, non_blocking=True)  # bsz x n_window x cell_types
+                        label_subset = label[task_type][:, :, cell_data["label_dim"].tolist(), ...].to(self.device, non_blocking=True)  # bsz x n_window x cell_types
                         key = f"{mod}/{head_name}/cross_cell/PearsonR"
                         tm_metrics[key].update(
                             pred_subset.reshape(B * L, -1).double(),
@@ -1015,6 +1027,13 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             self.local_rank = rank
         self.world_size = world_size
         self.should_log = (self.world_size > 1 and self.rank == 0) or self.world_size == 1
+        # Set device: if rank is "cpu" or "cuda:X", use it directly; otherwise treat as device id
+        if isinstance(self.local_rank, str):
+            self.device = self.local_rank
+        elif torch.cuda.is_available():
+            self.device = self.local_rank
+        else:
+            self.device = "cpu"
 
         # set up model and data, make sure the logic aligned
         self.model_data_align()
@@ -1157,7 +1176,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
             # seq_embedding shape [batch, L, 4]
             # label is now a dictionary {task_type: tensor}
-            seq_embedding = seq_embedding.to(self.local_rank, non_blocking=True)
+            seq_embedding = seq_embedding.to(self.device, non_blocking=True)
             # pred is now a dictionary {head_name: tensor}
             pred = self.model_engine(
                 seq_embedding.permute(0, 2, 1),

@@ -113,8 +113,11 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
         )
     else:
         world_size = myconfig.training.get("world_size", 1)
-        available_devices = max(1, torch.cuda.device_count())
-        world_size = min(world_size, available_devices)
+        available_devices = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if available_devices > 0:
+            world_size = min(world_size, available_devices)
+        else:
+            world_size = 1  # CPU mode, single process only
 
         setup_logging(
             level=myconfig.logging.log_level,
@@ -142,7 +145,8 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
     random.seed(myconfig.training.seed)
     np.random.seed(myconfig.training.seed)
     torch.manual_seed(myconfig.training.seed)
-    torch.cuda.manual_seed_all(myconfig.training.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(myconfig.training.seed)
 
     ## save the configs
     logger.debug(myconfig)
