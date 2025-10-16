@@ -57,7 +57,11 @@ def create_optimizer_grouped_parameters(model, use_groups=True):
             no_decay_params.append(param)
         else:
             if "transformer" in name:
-                transformer_decay_params.append(param)
+                # remove LoRA parameters from transformer decay group
+                if "lora" in name:
+                    no_decay_params.append(param)
+                else:
+                    transformer_decay_params.append(param)
             else:
                 overall_decay_params.append(param)
 
