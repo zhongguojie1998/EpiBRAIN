@@ -600,7 +600,7 @@ def get_labels(
             logger.error('ERROR: Unrecognized summary statistic "%s".' % sum_stat)
             exit(1)
 
-        if umap_npy_path is not None and umap_pct is not None:
+        if umap_npy_path is not None and umap_pct is not None and np.isfinite(umap_pct):
             umap_cov = np.percentile(seq_cov, 100 * umap_pct)
             seq_cov[unmap_mask[si, :]] = np.minimum(seq_cov[unmap_mask[si, :]], umap_cov)
 

@@ -12,7 +12,7 @@
 #SBATCH --output=%x-%j.out                      # output file name
 
 # Parse experiment name argument
-EXP_NAME=${1:-"basal_ganglia_miniatlas_drop_celltype_v1"}
+EXP_NAME=${1:-"basal_ganglia_miniatlas_drop_celltype_v2"}
 
 date;hostname;pwd
 
