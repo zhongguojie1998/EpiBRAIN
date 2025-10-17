@@ -4,12 +4,19 @@ Convert model predictions from .pt files to BigWig format at 32bp resolution.
 
 This script reads prediction files from the testing dataset (or train/valid) and
 writes the predictions to BigWig format for visualization in genome browsers.
+Optionally, it can also export the corresponding labels to BigWig format.
 
 Usage:
     python 01_0_pt_to_bigwig.py -e basal_ganglia_miniatlas_drop_celltype_v1 \
         --chk 250 -s Test --res_base ./Res --log_base ./logs \
         -o ./bigwig_output --fasta /path/to/reference.fa \
         --trials "MiniAtlas-L56IT_K27Ac,MiniAtlas-MSN_ATAC"
+
+    # To also export labels to BigWig:
+    python 01_0_pt_to_bigwig.py -e basal_ganglia_miniatlas_drop_celltype_v1 \
+        --chk 250 -s Test --res_base ./Res --log_base ./logs \
+        -o ./bigwig_output --fasta /path/to/reference.fa \
+        --export_labels
 """
 
 import os
@@ -235,8 +242,8 @@ def write_single_bigwig_per_trial(predictions, regions_df, trial_idx, trial_name
     print(f"Created: {output_file}")
 
 
-def export_trial(test_pred, regions_df, label_meta, trial_idx, output_dir,
-                 chrom_sizes, window_size, per_chrom):
+def export_trial(test_pred, test_label, regions_df, label_meta, trial_idx, output_dir,
+                 chrom_sizes, window_size, per_chrom, export_labels):
     """
     Worker function for exporting a single trial to BigWig format.
 
@@ -244,6 +251,8 @@ def export_trial(test_pred, regions_df, label_meta, trial_idx, output_dir,
     -----------
     test_pred : torch.Tensor
         Predictions tensor
+    test_label : torch.Tensor or None
+        Labels tensor (can be None if not available)
     regions_df : pd.DataFrame
         DataFrame with genomic regions
     label_meta : pd.DataFrame
@@ -258,6 +267,8 @@ def export_trial(test_pred, regions_df, label_meta, trial_idx, output_dir,
         Window size in bp
     per_chrom : bool
         Whether to create separate files per chromosome
+    export_labels : bool
+        Whether to also export labels
 
     Returns:
     --------
@@ -270,32 +281,64 @@ def export_trial(test_pred, regions_df, label_meta, trial_idx, output_dir,
         chroms = regions_df['chr'].unique()
         all_exist = True
         for chrom in chroms:
-            output_bw = os.path.join(output_dir, f"{trial_name}_{chrom}.bw")
+            output_bw = os.path.join(output_dir, f"{trial_name}_pred_{chrom}.bw")
             if not os.path.exists(output_bw):
                 all_exist = False
                 break
+            if export_labels and test_label is not None:
+                output_bw_label = os.path.join(output_dir, f"{trial_name}_label_{chrom}.bw")
+                if not os.path.exists(output_bw_label):
+                    all_exist = False
+                    break
 
         if all_exist:
             print(f"Skipping {trial_name}: all chromosome files already exist")
             return trial_name
 
-        # Create separate BigWig files per chromosome
+        # Create separate BigWig files per chromosome for predictions
         write_predictions_to_bigwig(
-            test_pred, regions_df, trial_idx, trial_name,
+            test_pred, regions_df, trial_idx, f"{trial_name}_pred",
             output_dir, chrom_sizes, window_size
         )
+
+        # Create separate BigWig files per chromosome for labels
+        if export_labels and test_label is not None:
+            write_predictions_to_bigwig(
+                test_label, regions_df, trial_idx, f"{trial_name}_label",
+                output_dir, chrom_sizes, window_size
+            )
     else:
         # Check if single BigWig file already exists
-        output_file = os.path.join(output_dir, f"{trial_name}.bw")
+        output_file = os.path.join(output_dir, f"{trial_name}_pred.bw")
         if os.path.exists(output_file):
+            pred_exists = True
+        else:
+            pred_exists = False
+
+        label_exists = False
+        if export_labels and test_label is not None:
+            output_file_label = os.path.join(output_dir, f"{trial_name}_label.bw")
+            if os.path.exists(output_file_label):
+                label_exists = True
+
+        if pred_exists and (not export_labels or label_exists or test_label is None):
             print(f"Skipping {trial_name}: file already exists")
             return trial_name
 
-        # Create single BigWig file per trial
-        write_single_bigwig_per_trial(
-            test_pred, regions_df, trial_idx, trial_name,
-            output_file, chrom_sizes, window_size
-        )
+        # Create single BigWig file per trial for predictions
+        if not pred_exists:
+            write_single_bigwig_per_trial(
+                test_pred, regions_df, trial_idx, f"{trial_name}_pred",
+                output_file, chrom_sizes, window_size
+            )
+
+        # Create single BigWig file per trial for labels
+        if export_labels and test_label is not None and not label_exists:
+            output_file_label = os.path.join(output_dir, f"{trial_name}_label.bw")
+            write_single_bigwig_per_trial(
+                test_label, regions_df, trial_idx, f"{trial_name}_label",
+                output_file_label, chrom_sizes, window_size
+            )
     return trial_name
 
 
@@ -316,10 +359,14 @@ def export_trial(test_pred, regions_df, label_meta, trial_idx, output_dir,
               help="Path to data directory (default: derived from log_base)")
 @click.option("--n_jobs", type=int, default=None,
               help="Number of parallel jobs (default: use all CPU cores)")
+@click.option("--export_labels", is_flag=True, default=False,
+              help="Also export labels to BigWig format (default: False)")
 def main(exp_name, chk, split, res_base, log_base, output_dir, fasta_file,
-         trials, per_chrom, window_size, data_path, n_jobs):
+         trials, per_chrom, window_size, data_path, n_jobs, export_labels):
     """
-    Convert model predictions from .pt files to BigWig format at 32bp resolution.
+    Convert model predictions (and optionally labels) from .pt files to BigWig format at 32bp resolution.
+
+    Output files will be named as {trial_name}_pred.bw for predictions and {trial_name}_label.bw for labels.
     """
     LOG_BASE = os.path.abspath(f"{log_base}/{exp_name}/")
     RES_BASE = os.path.abspath(res_base)
@@ -351,6 +398,16 @@ def main(exp_name, chk, split, res_base, log_base, output_dir, fasta_file,
     n_trials = len(label_meta)
 
     print(f"Predictions shape: {test_pred.shape} ({n_samples} samples, {n_windows} windows, {n_trials} trials)")
+
+    # Extract labels if requested
+    test_label = None
+    if export_labels:
+        if 'label' in test_res and 'regression' in test_res['label']:
+            test_label = test_res["label"]['regression'][:, :, label_meta.index.values].cpu()
+            print(f"Labels shape: {test_label.shape} ({n_samples} samples, {n_windows} windows, {n_trials} trials)")
+        else:
+            print("Warning: Labels not found in prediction file. Label export will be skipped.")
+            export_labels = False
 
     # Load genomic regions
     if data_path is None:
@@ -403,10 +460,10 @@ def main(exp_name, chk, split, res_base, log_base, output_dir, fasta_file,
 
     Parallel(n_jobs=n_jobs, verbose=10)(
         delayed(export_trial)(
-            test_pred, regions_df, label_meta, trial_idx, output_dir,
-            chrom_sizes, window_size, per_chrom
+            test_pred, test_label, regions_df, label_meta, trial_idx, output_dir,
+            chrom_sizes, window_size, per_chrom, export_labels
         )
-        for trial_idx in tqdm(trial_indices, desc="Exporting trials")
+        for trial_idx in trial_indices
     )
 
     print(f"\nDone! BigWig files saved to: {output_dir}")

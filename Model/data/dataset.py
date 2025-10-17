@@ -37,7 +37,27 @@ class GenomeIntervalDataset(Dataset):
         df.columns = ["chr", "start", "end", "split"]
         self.df = df[df["split"] == dataset_type].reset_index(drop=True)
         self.load_task = list(load_task)
-
+        raw_label_meta = pd.read_csv(f"{storage_path}/raw_label_meta.csv")
+        self.raw_label_meta = raw_label_meta
+        
+        # get the RNA_plus and RNA_minus index, reverse for each cell type
+        self.reverse_complement_aug_index = None
+        if "RNAplus" in self.raw_label_meta['modality'].values and "RNAminus" in self.raw_label_meta['modality'].values:
+            # needs to reverse the RNAplus and RNAminus
+            self.reverse_complement_aug_index = []
+            for i, row in self.raw_label_meta.iterrows():
+                if row['modality'] == 'RNAplus':
+                    # find the index of RNAminus of corresponding cell type
+                    minus_idx = self.raw_label_meta.index[(self.raw_label_meta['modality'] == 'RNAminus') & (self.raw_label_meta['cell_type'] == row['cell_type'])].values[0]
+                    self.reverse_complement_aug_index.append(int(minus_idx))
+                elif row['modality'] == 'RNAminus':
+                    # find the index of RNAplus of corresponding cell type
+                    plus_idx = self.raw_label_meta.index[(self.raw_label_meta['modality'] == 'RNAplus') & (self.raw_label_meta['cell_type'] == row['cell_type'])].values[0]
+                    self.reverse_complement_aug_index.append(int(plus_idx))
+                else:
+                    # don't change
+                    self.reverse_complement_aug_index.append(i)
+        
         # load label
         self.preload_data = preload_data
         if preload_data:
@@ -88,8 +108,9 @@ class GenomeIntervalDataset(Dataset):
             # if RNA_minus and RNA_plus are in the label, they should be swapped
             if token_dict["rand_reverse"]:
                 label = {k: torch.flip(v, dims=[0]) for k, v in label.items()}
-            if "RNA_minus" in label and "RNA_plus" in label:
-                label["RNA_minus"], label["RNA_plus"] = label["RNA_plus"], label["RNA_minus"]
+            if self.reverse_complement_aug_index:
+                # reverse the RNA_plus and RNA_minus index
+                label['regression'] = label['regression'][:, self.reverse_complement_aug_index]
 
         return one_hot if not self.return_token_dict else token_dict, label, ind
 

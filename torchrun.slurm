@@ -46,7 +46,6 @@ srun --cpu-bind=none --jobid $SLURM_JOBID bash -c "torchrun \
         -x \"training=nygc_multinodes\" --torchrun \
         -x \"data.storage_path=./Data/$EXP_NAME\" \
         -x \"model=no_celltype_heads\" \
-        -x \"training.load_checkpoint=18\" \
         -x \"data.preprocess.trial_summary_path=./Data/data_config/$EXP_NAME.csv\""
 
 date
