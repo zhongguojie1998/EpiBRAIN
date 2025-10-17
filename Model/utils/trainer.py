@@ -844,7 +844,8 @@ class DNASeqModelTrainer:
             if should_update:
                 # log training status
                 ## in the training loop, we only look at the local loss
-                if self.current_step % self.logging_config.report_every == 0:
+                tensorboard_log_every = self.logging_config.get("tensorboard_log_every") or self.logging_config.report_every
+                if self.current_step % tensorboard_log_every == 0:
                     report_loss = {k: v / batch_count for k, v in batch_loss_dict.items()}
 
                     nan_termination = self._log_training_metrics(report_loss, should_exit_on_nan=True)
@@ -1206,7 +1207,8 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             ## in the training loop, we only look at the local loss
             should_update = ((i + 1) % self.training_config.accum_step == 0) or (i + 1 == len(dataloader))
 
-            if self.current_step % self.logging_config.report_every == 0 and should_update:
+            tensorboard_log_every = self.logging_config.get("tensorboard_log_every") or self.logging_config.report_every
+            if self.current_step % tensorboard_log_every == 0 and should_update:
                 report_loss = {k: v / batch_count for k, v in batch_loss_dict.items()}
 
                 nan_termination = self._log_training_metrics(report_loss, should_exit_on_nan=True)

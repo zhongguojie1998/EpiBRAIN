@@ -10,6 +10,7 @@ overwrite_log_file: False
 # training logging
 save_every: 1
 report_every: 1
+tensorboard_log_every: 1
 log_more: True
 
 # use this to enable even more logs, each card will out put somelogs

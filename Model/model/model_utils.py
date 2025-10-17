@@ -2,6 +2,7 @@ import math
 
 import numpy as np
 import torch.nn as nn
+from torch import compile
 from peft import LoraConfig, get_peft_model
 
 from model.model_building_block import Attention, FlashAttention
@@ -291,5 +292,17 @@ def setup_model(config, logger):
     )
 
     logger.debug(model)
+
+    # Apply torch.compile if enabled
+    use_compile = model_config.get("use_compile", False)
+    if use_compile:
+        compile_mode = model_config.get("compile_mode", "default")
+        compile_backend = model_config.get("compile_backend", "inductor")
+        logger.info(f"Compiling model with torch.compile (mode={compile_mode}, backend={compile_backend})")
+        try:
+            model = compile(model, mode=compile_mode, backend=compile_backend)
+            logger.info("Model compilation successful")
+        except Exception as e:
+            logger.warning(f"Model compilation failed: {e}. Proceeding with uncompiled model.")
 
     return model

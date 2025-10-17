@@ -14,6 +14,7 @@ checkpoint_dir: ./Chk/${logging.exp_name}  # directory to save the checkpoints
 res_dir: ./Res/${logging.exp_name}
 save_every: 1 # save checkpoint for every x epochs
 report_every: 1  # report basic training log (loss, model parameter (optional), etc.) for every x optimization steps (i.e. x effective batches)
+tensorboard_log_every: 100  # log to tensorboard every x optimization steps. If null, defaults to report_every. Set higher value (e.g., 100) to reduce I/O overhead and improve training speed
 log_more: False # log more metrics during training, including model gradient and model parameter histogram. Only effective when using tensorboard
 
 ## inference setup
