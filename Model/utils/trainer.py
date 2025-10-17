@@ -646,7 +646,13 @@ class DNASeqModelTrainer:
     @property
     def training_model(self):
         """Property to access the model for training logging, allowing subclasses to override."""
-        return self.model
+        # Unwrap DDP and torch.compile wrappers for parameter access
+        model = self.model
+        if hasattr(model, "module"):
+            model = model.module
+        if hasattr(model, "_orig_mod"):
+            model = model._orig_mod
+        return model
 
     def _log_training_metrics(self, report_loss, should_exit_on_nan=False):
         """Shared training metrics logging logic with NaN detection and exit capability."""
@@ -768,8 +774,14 @@ class DNASeqModelTrainer:
         if save_name is None:
             save_name = self.current_epoch
 
-        # if DDP, then the model is wrapped in module
-        model_to_save = self.model.module if hasattr(self.model, "module") else self.model
+        # Unwrap model from DDP and torch.compile wrappers
+        model_to_save = self.model
+        # First unwrap DDP if present
+        if hasattr(model_to_save, "module"):
+            model_to_save = model_to_save.module
+        # Then unwrap torch.compile if present
+        if hasattr(model_to_save, "_orig_mod"):
+            model_to_save = model_to_save._orig_mod
 
         self.logger.info(f"Saving checkpoint for epoch {self.current_epoch}...")
         if self.should_log:
@@ -1126,7 +1138,11 @@ class DeepspeedTrainer(DNASeqModelTrainer):
     @property
     def training_model(self):
         """Override to use model_engine.module for DeepSpeed training logging."""
-        return self.model_engine.module
+        # Unwrap torch.compile wrapper if present
+        model = self.model_engine.module
+        if hasattr(model, "_orig_mod"):
+            model = model._orig_mod
+        return model
 
     def load_checkpoint(self):
 
