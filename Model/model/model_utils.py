@@ -246,6 +246,20 @@ def setup_model(config, logger):
     if training_config.load_checkpoint is None:
         model.init_weights()
 
+    # Apply torch.compile BEFORE finetune wrapping (LoRA, etc.) to avoid numerical instability
+    should_compile = model_config.get("use_compile", False)
+    compiled_before_finetune = False
+    if should_compile and training_config.finetune:
+        compile_mode = model_config.get("compile_mode", "default")
+        compile_backend = model_config.get("compile_backend", "inductor")
+        logger.info(f"Compiling base model before fine-tuning (mode={compile_mode}, backend={compile_backend})")
+        try:
+            model = torch.compile(model, mode=compile_mode, backend=compile_backend)
+            logger.info("Base model compilation successful")
+            compiled_before_finetune = True
+        except Exception as e:
+            logger.warning(f"Base model compilation failed: {e}. Proceeding with uncompiled model.")
+
     # if finetune, load the pretrained model
     if training_config.finetune:
         # in case we need to load the pretrained model and only want to load part of them
@@ -293,9 +307,9 @@ def setup_model(config, logger):
 
     logger.debug(model)
 
-    # Apply torch.compile if enabled
-    use_compile = model_config.get("use_compile", False)
-    if use_compile:
+    # Apply torch.compile if enabled and not already compiled before fine-tuning
+    # For non-fine-tuning or if compilation before fine-tuning failed/was skipped
+    if should_compile and not compiled_before_finetune:
         compile_mode = model_config.get("compile_mode", "default")
         compile_backend = model_config.get("compile_backend", "inductor")
         logger.info(f"Compiling model with torch.compile (mode={compile_mode}, backend={compile_backend})")

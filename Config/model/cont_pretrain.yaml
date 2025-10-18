@@ -5,8 +5,8 @@ model_name: ./Chk/borzoi_pretrain
 ## technical setup
 flashed: False  # whether to use FlashAttention
 use_autocast: False  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
-use_compile: False  # whether to use torch.compile for model optimization (PyTorch 2.0+). Can significantly speed up training
-compile_mode: default  # torch.compile mode: "default", "reduce-overhead", "max-autotune", or "max-autotune-no-cudagraphs"
+use_compile: False  # whether to use torch.compile for model optimization (PyTorch 2.0+). Can significantly speed up training. Note: For LoRA fine-tuning, base model is compiled BEFORE LoRA wrapping to avoid numerical instability
+compile_mode: default  # torch.compile mode: "default", "reduce-overhead", "max-autotune", or "max-autotune-no-cudagraphs". Use "default" for LoRA to avoid NaN errors
 compile_backend: inductor  # torch.compile backend: "inductor" (default), "aot_eager", "cudagraphs", etc.
 finetune_method: cont_from_pretrain 
 
