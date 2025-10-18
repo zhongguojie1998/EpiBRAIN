@@ -254,7 +254,7 @@ def setup_model(config, logger):
         compile_backend = model_config.get("compile_backend", "inductor")
         logger.info(f"Compiling base model before fine-tuning (mode={compile_mode}, backend={compile_backend})")
         try:
-            model = torch.compile(model, mode=compile_mode, backend=compile_backend)
+            model = compile(model, mode=compile_mode, backend=compile_backend)
             logger.info("Base model compilation successful")
             compiled_before_finetune = True
         except Exception as e:
