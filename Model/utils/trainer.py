@@ -129,31 +129,26 @@ class CrossColumnPearsonR(tm.Metric):
         """
         assert preds.shape == target.shape, f"Shape mismatch: {preds.shape} vs {target.shape}"
 
-        # Calculate correlation for each row in current batch
-        batch_corrs = []
-        for i in range(preds.shape[0]):
-            pred_row = preds[i, :]
-            target_row = target[i, :]
+        # Vectorized correlation computation for all rows at once
+        # Center each row by subtracting row mean
+        pred_centered = preds - preds.mean(dim=1, keepdim=True)  # MxN
+        target_centered = target - target.mean(dim=1, keepdim=True)  # MxN
 
-            # Calculate Pearson correlation efficiently for two vectors
-            pred_centered = pred_row - pred_row.mean()
-            target_centered = target_row - target_row.mean()
+        # Compute correlation using dot product formula (vectorized across all rows)
+        numerator = torch.sum(pred_centered * target_centered, dim=1)  # M
+        pred_norm = torch.norm(pred_centered, dim=1)  # M
+        target_norm = torch.norm(target_centered, dim=1)  # M
 
-            # Compute correlation using dot product formula
-            numerator = torch.sum(pred_centered * target_centered)
-            pred_norm = torch.norm(pred_centered)
-            target_norm = torch.norm(target_centered)
+        # Compute denominator and avoid division by zero
+        denominator = pred_norm * target_norm  # M
+        valid_mask = denominator > 1e-8  # M (boolean mask)
 
-            # Avoid division by zero
-            if pred_norm > 1e-8 and target_norm > 1e-8:
-                corr = numerator / (pred_norm * target_norm)
-                batch_corrs.append(corr)
-
-        if batch_corrs:
+        # Only compute correlations where denominator is non-zero
+        if valid_mask.any():
+            corr = numerator[valid_mask] / denominator[valid_mask]  # K (K = number of valid samples)
             # Accumulate sum of correlations and count of valid samples
-            batch_corr_sum = torch.sum(torch.stack(batch_corrs))
-            self.corr_sum += batch_corr_sum
-            self.total_samples += len(batch_corrs)
+            self.corr_sum += torch.sum(corr)
+            self.total_samples += valid_mask.sum()
 
     def compute(self):
         if self.total_samples == 0:
@@ -432,16 +427,13 @@ class DNASeqModelTrainer:
 
         self.logger.info("Loading model...")
 
-        self.model = setup_model(self.config, self.logger)
+        # Pass checkpoint to setup_model so it can handle loading at the right time
+        checkpoint = self.checkpoint if self.training_config.load_checkpoint is not None else None
+        self.model = setup_model(self.config, self.logger, checkpoint=checkpoint)
 
         # since the batchsize is small, we need to sync batchnorm statistics
         if self.world_size > 1:
             self.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
-
-        # if necessary, load the checkpoint
-        ## load the full model before we wrap the model into DDP
-        if self.training_config.load_checkpoint is not None:
-            self.model.load_state_dict(self.checkpoint["model_state_dict"])
 
         # send the model to training device
         self.model = self.model.to(self.device, non_blocking=True)
@@ -641,7 +633,10 @@ class DNASeqModelTrainer:
     @property
     def inference_model(self):
         """Property to access the model for inference, allowing subclasses to override."""
-        return self.model
+        model = self.model
+        # Keep compiled model for inference - torch.compile also speeds up forward pass
+        # Compilation is done after LoRA, so model.eval() won't trigger recompilation
+        return model
 
     @property
     def training_model(self):
@@ -1100,7 +1095,9 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         self.logger.info("Loading model...")
 
-        self.model = setup_model(self.config, self.logger)
+        # Pass checkpoint to setup_model so it can handle loading at the right time
+        checkpoint = self.checkpoint if self.training_config.load_checkpoint is not None else None
+        self.model = setup_model(self.config, self.logger, checkpoint=checkpoint)
 
         # since the batchsize is small, we need to sync batchnorm statistics
         if self.world_size > 1:
@@ -1133,7 +1130,9 @@ class DeepspeedTrainer(DNASeqModelTrainer):
     @property
     def inference_model(self):
         """Override to use model_engine for DeepSpeed inference."""
-        return self.model_engine
+        model = self.model_engine
+        # Keep compiled model for inference - torch.compile also speeds up forward pass
+        return model
 
     @property
     def training_model(self):

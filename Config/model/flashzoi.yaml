@@ -7,6 +7,7 @@ use_autocast: False  # whether to use autocast, if using FlashAttention, always 
 use_compile: False  # whether to use torch.compile for model optimization (PyTorch 2.0+). Can significantly speed up training. Note: For LoRA fine-tuning, base model is compiled BEFORE LoRA wrapping to avoid numerical instability
 compile_mode: default  # torch.compile mode: "default", "reduce-overhead", "max-autotune", or "max-autotune-no-cudagraphs". Use "default" for LoRA to avoid NaN errors
 compile_backend: inductor  # torch.compile backend: "inductor" (default), "aot_eager", "cudagraphs", etc.
+compile_fullgraph: False  # whether to require fullgraph compilation (can provide 10-20% extra speedup but may fail with dynamic control flow)
 
 ## model hyperparameter
 conv_dna_param:  # parameters for the convolutional DNA layer

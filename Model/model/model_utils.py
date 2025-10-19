@@ -227,7 +227,7 @@ def safe_state_dict_loader(org_model_state_dict, load_model_state_dict, partial_
     return filtered_dict
 
 
-def setup_model(config, logger):
+def setup_model(config, logger, checkpoint=None):
     from model.model import Borzoi  # Import moved here to avoid circular import
 
     model_config = config.model
@@ -242,23 +242,21 @@ def setup_model(config, logger):
 
     model = model_cls.from_hparams(**model_config)
 
-    # initialize the model
+    # Track whether we've loaded checkpoint
+    checkpoint_loaded = False
+
+    # initialize the model or load checkpoint
     if training_config.load_checkpoint is None:
         model.init_weights()
+    else:
+        # If loading checkpoint and NOT using LoRA (or not finetuning), load full checkpoint now
+        if not training_config.finetune or model_config.finetune_method != "lora":
+            logger.info("Loading full checkpoint (non-LoRA case)")
+            model.load_state_dict(checkpoint["model_state_dict"])
+            checkpoint_loaded = True
+        # If using LoRA, we'll load after compilation and LoRA setup
 
-    # Apply torch.compile BEFORE finetune wrapping (LoRA, etc.) to avoid numerical instability
     should_compile = model_config.get("use_compile", False)
-    compiled_before_finetune = False
-    if should_compile and training_config.finetune:
-        compile_mode = model_config.get("compile_mode", "default")
-        compile_backend = model_config.get("compile_backend", "inductor")
-        logger.info(f"Compiling base model before fine-tuning (mode={compile_mode}, backend={compile_backend})")
-        try:
-            model = compile(model, mode=compile_mode, backend=compile_backend)
-            logger.info("Base model compilation successful")
-            compiled_before_finetune = True
-        except Exception as e:
-            logger.warning(f"Base model compilation failed: {e}. Proceeding with uncompiled model.")
 
     # if finetune, load the pretrained model
     if training_config.finetune:
@@ -284,6 +282,24 @@ def setup_model(config, logger):
             logger.info("LORA Finetune")
             finetune_config = LoraConfig(**model_config.finetune_param)
             model = get_peft_model(model, finetune_config)
+
+            # If we have a checkpoint to load (LoRA case), load only LoRA parameters
+            if checkpoint is not None and not checkpoint_loaded:
+                logger.info("Loading LoRA parameters from checkpoint")
+                # Filter checkpoint to only include LoRA parameters and modules_to_save
+                checkpoint_state_dict = checkpoint["model_state_dict"]
+                lora_state_dict = {}
+
+                for key, value in checkpoint_state_dict.items():
+                    # Only load LoRA adapter weights and modules_to_save
+                    if "lora_" in key or "modules_to_save" in key:
+                        lora_state_dict[key] = value
+                        logger.debug(f"Loading LoRA parameter: {key}")
+
+                # Load only the LoRA parameters, strict=False to ignore base model keys
+                model.load_state_dict(lora_state_dict, strict=False)
+                checkpoint_loaded = True
+
         elif model_config.finetune_method == "finetune_layers":
             logger.info("Finetune the given layers")
             model = set_param_grad(model, **model_config.finetune_param)
@@ -307,14 +323,24 @@ def setup_model(config, logger):
 
     logger.debug(model)
 
-    # Apply torch.compile if enabled and not already compiled before fine-tuning
-    # For non-fine-tuning or if compilation before fine-tuning failed/was skipped
-    if should_compile and not compiled_before_finetune:
+    # Apply torch.compile after LoRA is applied (if enabled)
+    # Compiling after LoRA is safe; the compile mode is what matters for numerical stability
+    if should_compile:
         compile_mode = model_config.get("compile_mode", "default")
         compile_backend = model_config.get("compile_backend", "inductor")
-        logger.info(f"Compiling model with torch.compile (mode={compile_mode}, backend={compile_backend})")
+        compile_fullgraph = model_config.get("compile_fullgraph", False)
+
+        # Warn about unsafe compile modes with LoRA
+        if training_config.finetune and model_config.finetune_method == "lora":
+            if compile_mode in ["max-autotune", "reduce-overhead"]:
+                logger.warning(
+                    f"Using compile_mode='{compile_mode}' with LoRA fine-tuning may cause NaN errors. "
+                    f"Recommended to use compile_mode='default' for numerical stability."
+                )
+
+        logger.info(f"Compiling model with torch.compile (mode={compile_mode}, backend={compile_backend}, fullgraph={compile_fullgraph})")
         try:
-            model = compile(model, mode=compile_mode, backend=compile_backend)
+            model = compile(model, mode=compile_mode, backend=compile_backend, fullgraph=compile_fullgraph)
             logger.info("Model compilation successful")
         except Exception as e:
             logger.warning(f"Model compilation failed: {e}. Proceeding with uncompiled model.")
