@@ -315,9 +315,6 @@ class PredictionHead(nn.Module):
                 # Use shared cell encoder, only build modality head
                 if head_config["task"] == "regression":
                     self.heads[head_name] = nn.Linear(self.celltype_hidden_dim, head_config["modality_num"])
-                    self.register_parameter(
-                        f"{head_name}_scale", nn.Parameter(torch.ones(head_config["track_num"]))
-                    )
                 else:  # classification
                     self.heads[head_name] = nn.Linear(
                         self.celltype_hidden_dim, head_config["modality_num"] * head_config["class_num"]
@@ -325,10 +322,6 @@ class PredictionHead(nn.Module):
             else:
                 # Direct linear layer
                 self.heads[head_name] = nn.Linear(self.in_features, head_config["out_channels"])
-                if head_config["task"] == "regression":
-                    self.register_parameter(
-                        f"{head_name}_scale", nn.Parameter(torch.ones(head_config["out_channels"]))
-                    )
 
     def forward(self, x):
         """
@@ -355,8 +348,7 @@ class PredictionHead(nn.Module):
                 mod_preds = head_layer(shared_cell_embs)  # [B, L, C, M] or [B, L, C, M*K]
 
                 if head_config["task"] == "regression":
-                    scale = getattr(self, f"{head_name}_scale")
-                    pred = F.softplus(mod_preds.view(B, L, -1)) * F.softplus(scale)  # [B, L, C*M]
+                    pred = F.softplus(mod_preds.view(B, L, -1))  # [B, L, C*M]
                 else:  # classification
                     pred = mod_preds.view(B, L, -1, head_config["class_num"])  # [B, L, C*M, K]
             else:
@@ -366,8 +358,7 @@ class PredictionHead(nn.Module):
                 if "classification" in head_config["task"]:
                     pred = pred.view(B, L, head_config["track_num"], head_config["class_num"])
                 else:  # regression
-                    scale = getattr(self, f"{head_name}_scale")
-                    pred = F.softplus(pred) * F.softplus(scale)
+                    pred = F.softplus(pred)
 
             outputs[head_name] = pred
 
