@@ -252,6 +252,9 @@ class DNASeqModelTrainer:
         self.best_valid_loss = torch.inf
         self.metrics = {}
 
+        # Pre-compute metric metadata to avoid repeated pandas operations
+        self._precompute_metric_metadata()
+
         # set up data
         self.data_split = self.config.data.used_dataset
         self.data_func = {
@@ -339,6 +342,114 @@ class DNASeqModelTrainer:
                 "class_num": head_config["class_num"],
             }
             task_label_meta.to_csv(f"{self.logging_config.log_dir}/{task}_label_meta.csv", index=True)
+
+    def _precompute_metric_metadata(self):
+        """Pre-compute metric and loss metadata to avoid repeated pandas operations in training loop."""
+        self._metric_cache = {}
+        self._loss_cache = {}
+
+        for head_name, head_data in self.head_data_setting.items():
+            label_meta = head_data["label_meta"]
+
+            # Pre-compute trial-indexed metadata (avoid reset_index().set_index() in loop)
+            label_meta_by_trial = label_meta.reset_index().set_index("trial")
+
+            # Pre-compute trial dimensions
+            trial_dims = {}
+            for trial in label_meta_by_trial.index:
+                trial_dims[trial] = {
+                    "pred_dim": label_meta_by_trial.loc[trial, "dim"],
+                    "label_dim": label_meta_by_trial.loc[trial, "label_dim"],
+                }
+
+            # Pre-compute RNA modalities
+            rna_mods = {}
+            non_rna_mods = {}
+            if "modality" in label_meta.columns:
+                rna_mask = label_meta["modality"].str.contains("RNA")
+
+                for mod in label_meta.loc[rna_mask, "modality"].unique():
+                    cell_data = label_meta[label_meta["modality"] == mod]
+                    rna_mods[mod] = {
+                        "cell_data": cell_data,
+                        "pred_dims": cell_data["dim"].tolist(),
+                        "label_dims": cell_data["label_dim"].tolist(),
+                        "trials": cell_data.index.tolist(),
+                    }
+
+                for mod in label_meta.loc[~rna_mask, "modality"].unique():
+                    cell_data = label_meta[label_meta["modality"] == mod]
+                    non_rna_mods[mod] = {
+                        "pred_dims": cell_data["dim"].tolist(),
+                        "label_dims": cell_data["label_dim"].tolist(),
+                    }
+
+            self._metric_cache[head_name] = {
+                "label_meta_by_trial": label_meta_by_trial,
+                "trial_dims": trial_dims,
+                "rna_mods": rna_mods,
+                "non_rna_mods": non_rna_mods,
+            }
+
+            # Pre-compute loss computation metadata
+            # RNA cell data for transcripts loss
+            if "modality" in label_meta.columns:
+                rna_cell_data = label_meta[label_meta["modality"].str.contains("RNA")]
+                rna_pred_dims = rna_cell_data.index.tolist()
+                rna_label_dims = rna_cell_data["label_dim"].tolist()
+
+                # Pre-compute tensors for compute_transcripts to avoid recreating them every batch
+                # These will be moved to device when needed
+                if len(rna_cell_data) > 0:
+                    scale_values = torch.tensor(rna_cell_data["scale"].values, dtype=torch.float32)
+
+                    if "clip_soft" in rna_cell_data.columns:
+                        clip_arr = rna_cell_data["clip_soft"].fillna(np.inf).values
+                        clip_soft_values = torch.tensor(clip_arr, dtype=torch.float32)
+                    else:
+                        clip_soft_values = torch.full((rna_cell_data.shape[0],), float('inf'), dtype=torch.float32)
+
+                    sum_stat_values = torch.tensor(
+                        np.where(rna_cell_data["sum_stat"] == "sum_three_quarter", 4 / 3, 1.0),
+                        dtype=torch.float32
+                    )
+                else:
+                    scale_values = None
+                    clip_soft_values = None
+                    sum_stat_values = None
+
+                # Modality groups for cross_cell loss
+                modality_groups = []
+                for mod, cell_data in label_meta.groupby("modality"):
+                    modality_groups.append({
+                        "modality": mod,
+                        "pred_dims": cell_data.index.tolist(),
+                        "label_dims": cell_data["label_dim"].tolist(),
+                        "cell_data": cell_data,
+                    })
+            else:
+                rna_cell_data = None
+                rna_pred_dims = []
+                rna_label_dims = []
+                modality_groups = []
+                scale_values = None
+                clip_soft_values = None
+                sum_stat_values = None
+
+            # All dimensions for regular loss
+            all_pred_dims = label_meta.index.tolist()
+
+            self._loss_cache[head_name] = {
+                "rna_cell_data": rna_cell_data,
+                "rna_pred_dims": rna_pred_dims,
+                "rna_label_dims": rna_label_dims,
+                "modality_groups": modality_groups,
+                "all_pred_dims": all_pred_dims,
+                # Cached tensors for compute_transcripts
+                "scale_tensor": scale_values,
+                "clip_soft_tensor": clip_soft_values,
+                "sum_stat_tensor": sum_stat_values,
+            }
 
     def get_dataset(self):
 
@@ -524,23 +635,43 @@ class DNASeqModelTrainer:
         if loss_heads != set(self.training_config.use_head):
             raise ValueError(f"Loss heads {loss_heads} do not match use_head {set(self.training_config.use_head)}")
 
-    def compute_transcripts(self, pred_subset, label_subset, transcripts_mask, cell_data):
+    def compute_transcripts(self, pred_subset, label_subset, transcripts_mask, cell_data, cached_tensors=None):
         # take pred and label for RNA predictions, aggregate by transcripts_mask
         ## transform label_subset back to original scale
-        ### scale para
-        scale_tensor = (
-            torch.tensor(cell_data["scale"].values, device=label_subset.device, dtype=pred_subset.dtype).unsqueeze(0).unsqueeze(0)
-        )  # bsz x n_window x cell_types
+
+        # Use cached tensors if available, otherwise compute from cell_data
+        if cached_tensors is not None:
+            scale_tensor = cached_tensors["scale"].to(device=label_subset.device, dtype=pred_subset.dtype).unsqueeze(0).unsqueeze(0)
+            soft_clip_tensor = cached_tensors["clip_soft"].to(device=label_subset.device, dtype=pred_subset.dtype).unsqueeze(0).unsqueeze(0)
+            sum_stat_tensor = cached_tensors["sum_stat"].to(device=label_subset.device, dtype=pred_subset.dtype).unsqueeze(0).unsqueeze(0)
+        else:
+            # Fallback: compute from cell_data (slower path for backward compatibility)
+            ### scale para
+            scale_tensor = (
+                torch.tensor(cell_data["scale"].values, device=label_subset.device, dtype=pred_subset.dtype).unsqueeze(0).unsqueeze(0)
+            )  # bsz x n_window x cell_types
+
+            ### soft clip para
+            if "clip_soft" not in cell_data.columns:
+                soft_clip_tensor = torch.full((cell_data.shape[0],), torch.inf, device=label_subset.device, dtype=pred_subset.dtype)
+            else:
+                clip_arr = cell_data["clip_soft"].fillna(torch.inf).values
+                soft_clip_tensor = torch.tensor(clip_arr, device=label_subset.device, dtype=pred_subset.dtype)
+            soft_clip_tensor = soft_clip_tensor.unsqueeze(0).unsqueeze(0)  # -> (1,1,cell_types)
+
+            ### sum stat para
+            sum_stat_tensor = (
+                torch.tensor(
+                    np.where(cell_data["sum_stat"] == "sum_three_quarter", 4 / 3, 1.0),
+                    device=label_subset.device,
+                    dtype=pred_subset.dtype
+                )
+                .unsqueeze(0)
+                .unsqueeze(0)
+            )  # -> shape (1,1,cell_types)
+
         label_subset = label_subset / scale_tensor
         pred_subset = pred_subset / scale_tensor
-        ### soft clip para
-        if "clip_soft" not in cell_data.columns:
-            soft_clip_tensor = torch.full((cell_data.shape[0],), torch.inf, device=label_subset.device, dtype=pred_subset.dtype)
-        else:
-            clip_arr = cell_data["clip_soft"].fillna(torch.inf).values
-            soft_clip_tensor = torch.tensor(clip_arr, device=label_subset.device, dtype=pred_subset.dtype)
-
-        soft_clip_tensor = soft_clip_tensor.unsqueeze(0).unsqueeze(0)  # -> (1,1,cell_types)
 
         #### get soft clip back to original scale
         label_subset = torch.where(
@@ -548,16 +679,7 @@ class DNASeqModelTrainer:
             (label_subset - soft_clip_tensor + 1) ** 2 + soft_clip_tensor - 1,
             label_subset,
         )
-        ### sum stat para
-        sum_stat_tensor = (
-            torch.tensor(
-                np.where(cell_data["sum_stat"] == "sum_three_quarter", 4 / 3, 1.0),
-                device=label_subset.device,
-                dtype=pred_subset.dtype
-            )
-            .unsqueeze(0)
-            .unsqueeze(0)
-        )  # -> shape (1,1,cell_types)
+
         label_subset = label_subset**sum_stat_tensor
         ## transform pred_subset back to original scale
         pred_subset = pred_subset**sum_stat_tensor
@@ -580,17 +702,18 @@ class DNASeqModelTrainer:
             criterion = loss_info["criterion"]
             weight = loss_info["weight"]
 
-            # Get head data setting to find label indices and task type
+            # Get head data setting and cached metadata
             head_data = self.head_data_setting[head_name]
             task_type = head_data["task_type"]
-            label_meta = head_data["label_meta"]
+            cache = self._loss_cache[head_name]
 
             # Extract prediction subset for this head
             # pred[head_name] shape: [batch, seq_len, total_tracks]
             task_pred = pred[head_name]
             # Get corresponding labels
             task_label = label[task_type].to(self.device, non_blocking=True)
-            # Compute loss
+
+            # Compute loss using cached metadata
             if "transcripts" in loss_name:
                 # get transcripts masks
                 if "transcripts_mask" in label:
@@ -599,25 +722,32 @@ class DNASeqModelTrainer:
                     )  # total_transcripts x bsz x n_window
                 else:
                     raise ValueError(f"Transcripts mask not found in label for loss {loss_name}")
-                # TODO: split the transcript info to minus strand and plus strand, and handle them separately
-                cell_data = label_meta[label_meta["modality"].str.contains("RNA")]
-                pred_subset = task_pred[:, :, cell_data.index.tolist(), ...]  # bsz x n_window x cell_types
-                label_subset = task_label[:, :, cell_data["label_dim"].tolist()]  # bsz x n_window x cell_types
+                # Use cached RNA dimensions
+                pred_subset = task_pred[:, :, cache["rna_pred_dims"], ...]  # bsz x n_window x cell_types
+                label_subset = task_label[:, :, cache["rna_label_dims"]]  # bsz x n_window x cell_types
+
+                # Pass cached tensors for faster computation
+                cached_tensors = {
+                    "scale": cache["scale_tensor"],
+                    "clip_soft": cache["clip_soft_tensor"],
+                    "sum_stat": cache["sum_stat_tensor"],
+                } if cache["scale_tensor"] is not None else None
 
                 pred_transcripts, label_transcripts = self.compute_transcripts(
-                    pred_subset, label_subset, transcripts_mask, cell_data
+                    pred_subset, label_subset, transcripts_mask, cache["rna_cell_data"], cached_tensors
                 )
                 # unsqueeze to make it 1 x total_transcripts x cell_types, looks like batch size 1
                 loss_value = criterion(pred_transcripts.unsqueeze(0), label_transcripts.unsqueeze(0))
-            if "cross_cell" in loss_name:
+            elif "cross_cell" in loss_name:
+                # Use cached modality groups
                 loss_value = 0
-                for _, cell_data in label_meta.groupby("modality"):
-                    pred_subset = task_pred[:, :, cell_data.index.tolist(), ...]
-                    label_subset = task_label[:, :, cell_data["label_dim"].tolist()]
+                for mod_group in cache["modality_groups"]:
+                    pred_subset = task_pred[:, :, mod_group["pred_dims"], ...]
+                    label_subset = task_label[:, :, mod_group["label_dims"]]
                     loss_value += criterion(pred_subset, label_subset)
             else:
-                # We need to slice the tracks dimension based on label_meta
-                pred_subset = task_pred[:, :, label_meta.index.tolist(), ...]
+                # Use cached all_pred_dims
+                pred_subset = task_pred[:, :, cache["all_pred_dims"], ...]
                 loss_value = criterion(pred_subset, task_label)
 
             loss_dict[loss_name] = loss_value.detach().cpu().item()
@@ -864,7 +994,7 @@ class DNASeqModelTrainer:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.training_config.clip_grad_norm)
                 self.optimizer.step()
                 self.scheduler.step()
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)  # Faster than zero_grad()
 
             if self.logging_config.diagnose:
                 self._diagnose_extra_log(ind)
@@ -937,39 +1067,41 @@ class DNASeqModelTrainer:
                             f"{self.logging_config.res_dir}/{log_prefix}_preds_rank_{self.rank}_epoch_{self.current_epoch}_batch_{i}.pt",
                         )
 
-                # metrics for each track, skip TranscriptsPearsonR first
+                # metrics for each track using pre-computed metadata (avoid pandas ops in loop)
                 for head_name, head_data in self.head_data_setting.items():
                     task_type = head_data["task_type"]
-                    label_meta = head_data["label_meta"].reset_index().set_index("trial")
-                    for trial in label_meta.index:
-                        pred_dim, label_dim = label_meta.loc[trial, ["dim", "label_dim"]]
+                    cache = self._metric_cache[head_name]
+
+                    # Update per-trial metrics using cached dimensions
+                    for trial, dims in cache["trial_dims"].items():
+                        pred_dim = dims["pred_dim"]
+                        label_dim = dims["label_dim"]
                         label_subset = label[task_type][:, :, label_dim].to(self.device, non_blocking=True)
                         pred_subset = pred[head_name][:, :, pred_dim, ...]
                         B, L = pred_subset.shape[:2]
                         # Update metrics for this head
                         for metric_name in metric_name_dict[task_type]:
-                            key = f"{trial}/{head_name}/{metric_name}"
-                            # only update for no-transcripts metrics
                             if "Transcripts" not in metric_name:
+                                key = f"{trial}/{head_name}/{metric_name}"
                                 tm_metrics[key].update(
                                     pred_subset.reshape(B * L, -1).double(),
                                     label_subset.reshape(B * L, -1).double(),
                                 )
-                    # special handling of TranscriptsPearsonR - we need to aggregate the transcripts by transcripts_mask
-                    # get transcripts masks
-                    if "transcripts_mask" in label:
+
+                    # special handling of TranscriptsPearsonR using cached RNA modalities
+                    if "transcripts_mask" in label and cache["rna_mods"]:
                         transcripts_mask = label["transcripts_mask"].to(
-                            self.device, non_blocking=True, dtype=pred_subset.dtype
+                            self.device, non_blocking=True, dtype=pred[head_name].dtype
                         )  # total_transcripts x bsz x n_window
                         # TODO: split the transcript info to minus strand and plus strand, and handle them separately
-                        for mod in label_meta['modality'][label_meta["modality"].str.contains("RNA")].unique():
-                            cell_data = label_meta[label_meta["modality"] == mod]
-                            pred_subset = pred[head_name][:, :, cell_data["dim"].tolist(), ...]  # bsz x n_window x cell_types
-                            label_subset = label[task_type][:, :, cell_data["label_dim"].tolist(), ...].to(self.device, non_blocking=True)  # bsz x n_window x cell_types
+                        for mod, mod_data in cache["rna_mods"].items():
+                            cell_data = mod_data["cell_data"]
+                            pred_subset = pred[head_name][:, :, mod_data["pred_dims"], ...]  # bsz x n_window x cell_types
+                            label_subset = label[task_type][:, :, mod_data["label_dims"], ...].to(self.device, non_blocking=True)  # bsz x n_window x cell_types
                             pred_transcripts, label_transcripts = self.compute_transcripts(
                                 pred_subset, label_subset, transcripts_mask, cell_data
                             ) # shape of total_transcripts x cell_types_tracks
-                            for i, trial in enumerate(cell_data.index):
+                            for i, trial in enumerate(mod_data["trials"]):
                                 # update per track transcripts pearsonr
                                 key = f"{trial}/{head_name}/TranscriptsPearsonR"
                                 tm_metrics[key].update(
@@ -982,13 +1114,14 @@ class DNASeqModelTrainer:
                                 pred_transcripts.double(),
                                 label_transcripts.double(),
                             )
-                    else:
+                    elif "transcripts_mask" not in label and cache["rna_mods"]:
                         logging.warning(f"Transcripts mask not found in label, skip calculation for TranscriptsPearsonR")
-                    # metrics for each other modality (across cell types)
-                    for mod in label_meta['modality'][~label_meta["modality"].str.contains("RNA")].unique():
-                        cell_data = label_meta[label_meta["modality"] == mod]
-                        pred_subset = pred[head_name][:, :, cell_data["dim"].tolist(), ...]  # bsz x n_window x cell_types
-                        label_subset = label[task_type][:, :, cell_data["label_dim"].tolist(), ...].to(self.device, non_blocking=True)  # bsz x n_window x cell_types
+
+                    # metrics for non-RNA modalities using cached data
+                    for mod, mod_data in cache["non_rna_mods"].items():
+                        pred_subset = pred[head_name][:, :, mod_data["pred_dims"], ...]  # bsz x n_window x cell_types
+                        label_subset = label[task_type][:, :, mod_data["label_dims"], ...].to(self.device, non_blocking=True)  # bsz x n_window x cell_types
+                        B, L = pred_subset.shape[:2]
                         key = f"{mod}/{head_name}/cross_cell/PearsonR"
                         tm_metrics[key].update(
                             pred_subset.reshape(B * L, -1).double(),
@@ -1055,6 +1188,9 @@ class DeepspeedTrainer(DNASeqModelTrainer):
         self.current_step = 0  # based on update step
         self.best_valid_loss = torch.inf
         self.metrics = {}
+
+        # Pre-compute metric metadata to avoid repeated pandas operations
+        self._precompute_metric_metadata()
 
         # set up data
         self.data_split = ["train", "valid", "test"]
