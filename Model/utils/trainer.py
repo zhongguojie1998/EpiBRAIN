@@ -335,13 +335,17 @@ class DNASeqModelTrainer:
                 ).dropna()
 
             task_label_meta["label_dim"] = range(len(task_label_meta))
-            task_label_meta.index.name = "dim"
+            # move index to column, and move to front
+            task_label_meta['dim'] = task_label_meta.index
+            cols = task_label_meta.columns.tolist()
+            cols = [cols[-1]] + cols[:-1]  # move 'dim' to front
+            task_label_meta = task_label_meta[cols]
             self.head_data_setting[head_name] = {
                 "label_meta": task_label_meta,
                 "task_type": task,
                 "class_num": head_config["class_num"],
             }
-            task_label_meta.to_csv(f"{self.logging_config.log_dir}/{task}_label_meta.csv", index=True)
+            task_label_meta.to_csv(f"{self.logging_config.log_dir}/{task}_label_meta.csv", index=False)
 
     def _precompute_metric_metadata(self):
         """Pre-compute metric and loss metadata to avoid repeated pandas operations in training loop."""
@@ -838,7 +842,7 @@ class DNASeqModelTrainer:
                             )
                             self.logger.metric(
                                 "grads_norm/" + tag,
-                                np.sqrt(np.linalg.norm(grad) ** 2),
+                                np.linalg.norm(grad),
                                 self.current_step,
                                 log_also=False,
                             )
