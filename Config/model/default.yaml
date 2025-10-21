@@ -15,9 +15,12 @@ finetune_method: lora  # using LoRA for both attention and conv layers (LoRA sup
 finetune_param:
     # Target modules: both attention and conv layers
     target_modules:
-      - to_q                    # Query projection in attention
-      - to_v                    # Value projection in attention
-      - ".*res_tower.*\\.block\\.2$"  # All Conv1d layers in residual tower (block.2 is the actual Conv1d)
+      - to_q                    # All Query projection in attention
+      - to_v                    # All Value projection in attention
+      - resol_8_conv.block.2    # Conv1d layers in residual tower (block.2 is the actual Conv1d)
+      - resol_16_conv.block.2
+      - resol_32_conv.block.2
+      - resol_64_conv.block.2
                                 # The pattern matches: res_tower.resol_X_conv.block.2
 
     # Default parameters (applied to attention layers)
