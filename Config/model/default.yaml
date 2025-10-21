@@ -15,9 +15,10 @@ finetune_method: lora  # using LoRA for both attention and conv layers (LoRA sup
 finetune_param:
     # Target modules: both attention and conv layers
     target_modules:
-      - to_q      # Query projection in attention
-      - to_v      # Value projection in attention
-      - res_tower.*_conv  # All conv layers in residual tower (will be filtered by rank_pattern)
+      - to_q                    # Query projection in attention
+      - to_v                    # Value projection in attention
+      - ".*res_tower.*\\.block\\.2$"  # All Conv1d layers in residual tower (block.2 is the actual Conv1d)
+                                # The pattern matches: res_tower.resol_X_conv.block.2
 
     # Default parameters (applied to attention layers)
     r: 8                    # Default LoRA rank for attention
@@ -27,18 +28,19 @@ finetune_param:
     # Pattern-based configuration for different layer types
     # Use regex to match specific layers and assign different ranks/alphas
     # Model has 7 conv layers with resolutions: 1, 2, 4, 8, 16, 32, 64
+    # Structure: res_tower.resol_X_conv.block.2 (where block.2 is the Conv1d layer)
     # Applying LoRA to the LAST 4 conv layers (matching Baskerville's approach)
     rank_pattern:  # Override rank for specific layers
-      "res_tower.*resol_64_conv": 4    # Last conv layer (resolution 64): rank 4
-      "res_tower.*resol_32_conv": 4    # 2nd to last (resolution 32): rank 4
-      "res_tower.*resol_16_conv": 4    # 3rd to last (resolution 16): rank 4
-      "res_tower.*resol_8_conv": 4     # 4th to last (resolution 8): rank 4
+      "res_tower\\.resol_64_conv\\.block\\.2": 4    # Last conv layer (resolution 64): rank 4
+      "res_tower\\.resol_32_conv\\.block\\.2": 4    # 2nd to last (resolution 32): rank 4
+      "res_tower\\.resol_16_conv\\.block\\.2": 4    # 3rd to last (resolution 16): rank 4
+      "res_tower\\.resol_8_conv\\.block\\.2": 4     # 4th to last (resolution 8): rank 4
 
     alpha_pattern:  # Override alpha for specific layers
-      "res_tower.*resol_64_conv": 1    # Last conv layer: alpha 1 (scale = 1/4 = 0.25)
-      "res_tower.*resol_32_conv": 1    # 2nd to last: alpha 1
-      "res_tower.*resol_16_conv": 1    # 3rd to last: alpha 1
-      "res_tower.*resol_8_conv": 1     # 4th to last: alpha 1
+      "res_tower\\.resol_64_conv\\.block\\.2": 1    # Last conv layer: alpha 1 (scale = 1/4 = 0.25)
+      "res_tower\\.resol_32_conv\\.block\\.2": 1    # 2nd to last: alpha 1
+      "res_tower\\.resol_16_conv\\.block\\.2": 1    # 3rd to last: alpha 1
+      "res_tower\\.resol_8_conv\\.block\\.2": 1     # 4th to last: alpha 1
 
     # Other modules to train (not LoRA, but full fine-tuning)
     modules_to_save:
