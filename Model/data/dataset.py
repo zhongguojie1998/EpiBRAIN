@@ -108,9 +108,9 @@ class GenomeIntervalDataset(Dataset):
             # if RNA_minus and RNA_plus are in the label, they should be swapped
             if token_dict["rand_reverse"]:
                 label = {k: torch.flip(v, dims=[0]) for k, v in label.items()}
-            if self.reverse_complement_aug_index:
-                # reverse the RNA_plus and RNA_minus index
-                label['regression'] = label['regression'][:, self.reverse_complement_aug_index]
+                if self.reverse_complement_aug_index:
+                    # reverse the RNA_plus and RNA_minus index
+                    label['regression'] = label['regression'][:, self.reverse_complement_aug_index]
 
         return one_hot if not self.return_token_dict else token_dict, label, ind
 
