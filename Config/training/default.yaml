@@ -21,7 +21,7 @@ lr_warmup_step: 10000  # gradually increase lr from 0 to `lr` in given optimizat
 batch_size: 3 # batch size for one single GPU
 total_epoch: 200  # maximum training epoch number
 accum_step: 2 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
-clip_grad_norm: 0.1 # gradient clipping norm, 0.15 as in borzoi
+clip_grad_norm: 0.15 # gradient clipping norm, 0.15 as in borzoi
 seed: 42  # random seed for reproduciblility
 
 ## model head setup
