@@ -205,6 +205,44 @@ def set_param_grad(model, trainable_params=[]):
     return model
 
 
+def freeze_batch_norm_layers(model, logger=None):
+    """
+    Freeze BatchNorm layers to match Baskerville's transfer learning behavior.
+
+    In TensorFlow/Keras (Baskerville), setting layer.trainable=False automatically
+    puts BatchNorm in inference mode (freezes running statistics). In PyTorch,
+    we must explicitly call eval() on BatchNorm modules to achieve the same behavior.
+
+    This function should be called after applying PEFT to ensure BatchNorm layers:
+    - Use frozen running mean/variance (from pretraining)
+    - Do NOT update running statistics during fine-tuning
+    - Keep parameters (weight, bias) frozen
+
+    Args:
+        model: The model to freeze BatchNorm layers in
+        logger: Optional logger for info/debug messages
+
+    Returns:
+        model: Model with frozen BatchNorm layers
+    """
+    frozen_count = 0
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d)):
+            # Set to eval mode (uses frozen running stats, doesn't update them)
+            module.eval()
+            # Disable tracking of running stats during training
+            module.track_running_stats = False
+
+            frozen_count += 1
+            if logger:
+                logger.debug(f"Froze BatchNorm layer: {name}")
+
+    if logger and frozen_count > 0:
+        logger.info(f"Froze {frozen_count} BatchNorm layers to match Baskerville behavior")
+
+    return model
+
+
 def safe_state_dict_loader(org_model_state_dict, load_model_state_dict, partial_load, logger):
     filtered_dict = {}
 
@@ -283,6 +321,11 @@ def setup_model(config, logger, checkpoint=None):
             finetune_config = LoraConfig(**model_config.finetune_param)
             model = get_peft_model(model, finetune_config)
 
+            # Freeze BatchNorm layers to match Baskerville behavior
+            # In TensorFlow, layer.trainable=False automatically freezes BatchNorm running stats
+            # In PyTorch, we must explicitly set BatchNorm to eval mode
+            model = freeze_batch_norm_layers(model, logger)
+
             # If we have a checkpoint to load (LoRA case), load only LoRA parameters
             if checkpoint is not None and not checkpoint_loaded:
                 logger.info("Loading LoRA parameters from checkpoint")
@@ -303,8 +346,11 @@ def setup_model(config, logger, checkpoint=None):
         elif model_config.finetune_method == "finetune_layers":
             logger.info("Finetune the given layers")
             model = set_param_grad(model, **model_config.finetune_param)
+            # Also freeze BatchNorm for layer-wise finetuning
+            model = freeze_batch_norm_layers(model, logger)
         elif model_config.finetune_method == "cont_from_pretrain":
             logger.info("Load from pretrained model and continue train")
+            # Don't freeze BatchNorm when continuing pretraining
             pass
         else:
             logger.error(f"Finetune method {model_config.finetune_method} is not implemented yet.")
