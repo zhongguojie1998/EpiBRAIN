@@ -818,7 +818,7 @@ class DNASeqModelTrainer:
                         )
                         self.logger.metric(
                             "weights_norm/" + tag,
-                            np.sqrt(np.linalg.norm(weight) ** 2),
+                            np.linalg.norm(weight),
                             self.current_step,
                             log_also=False,
                         )
