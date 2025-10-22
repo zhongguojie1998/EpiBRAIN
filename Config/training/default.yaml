@@ -40,15 +40,15 @@ loss:
     loss_head: regression # the head to use for the loss
     loss_weight: 1.0 # the weight of the loss
     params:
-      total_weight: 1
+      total_weight: 0.2
       weight_range: 1
       eps: 1e-7
       reduction: mean
-  cross_cell_mn:
+  cross_cell_rmn:
     loss_head: regression # the head to use for the loss
-    loss_weight: 1.0 # the weight of the loss
+    loss_weight: 3.0 # the weight of the loss
     params:
-      total_weight: 1
+      total_weight: 0.2
       eps: 1e-7
       reduction: mean
 
