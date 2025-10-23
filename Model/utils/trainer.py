@@ -1134,6 +1134,40 @@ class DNASeqModelTrainer:
 
         # get and write the metric logs
         self.metrics.update(tm_metrics.compute())
+
+        # Calculate average Pearson R per modality
+        for head_name, head_data in self.head_data_setting.items():
+            label_meta = head_data["label_meta"]
+            task_type = head_data["task_type"]
+
+            # Only compute for regression tasks
+            if task_type == "regression" and "modality" in label_meta.columns:
+                # Group metrics by modality
+                modality_pearsonr = {}
+
+                for metric_key, metric_value in self.metrics.items():
+                    # Filter for per-trial PearsonR metrics (not cross_cell, not TranscriptsPearsonR)
+                    if f"/{head_name}/PearsonR" in metric_key and "/cross_cell/" not in metric_key and "Transcripts" not in metric_key:
+                        # Extract trial name from key: "Test/trial_name/head_name/PearsonR"
+                        trial_name = metric_key.split("/")[1]
+
+                        # Get modality for this trial
+                        if trial_name in label_meta["trial"].values:
+                            modality = label_meta[label_meta["trial"] == trial_name]["modality"].iloc[0]
+
+                            if modality not in modality_pearsonr:
+                                modality_pearsonr[modality] = []
+                            modality_pearsonr[modality].append(metric_value.item() if torch.is_tensor(metric_value) else metric_value)
+
+                # Calculate and store average Pearson R per modality
+                modality_avg_metrics = {}
+                for modality, pearsonr_values in modality_pearsonr.items():
+                    if pearsonr_values:  # Only if we have values
+                        avg_pearsonr = np.mean(pearsonr_values)
+                        modality_avg_metrics[f"{log_prefix}/{modality}/{head_name}/average/PearsonR"] = avg_pearsonr
+
+                self.metrics.update(modality_avg_metrics)
+
         # get global loss
         if log_loss:
             total_loss = running_loss_local.clone()
