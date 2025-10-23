@@ -1,4 +1,5 @@
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import torch.nn as nn
@@ -278,7 +279,22 @@ def setup_model(config, logger, checkpoint=None):
         logger.error(f"Model {model_config.model_name} is not implemented yet.")
         exit(1)
 
-    model = model_cls.from_hparams(**model_config)
+    # Convert SimpleNamespace to dict for unpacking if needed
+    def namespace_to_dict(obj):
+        """Recursively convert SimpleNamespace to dict."""
+        if isinstance(obj, SimpleNamespace):
+            return {k: namespace_to_dict(v) for k, v in vars(obj).items()}
+        elif isinstance(obj, list):
+            return [namespace_to_dict(item) for item in obj]
+        else:
+            return obj
+
+    if isinstance(model_config, SimpleNamespace):
+        model_config_dict = namespace_to_dict(model_config)
+    else:
+        model_config_dict = model_config
+
+    model = model_cls.from_hparams(**model_config_dict)
 
     # Track whether we've loaded checkpoint
     checkpoint_loaded = False
@@ -294,12 +310,12 @@ def setup_model(config, logger, checkpoint=None):
             checkpoint_loaded = True
         # If using LoRA, we'll load after compilation and LoRA setup
 
-    should_compile = model_config.get("use_compile", False)
+    should_compile = model_config_dict.get("use_compile", False)
 
     # if finetune, load the pretrained model
     if training_config.finetune:
         # in case we need to load the pretrained model and only want to load part of them
-        partial_load = model_config.get("partial_load", None)
+        partial_load = model_config_dict.get("partial_load", None) if isinstance(model_config_dict, dict) else getattr(model_config, "partial_load", None)
         partial_load = list(model.state_dict().keys()) if partial_load is None else partial_load
 
         # load the pretrained state dict

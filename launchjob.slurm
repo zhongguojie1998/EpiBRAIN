@@ -11,7 +11,7 @@
 #SBATCH --time 144:00:00                         # maximum execution time (HH:MM:SS)
 #SBATCH --output=%x-%j.out                      # output file name
 
-EXP_NAME=${1:-"basel_ganglia_complete_v3"}
+EXP_NAME=${1:-"basal_ganglia_miniatlas_drop_celltype_v1"}
 date;hostname;pwd
 
 export CUDA_HOME=/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN
