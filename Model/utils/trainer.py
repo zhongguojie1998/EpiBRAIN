@@ -609,9 +609,21 @@ class DNASeqModelTrainer:
 
         # if necessary, load the checkpoint
         if self.training_config.load_checkpoint is not None:
-            self.optimizer.load_state_dict(self.checkpoint["optimizer_state_dict"])
-            self.scheduler.load_state_dict(self.checkpoint["scheduler_state_dict"])
-            self.current_lr = self.checkpoint["lr"]
+            if "optimizer_state_dict" in self.checkpoint:
+                self.optimizer.load_state_dict(self.checkpoint["optimizer_state_dict"])
+            else:
+                self.logger.warning("optimizer_state_dict not found in checkpoint, skipping optimizer state loading")
+
+            if "scheduler_state_dict" in self.checkpoint:
+                self.scheduler.load_state_dict(self.checkpoint["scheduler_state_dict"])
+            else:
+                self.logger.warning("scheduler_state_dict not found in checkpoint, skipping scheduler state loading")
+
+            if "lr" in self.checkpoint:
+                self.current_lr = self.checkpoint["lr"]
+            else:
+                self.logger.warning("lr not found in checkpoint, using initial learning rate")
+                self.current_lr = self.optimizer.param_groups[0]['lr']
 
     def get_loss(self):
         # Loss configuration format: {"loss_name": {"loss_weight": float, "loss_head": str, "params": dict}}

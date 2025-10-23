@@ -19,7 +19,11 @@ import yaml
 from collections import OrderedDict
 import logging
 from types import SimpleNamespace
-
+import os
+# Set working directory
+PWD = os.path.dirname(os.path.abspath(__file__))
+os.chdir(f'{PWD}/../')
+sys.path.append(str(Path(PWD).parent / "Model"))
 
 def load_config(config_path):
     """Load YAML config file and convert to nested namespace."""
@@ -432,6 +436,8 @@ def convert_weights(tf_checkpoint_path, config_path, output_path):
     checkpoint = {
         'model_state_dict': new_state_dict,
         'epoch': 0,
+        'step': 0,
+        'best_valid_loss': float('inf'),
         'conversion_info': {
             'converted_from': 'tensorflow',
             'tf_checkpoint': str(tf_checkpoint_path),
