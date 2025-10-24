@@ -36,21 +36,28 @@ use_head: # list of heads to use for training
 #   reduction: mean
 
 loss: 
-  poisson_js: # the name of the loss function (now support: poisson, poisson_mn, cross_cell_mn)
+  poisson_mn: # the name of the loss function (now support: poisson, poisson_mn, cross_cell_mn)
     loss_head: regression # the head to use for the loss
-    loss_weight: 1.0 # the weight of the loss
+    loss_weight: 2.0 # the weight of the loss
     params:
-      total_weight: 0.2
+      total_weight: 0.5
       weight_range: 1
       eps: 1e-7
       reduction: mean
-  cross_cell_js:
+  cross_cell_rmn:
     loss_head: regression # the head to use for the loss
-    loss_weight: 1.0 # the weight of the loss
+    loss_weight: 6.0 # the weight of the loss
+    params:
+      total_weight: 0.5
+      eps: 1e-7
+      reduction: mean
+  cross_batch_mn:
+    loss_head: regression # the head to use for the loss
+    loss_weight: 2.0 # the weight of the loss
     params:
       total_weight: 0.2
       eps: 1e-7
-      reduction: mean
+      reduction: mean    
 
 ## optimizer setup
 add_opt_group: True # whether to use optimizer parameter groups
