@@ -28,16 +28,18 @@ from utils.multi_gpu import blocking_sync_wait, cleanup, deepspeed_setup, global
 from utils.scheduler import SCHEDULER_DICT
 
 
-def create_optimizer_grouped_parameters(model, use_groups=True):
+def create_optimizer_grouped_parameters(model, use_groups=True, weight_decay_config=None):
     """
-    Create optimizer parameter groups with differential weight decay:
-    - overall_decay_params: 1.0e-6 weight decay for most parameters
-    - transformer_decay_params: 2.0e-8 weight decay for transformer layers
-    - no_decay_params: 0.0 weight decay for biases and 1D parameters
+    Create optimizer parameter groups with differential weight decay.
 
     Args:
         model: The model to extract parameters from
         use_groups: Whether to use grouped parameters or return all parameters
+        weight_decay_config: Dictionary with weight decay configuration:
+            - overall: weight decay for general parameters (default: 4.0e-8)
+            - transformer: weight decay for transformer parameters (default: 2.0e-8)
+            - lora: weight decay for LoRA parameters (default: 0.0)
+            - exclude: list of patterns to exclude from decay (default: ["bias", "ndim_1"])
 
     Returns:
         list: Parameter groups suitable for optimizer initialization
@@ -45,29 +47,51 @@ def create_optimizer_grouped_parameters(model, use_groups=True):
     if not use_groups:
         return [param for param in model.parameters() if param.requires_grad]
 
+    # Set default weight decay values
+    if weight_decay_config is None:
+        weight_decay_config = {
+            "overall": 4.0e-8,
+            "transformer": 2.0e-8,
+            "lora": 0.0,
+            "exclude": ["bias", "ndim_1"]
+        }
+
+    # Extract weight decay values
+    overall_wd = weight_decay_config.get("overall", 4.0e-8)
+    transformer_wd = weight_decay_config.get("transformer", 2.0e-8)
+    lora_wd = weight_decay_config.get("lora", 0.0)
+    exclude_patterns = weight_decay_config.get("exclude", ["bias", "ndim_1"])
+
     overall_decay_params = []
     transformer_decay_params = []
+    lora_decay_params = []
     no_decay_params = []
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
+
         # Check for parameters to exclude from weight decay
-        if param.ndim == 1 or name.endswith(".bias"):
+        should_exclude = False
+        if "bias" in exclude_patterns and name.endswith(".bias"):
+            should_exclude = True
+        if "ndim_1" in exclude_patterns and param.ndim == 1:
+            should_exclude = True
+
+        if should_exclude:
             no_decay_params.append(param)
         else:
-            if "transformer" in name:
-                # remove LoRA parameters from transformer decay group
-                if "lora" in name:
-                    no_decay_params.append(param)
-                else:
-                    transformer_decay_params.append(param)
+            if "lora" in name:
+                lora_decay_params.append(param)
+            elif "transformer" in name:
+                transformer_decay_params.append(param)
             else:
                 overall_decay_params.append(param)
 
     optimizer_grouped_parameters = [
-        {"params": overall_decay_params, "weight_decay": 4.0e-8},
-        {"params": transformer_decay_params, "weight_decay": 2.0e-8},
+        {"params": overall_decay_params, "weight_decay": overall_wd},
+        {"params": transformer_decay_params, "weight_decay": transformer_wd},
+        {"params": lora_decay_params, "weight_decay": lora_wd},
         {"params": no_decay_params, "weight_decay": 0.0},
     ]
 
@@ -581,7 +605,9 @@ class DNASeqModelTrainer:
         optim_class = eval(f"optim.{self.training_config.optimizer}")
         # Apply differential weight decay using the shared function
         optimizer_grouped_parameters = create_optimizer_grouped_parameters(
-            self.model, self.training_config.get("add_opt_group", False)
+            self.model,
+            self.training_config.get("add_opt_group", False),
+            self.training_config.get("weight_decay", None)
         )
         self.optimizer = optim_class(optimizer_grouped_parameters, **self.training_config.optimizer_params)
 
@@ -1291,7 +1317,9 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         # set up deepspeed with weight decay protocol
         optimizer_grouped_parameters = create_optimizer_grouped_parameters(
-            self.model, self.training_config.get("add_opt_group", False)
+            self.model,
+            self.training_config.get("add_opt_group", False),
+            self.training_config.get("weight_decay", None)
         )
         self.model_engine, self.optimizer, _, self.scheduler = deepspeed.initialize(
             model=self.model,

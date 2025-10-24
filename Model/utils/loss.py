@@ -602,6 +602,134 @@ class CrossCellJSLoss(nn.Module):
             return loss
 
 
+class CrossBatchMultinomialLoss(nn.Module):
+
+    def __init__(self, eps: float = 1e-7, reduction: str = "mean", total_weight: float = 1.0,
+                 weight_range: float = 1.0, weight_exp: int = 4, rescale: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.eps = eps
+        self.reduction = reduction
+        self.total_weight = total_weight
+        self.weight_range = weight_range
+        self.weight_exp = weight_exp
+        self.rescale = rescale
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        loss = poisson_multinomial(
+            y_pred,
+            y_true,
+            total_weight=self.total_weight,
+            weight_range=self.weight_range,
+            weight_exp=self.weight_exp,
+            eps=self.eps,
+            rescale=self.rescale,
+            dim=-3,  # Average across batch dimension
+        )
+
+        if self.reduction == "mean":
+            return torch.mean(loss)
+        elif self.reduction == "sum":
+            return torch.sum(loss)
+        else:
+            return loss
+
+
+class CrossBatchReverseMultinomialLoss(nn.Module):
+
+    def __init__(self, eps: float = 1e-7, reduction: str = "mean", total_weight: float = 1.0,
+                 weight_range: float = 1.0, weight_exp: int = 4, rescale: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.eps = eps
+        self.reduction = reduction
+        self.total_weight = total_weight
+        self.weight_range = weight_range
+        self.weight_exp = weight_exp
+        self.rescale = rescale
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        loss = poisson_reverse_multinomial(
+            y_pred,
+            y_true,
+            total_weight=self.total_weight,
+            weight_range=self.weight_range,
+            weight_exp=self.weight_exp,
+            eps=self.eps,
+            rescale=self.rescale,
+            dim=-3,  # Average across batch dimension
+        )
+
+        if self.reduction == "mean":
+            return torch.mean(loss)
+        elif self.reduction == "sum":
+            return torch.sum(loss)
+        else:
+            return loss
+
+
+class CrossBatchCombinedMultinomialLoss(nn.Module):
+
+    def __init__(self, eps: float = 1e-7, reduction: str = "mean", total_weight: float = 1.0,
+                 weight_range: float = 1.0, weight_exp: int = 4, rescale: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.eps = eps
+        self.reduction = reduction
+        self.total_weight = total_weight
+        self.weight_range = weight_range
+        self.weight_exp = weight_exp
+        self.rescale = rescale
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        loss = poisson_combined_multinomial(
+            y_pred,
+            y_true,
+            total_weight=self.total_weight,
+            weight_range=self.weight_range,
+            weight_exp=self.weight_exp,
+            eps=self.eps,
+            rescale=self.rescale,
+            dim=-3,  # Average across batch dimension
+        )
+
+        if self.reduction == "mean":
+            return torch.mean(loss)
+        elif self.reduction == "sum":
+            return torch.sum(loss)
+        else:
+            return loss
+
+
+class CrossBatchJSLoss(nn.Module):
+
+    def __init__(self, eps: float = 1e-7, reduction: str = "mean", total_weight: float = 1.0,
+                 weight_range: float = 1.0, weight_exp: int = 4, rescale: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.eps = eps
+        self.reduction = reduction
+        self.total_weight = total_weight
+        self.weight_range = weight_range
+        self.weight_exp = weight_exp
+        self.rescale = rescale
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        loss = poisson_js(
+            y_pred,
+            y_true,
+            total_weight=self.total_weight,
+            weight_range=self.weight_range,
+            weight_exp=self.weight_exp,
+            eps=self.eps,
+            rescale=self.rescale,
+            dim=-3,  # Average across batch dimension
+        )
+
+        if self.reduction == "mean":
+            return torch.mean(loss)
+        elif self.reduction == "sum":
+            return torch.sum(loss)
+        else:
+            return loss
+
+
 LOSS_DICT = {
     "poisson": nn.PoissonNLLLoss,
     "poisson_mn": PoissonMultinomialLoss,
@@ -612,6 +740,10 @@ LOSS_DICT = {
     "cross_cell_rmn": CrossCellReverseMultinomialLoss,
     "cross_cell_cmn": CrossCellCombinedMultinomialLoss,
     "cross_cell_js": CrossCellJSLoss,
+    "cross_batch_mn": CrossBatchMultinomialLoss,
+    "cross_batch_rmn": CrossBatchReverseMultinomialLoss,
+    "cross_batch_cmn": CrossBatchCombinedMultinomialLoss,
+    "cross_batch_js": CrossBatchJSLoss,
     "transcripts_poisson_mn": PoissonMultinomialLoss,
     "transcripts_poisson_rmn": PoissonReverseMultinomialLoss,
     "transcripts_poisson_cmn": PoissonCombinedMultinomialLoss,
@@ -620,4 +752,8 @@ LOSS_DICT = {
     "transcripts_cross_cell_rmn": CrossCellReverseMultinomialLoss,
     "transcripts_cross_cell_cmn": CrossCellCombinedMultinomialLoss,
     "transcripts_cross_cell_js": CrossCellJSLoss,
+    "transcripts_cross_batch_mn": CrossBatchMultinomialLoss,
+    "transcripts_cross_batch_rmn": CrossBatchReverseMultinomialLoss,
+    "transcripts_cross_batch_cmn": CrossBatchCombinedMultinomialLoss,
+    "transcripts_cross_batch_js": CrossBatchJSLoss,
 }
