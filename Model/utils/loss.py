@@ -55,6 +55,10 @@ def poisson_multinomial(
         y_pred = y_pred.to(torch.float32)
         divisor = y_true.shape[dim]
 
+    # add eps to protect against tiny values
+    y_true += eps
+    y_pred += eps
+    
     # sum across specified dimension
     s_true = torch.sum(y_true, dim=dim)
     s_pred = torch.sum(y_pred, dim=dim)
@@ -63,15 +67,10 @@ def poisson_multinomial(
     poisson_term = poisson(s_pred, s_true, eps=eps)
     poisson_term /= divisor
 
-    # add eps to protect against tiny values
-    y_true += eps
-    y_pred += eps
-
-    # normalize to sum to one, then log transform pred
-    pl_pred = torch.log(y_pred) - torch.log(y_pred.sum(dim=dim, keepdim=True))
-    p_true = y_true / y_true.sum(dim=dim, keepdim=True)
-    # multinomial loss
-    multinomial_dot = -p_true * pl_pred
+    # multinomial loss - use log rule to compute log odds
+    pl_pred = torch.log(y_pred) - torch.log(s_pred.unsqueeze(dim))
+    # Use raw y_true (not normalized) to match TensorFlow implementation
+    multinomial_dot = -y_true * pl_pred
     multinomial_term = torch.sum(multinomial_dot, dim=dim)
     multinomial_term /= divisor
 
@@ -134,6 +133,10 @@ def poisson_reverse_multinomial(
         y_pred = y_pred.to(torch.float32)
         divisor = y_true.shape[dim]
 
+    # add eps to protect against tiny values
+    y_true += eps
+    y_pred += eps
+
     # sum across specified dimension
     s_true = torch.sum(y_true, dim=dim)
     s_pred = torch.sum(y_pred, dim=dim)
@@ -142,13 +145,9 @@ def poisson_reverse_multinomial(
     poisson_term = poisson(s_pred, s_true, eps=eps)
     poisson_term /= divisor
 
-    # add eps to protect against tiny values
-    y_true += eps
-    y_pred += eps
-
     # normalize to sum to one, then log transform TRUE (reversed!)
-    pl_true = torch.log(y_true) - torch.log(y_true.sum(dim=dim, keepdim=True))
-    p_pred = y_pred / y_pred.sum(dim=dim, keepdim=True)
+    pl_true = torch.log(y_true) - torch.log(s_true.unsqueeze(dim))
+    p_pred = y_pred / s_pred.unsqueeze(dim)
     # reverse multinomial loss: KL(p_pred || p_true)
     multinomial_dot = -p_pred * pl_true
     multinomial_term = torch.sum(multinomial_dot, dim=dim)
@@ -213,6 +212,10 @@ def poisson_combined_multinomial(
         y_pred = y_pred.to(torch.float32)
         divisor = y_true.shape[dim]
 
+    # add eps to protect against tiny values
+    y_true += eps
+    y_pred += eps
+
     # sum across specified dimension
     s_true = torch.sum(y_true, dim=dim)
     s_pred = torch.sum(y_pred, dim=dim)
@@ -221,22 +224,13 @@ def poisson_combined_multinomial(
     poisson_term = poisson(s_pred, s_true, eps=eps)
     poisson_term /= divisor
 
-    # add eps to protect against tiny values
-    y_true += eps
-    y_pred += eps
-
-    # compute sums once for reuse
-    s_true = y_true.sum(dim=dim, keepdim=True)
-    s_pred = y_pred.sum(dim=dim, keepdim=True)
-
     # normalize to sum to one, then log transform both
-    pl_pred = torch.log(y_pred) - torch.log(s_pred)
-    pl_true = torch.log(y_true) - torch.log(s_true)
-    p_true = y_true / s_true
-    p_pred = y_pred / s_pred
+    pl_pred = torch.log(y_pred) - torch.log(s_pred.unsqueeze(dim))
+    pl_true = torch.log(y_true) - torch.log(s_true.unsqueeze(dim))
+    p_pred = y_pred / s_pred.unsqueeze(dim)
 
-    # forward multinomial loss: KL(p_true || p_pred)
-    forward_multinomial = -p_true * pl_pred
+    # forward multinomial loss: use raw y_true (not normalized) to match TensorFlow
+    forward_multinomial = -y_true * pl_pred
     # reverse multinomial loss: KL(p_pred || p_true)
     reverse_multinomial = -p_pred * pl_true
 
@@ -301,6 +295,10 @@ def poisson_js(
         y_pred = y_pred.to(torch.float32)
         divisor = y_true.shape[dim]
 
+    # add eps to protect against tiny values
+    y_true = y_true + eps
+    y_pred = y_pred + eps
+
     # sum across specified dimension
     s_true = torch.sum(y_true, dim=dim)
     s_pred = torch.sum(y_pred, dim=dim)
@@ -309,13 +307,9 @@ def poisson_js(
     poisson_term = poisson(s_pred, s_true, eps=eps)
     poisson_term /= divisor
 
-    # add eps to protect against tiny values
-    y_true = y_true + eps
-    y_pred = y_pred + eps
-
     # normalize to sum to one
-    p_true = y_true / y_true.sum(dim=dim, keepdim=True)
-    p_pred = y_pred / y_pred.sum(dim=dim, keepdim=True)
+    p_true = y_true / s_true.unsqueeze(dim)
+    p_pred = y_pred / s_pred.unsqueeze(dim)
 
     # compute mixture distribution M = 0.5 * (P + Q)
     p_mixture = 0.5 * (p_true + p_pred)
