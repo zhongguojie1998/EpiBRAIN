@@ -47,7 +47,12 @@ finetune_param:
 
     # Other modules to train (not LoRA, but full fine-tuning)
     modules_to_save:
-      - prediction_head
+      - prediction_head # final output head
+      - resol_8_conv.block.0  # Tune BatchNorm layer before Conv1d in last 4 conv blocks
+      - resol_16_conv.block.0
+      - resol_32_conv.block.0
+      - resol_64_conv.block.0
+      - fn.0  # Tune LayerNorm layers in all transformer blocks
 
 ## model hyperparameter
 conv_dna_param:  # parameters for the convolutional DNA layer
