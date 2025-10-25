@@ -133,16 +133,16 @@ def poisson_reverse_multinomial(
         y_pred = y_pred.to(torch.float32)
         divisor = y_true.shape[dim]
 
-    # add eps to protect against tiny values
-    y_true += eps
-    y_pred += eps
+    # clip min, max to protect against tiny values
+    y_true = torch.clamp(y_true, min=eps, max=1.0)
+    y_pred = torch.clamp(y_pred, min=eps, max=1.0)
 
     # sum across specified dimension
     s_true = torch.sum(y_true, dim=dim)
     s_pred = torch.sum(y_pred, dim=dim)
 
     # total count poisson loss
-    poisson_term = poisson(s_pred, s_true, eps=eps)
+    poisson_term = poisson(s_pred, s_true)
     poisson_term /= divisor
 
     # normalize to sum to one, then log transform TRUE (reversed!)
@@ -212,25 +212,26 @@ def poisson_combined_multinomial(
         y_pred = y_pred.to(torch.float32)
         divisor = y_true.shape[dim]
 
-    # add eps to protect against tiny values
-    y_true += eps
-    y_pred += eps
+    # clip min, max to protect against tiny values
+    y_true = torch.clamp(y_true, min=eps, max=1.0)
+    y_pred = torch.clamp(y_pred, min=eps, max=1.0)
 
     # sum across specified dimension
     s_true = torch.sum(y_true, dim=dim)
     s_pred = torch.sum(y_pred, dim=dim)
 
     # total count poisson loss
-    poisson_term = poisson(s_pred, s_true, eps=eps)
+    poisson_term = poisson(s_pred, s_true)
     poisson_term /= divisor
 
     # normalize to sum to one, then log transform both
     pl_pred = torch.log(y_pred) - torch.log(s_pred.unsqueeze(dim))
     pl_true = torch.log(y_true) - torch.log(s_true.unsqueeze(dim))
     p_pred = y_pred / s_pred.unsqueeze(dim)
+    p_true = y_true / s_true.unsqueeze(dim)
 
     # forward multinomial loss: use raw y_true (not normalized) to match TensorFlow
-    forward_multinomial = -y_true * pl_pred
+    forward_multinomial = -p_true * pl_pred
     # reverse multinomial loss: KL(p_pred || p_true)
     reverse_multinomial = -p_pred * pl_true
 
