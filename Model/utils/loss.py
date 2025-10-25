@@ -8,6 +8,88 @@ def poisson(y_pred, y_true, eps: float = 1e-7):
     return F.poisson_nll_loss(y_pred, y_true, log_input=False, full=False, eps=eps, reduction="none")
 
 
+def poisson_lmse(
+    y_pred,
+    y_true,
+    total_weight: float = 1.0,
+    weight_range: float = 1,
+    weight_exp: int = 4,
+    eps: float = 1e-7,
+    rescale: bool = False,
+    dim: int = -2,
+):
+    """Combination of Poisson and log+MSE loss.
+
+    Combines Poisson NLL loss (on summed counts) with MSE loss computed on
+    log-transformed values along a specified dimension.
+
+    Args:
+        y_pred: Predicted values
+        y_true: True values
+        total_weight: Weight of the Poisson total term.
+        weight_range: Range of position-based weighting (only used when dim=-2).
+        weight_exp: Exponent for position-based weighting (only used when dim=-2).
+        eps: Small value to avoid numerical issues (default: 1e-7)
+        rescale: Rescale loss after re-weighting.
+        dim: Dimension to average over. -2 for length dimension, -1 for tracks dimension.
+
+    Returns:
+        Combined loss (unreduced across batch)
+    """
+    # Apply position weighting only for length dimension (dim=-2)
+    if dim == -2:
+        seq_len = y_true.shape[1]
+
+        if weight_range < 1:
+            raise ValueError("Poisson LMSE weight_range must be >=1")
+        elif weight_range == 1:
+            position_weights = torch.ones((1, seq_len, 1), device=y_true.device, dtype=y_true.dtype)
+        else:
+            pos_start = -(seq_len / 2 - 0.5)
+            pos_end = seq_len / 2 + 0.5
+            positions = torch.arange(pos_start, pos_end, device=y_true.device, dtype=torch.float32)
+            sigma = -pos_start / (np.log(weight_range)) ** (1 / weight_exp)
+            position_weights = torch.exp(-((positions / sigma) ** weight_exp))
+            position_weights /= torch.max(position_weights)
+            position_weights = position_weights.unsqueeze(0).unsqueeze(-1)
+
+        # transform to float32 to ensure loss precision
+        y_true = y_true.to(torch.float32) * position_weights / torch.mean(position_weights)
+        y_pred = y_pred.to(torch.float32) * position_weights / torch.mean(position_weights)
+        divisor = torch.sum(position_weights)
+    else:
+        # No position weighting for other dimensions
+        y_true = y_true.to(torch.float32)
+        y_pred = y_pred.to(torch.float32)
+        divisor = y_true.shape[dim]
+
+    # add eps to protect against tiny values
+    y_true += eps
+    y_pred += eps
+
+    # sum across specified dimension for Poisson loss
+    s_true = torch.sum(y_true, dim=dim)
+    s_pred = torch.sum(y_pred, dim=dim)
+
+    # total count poisson loss
+    poisson_term = poisson(s_pred, s_true, eps=eps)
+    poisson_term /= divisor
+
+    # Log + MSE loss along the specified dimension
+    log_pred = torch.log(y_pred)
+    log_true = torch.log(y_true)
+    lmse_term = torch.mean((log_pred - log_true) ** 2, dim=dim)
+
+    # normalize to scale of 1:1 term ratio
+    loss_raw = lmse_term + total_weight * poisson_term
+    if rescale:
+        loss_rescale = loss_raw * 2 / (1 + total_weight)
+    else:
+        loss_rescale = loss_raw
+
+    return loss_rescale
+
+
 def poisson_multinomial(
     y_pred,
     y_true,
@@ -489,6 +571,45 @@ class PoissonJSLoss(nn.Module):
             return loss
 
 
+class PoissonLMSELoss(nn.Module):
+    __constants__ = ["total_weight", "weight_range", "weight_exp", "eps", "rescale", "reduction"]
+
+    def __init__(
+        self,
+        total_weight: float = 1.0,
+        weight_range: float = 1.0,
+        weight_exp: int = 4,
+        eps: float = 1e-7,
+        rescale: bool = False,
+        reduction: str = "mean",
+    ) -> None:
+        super(PoissonLMSELoss, self).__init__()
+        self.total_weight = total_weight
+        self.weight_range = weight_range
+        self.weight_exp = weight_exp
+        self.eps = eps
+        self.rescale = rescale
+        self.reduction = reduction
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        loss = poisson_lmse(
+            y_pred,
+            y_true,
+            total_weight=self.total_weight,
+            weight_range=self.weight_range,
+            weight_exp=self.weight_exp,
+            eps=self.eps,
+            rescale=self.rescale,
+        )
+
+        if self.reduction == "mean":
+            return torch.mean(loss)
+        elif self.reduction == "sum":
+            return torch.sum(loss)
+        else:
+            return loss
+
+
 class CrossCellMultinomialLoss(nn.Module):
 
     def __init__(self, eps: float = 1e-7, reduction: str = "mean", total_weight: float = 0.2, rescale: bool = False, **kwargs):
@@ -581,6 +702,33 @@ class CrossCellJSLoss(nn.Module):
 
     def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
         loss = poisson_js(
+            y_pred,
+            y_true,
+            total_weight=self.total_weight,
+            eps=self.eps,
+            rescale=self.rescale,
+            dim=-1,  # Average across tracks dimension
+        )
+
+        if self.reduction == "mean":
+            return torch.mean(loss)
+        elif self.reduction == "sum":
+            return torch.sum(loss)
+        else:
+            return loss
+
+
+class CrossCellLMSELoss(nn.Module):
+
+    def __init__(self, eps: float = 1e-7, reduction: str = "mean", total_weight: float = 0.2, rescale: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.eps = eps
+        self.reduction = reduction
+        self.total_weight = total_weight
+        self.rescale = rescale
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        loss = poisson_lmse(
             y_pred,
             y_true,
             total_weight=self.total_weight,
@@ -725,8 +873,41 @@ class CrossBatchJSLoss(nn.Module):
             return loss
 
 
+class CrossBatchLMSELoss(nn.Module):
+
+    def __init__(self, eps: float = 1e-7, reduction: str = "mean", total_weight: float = 1.0,
+                 weight_range: float = 1.0, weight_exp: int = 4, rescale: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.eps = eps
+        self.reduction = reduction
+        self.total_weight = total_weight
+        self.weight_range = weight_range
+        self.weight_exp = weight_exp
+        self.rescale = rescale
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        loss = poisson_lmse(
+            y_pred,
+            y_true,
+            total_weight=self.total_weight,
+            weight_range=self.weight_range,
+            weight_exp=self.weight_exp,
+            eps=self.eps,
+            rescale=self.rescale,
+            dim=-3,  # Average across batch dimension
+        )
+
+        if self.reduction == "mean":
+            return torch.mean(loss)
+        elif self.reduction == "sum":
+            return torch.sum(loss)
+        else:
+            return loss
+
+
 LOSS_DICT = {
     "poisson": nn.PoissonNLLLoss,
+    "poisson_lmse": PoissonLMSELoss,
     "poisson_mn": PoissonMultinomialLoss,
     "poisson_rmn": PoissonReverseMultinomialLoss,
     "poisson_cmn": PoissonCombinedMultinomialLoss,
@@ -735,10 +916,13 @@ LOSS_DICT = {
     "cross_cell_rmn": CrossCellReverseMultinomialLoss,
     "cross_cell_cmn": CrossCellCombinedMultinomialLoss,
     "cross_cell_js": CrossCellJSLoss,
+    "cross_cell_lmse": CrossCellLMSELoss,
     "cross_batch_mn": CrossBatchMultinomialLoss,
     "cross_batch_rmn": CrossBatchReverseMultinomialLoss,
     "cross_batch_cmn": CrossBatchCombinedMultinomialLoss,
     "cross_batch_js": CrossBatchJSLoss,
+    "cross_batch_lmse": CrossBatchLMSELoss,
+    "transcripts_poisson_lmse": PoissonLMSELoss,
     "transcripts_poisson_mn": PoissonMultinomialLoss,
     "transcripts_poisson_rmn": PoissonReverseMultinomialLoss,
     "transcripts_poisson_cmn": PoissonCombinedMultinomialLoss,
@@ -747,8 +931,10 @@ LOSS_DICT = {
     "transcripts_cross_cell_rmn": CrossCellReverseMultinomialLoss,
     "transcripts_cross_cell_cmn": CrossCellCombinedMultinomialLoss,
     "transcripts_cross_cell_js": CrossCellJSLoss,
+    "transcripts_cross_cell_lmse": CrossCellLMSELoss,
     "transcripts_cross_batch_mn": CrossBatchMultinomialLoss,
     "transcripts_cross_batch_rmn": CrossBatchReverseMultinomialLoss,
     "transcripts_cross_batch_cmn": CrossBatchCombinedMultinomialLoss,
     "transcripts_cross_batch_js": CrossBatchJSLoss,
+    "transcripts_cross_batch_lmse": CrossBatchLMSELoss,
 }
