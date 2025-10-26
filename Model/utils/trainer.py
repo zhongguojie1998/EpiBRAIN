@@ -279,6 +279,12 @@ class DNASeqModelTrainer:
         # Pre-compute metric metadata to avoid repeated pandas operations
         self._precompute_metric_metadata()
 
+        # Buffers for averaging loss and gradients over multiple steps before logging
+        self.batch_loss_buffer = {}  # For accumulating loss values
+        self.batch_count_buffer = 0  # For counting batches in buffer
+        self.grad_norms_buffer = 0.0  # For accumulating total gradient norm
+        self.param_grad_norms_buffer = {}  # For accumulating individual parameter gradient norms
+
         # set up data
         self.data_split = self.config.data.used_dataset
         self.data_func = {
@@ -824,7 +830,7 @@ class DNASeqModelTrainer:
             model = model._orig_mod
         return model
 
-    def _log_training_metrics(self, report_loss, should_exit_on_nan=False):
+    def _log_training_metrics(self, report_loss, avg_param_grad_norms=None, avg_total_grad_norm=None, should_exit_on_nan=False):
         """Shared training metrics logging logic with NaN detection and exit capability."""
         nan_detected = False
 
@@ -843,7 +849,6 @@ class DNASeqModelTrainer:
             if self.logging_config.log_more:
                 # track sqrtsuml2 of gradients and weights
                 weights = []
-                grads = []
                 for tag, value in self.training_model.named_parameters():
                     tag = tag.replace(".", "/")
 
@@ -870,7 +875,7 @@ class DNASeqModelTrainer:
                         )
                         nan_detected = True
 
-                    # only add gradients if they are not None
+                    # only add gradient histograms if they are not None (for debugging purposes)
                     if value.grad is not None:
                         grad = value.grad.data.detach().cpu().numpy()
                         if not np.isnan(grad).any():
@@ -881,23 +886,28 @@ class DNASeqModelTrainer:
                                 log_also=False,
                                 write_hist=True,
                             )
-                            self.logger.metric(
-                                "grads_norm/" + tag,
-                                np.linalg.norm(grad),
-                                self.current_step,
-                                log_also=False,
-                            )
-                            grads.append(grad)
                         else:
                             self.logger.warning(
                                 f"failed to add grad histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
                             )
                             nan_detected = True
-                # log total weights and grads
+
+                # Log averaged gradient norms from buffer (instead of current gradients)
+                if avg_param_grad_norms is not None:
+                    for tag, avg_norm in avg_param_grad_norms.items():
+                        self.logger.metric(
+                            "grads_norm/" + tag,
+                            avg_norm,
+                            self.current_step,
+                            log_also=False,
+                        )
+
+                # log total weights norm and averaged total gradients norm
                 weights_norm = np.sqrt(sum(np.linalg.norm(w) ** 2 for w in weights))
-                grads_norm = np.sqrt(sum(np.linalg.norm(g) ** 2 for g in grads))
-                self.logger.metric("grads_norm/total", grads_norm, self.current_step, log_also=False)
                 self.logger.metric("weights_norm/total", weights_norm, self.current_step, log_also=False)
+
+                if avg_total_grad_norm is not None:
+                    self.logger.metric("grads_norm/total", avg_total_grad_norm, self.current_step, log_also=False)
         else:
             for k, v in report_loss.items():
                 self.logger.info(f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | {k}: {v:.6f}")
@@ -977,9 +987,7 @@ class DNASeqModelTrainer:
 
         # for loss log
         nan_termination = False
-        # for loss tracking
-        batch_loss_dict = {}
-        batch_count = 0
+        # for epoch-level tracking
         epoch_loss_list = []
 
         # for other metric log
@@ -1004,12 +1012,12 @@ class DNASeqModelTrainer:
             total_loss, loss_dict = self.compute_loss(pred, label)
             loss = total_loss / self.training_config.accum_step
 
-            # log loss
+            # Accumulate loss into buffer (instance variable that persists across epochs)
             for k, v in loss_dict.items():
-                if k not in batch_loss_dict:
-                    batch_loss_dict[k] = 0.0
-                batch_loss_dict[k] += v
-            batch_count += 1
+                if k not in self.batch_loss_buffer:
+                    self.batch_loss_buffer[k] = 0.0
+                self.batch_loss_buffer[k] += v
+            self.batch_count_buffer += 1
             epoch_loss_list.append(loss.detach().cpu().item() * self.training_config.accum_step)
 
             # metrics
@@ -1024,16 +1032,45 @@ class DNASeqModelTrainer:
                 loss.backward()
 
             if should_update:
+                # Buffer gradient norms for averaging
+                tensorboard_log_every = self.logging_config.get("tensorboard_log_every") or self.logging_config.report_every
+                if self.logging_config.use_tensorboard and self.logging_config.log_more:
+                    grads = []
+                    for tag, value in self.training_model.named_parameters():
+                        tag = tag.replace(".", "/")
+                        if value.grad is not None:
+                            grad = value.grad.data.detach().cpu().numpy()
+                            if not np.isnan(grad).any():
+                                grad_norm = np.linalg.norm(grad)
+                                if tag not in self.param_grad_norms_buffer:
+                                    self.param_grad_norms_buffer[tag] = 0.0
+                                self.param_grad_norms_buffer[tag] += grad_norm
+                                grads.append(grad)
+                    if grads:
+                        total_grad_norm = np.sqrt(sum(np.linalg.norm(g) ** 2 for g in grads))
+                        self.grad_norms_buffer += total_grad_norm
+
                 # log training status
                 ## in the training loop, we only look at the local loss
-                tensorboard_log_every = self.logging_config.get("tensorboard_log_every") or self.logging_config.report_every
                 if self.current_step % tensorboard_log_every == 0:
-                    report_loss = {k: v / batch_count for k, v in batch_loss_dict.items()}
+                    report_loss = {k: v / self.batch_count_buffer for k, v in self.batch_loss_buffer.items()}
 
-                    nan_termination = self._log_training_metrics(report_loss, should_exit_on_nan=True)
+                    # Compute average gradient norms from buffer
+                    avg_param_grad_norms = {k: v / self.batch_count_buffer for k, v in self.param_grad_norms_buffer.items()} if self.param_grad_norms_buffer else None
+                    avg_total_grad_norm = self.grad_norms_buffer / self.batch_count_buffer if self.grad_norms_buffer > 0 else None
 
-                    batch_loss_dict = {}
-                    batch_count = 0
+                    nan_termination = self._log_training_metrics(
+                        report_loss,
+                        avg_param_grad_norms=avg_param_grad_norms,
+                        avg_total_grad_norm=avg_total_grad_norm,
+                        should_exit_on_nan=True
+                    )
+
+                    # Clear all buffers (loss and gradients)
+                    self.batch_loss_buffer = {}
+                    self.batch_count_buffer = 0
+                    self.grad_norms_buffer = 0.0
+                    self.param_grad_norms_buffer = {}
 
                 # model step
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.training_config.clip_grad_norm)
@@ -1051,6 +1088,9 @@ class DNASeqModelTrainer:
             if nan_termination:
                 exit(1)
 
+        # Note: All buffers (batch_loss_buffer, batch_count_buffer, grad_norms_buffer, param_grad_norms_buffer)
+        # are intentionally NOT cleared here. They persist across epochs for continuous averaging
+        # until the next tensorboard_log_every interval.
         self.current_epoch += 1
         self.metrics.update({f"Train/epoch_avg_loss": np.mean(epoch_loss_list)})
         # get and write the metric logs
@@ -1271,6 +1311,12 @@ class DeepspeedTrainer(DNASeqModelTrainer):
         # Pre-compute metric metadata to avoid repeated pandas operations
         self._precompute_metric_metadata()
 
+        # Buffers for averaging loss and gradients over multiple steps before logging
+        self.batch_loss_buffer = {}  # For accumulating loss values
+        self.batch_count_buffer = 0  # For counting batches in buffer
+        self.grad_norms_buffer = 0.0  # For accumulating total gradient norm
+        self.param_grad_norms_buffer = {}  # For accumulating individual parameter gradient norms
+
         # set up data
         self.data_split = ["train", "valid", "test"]
         self.data_func = {k: {"dataset": None, "data_sampler": None, "data_loader": None} for k in self.data_split}
@@ -1402,9 +1448,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         # for loss log
         nan_termination = False
-        # for loss tracking
-        batch_loss_dict = {}
-        batch_count = 0
+        # for epoch-level tracking
         epoch_loss_list = []
 
         dataloader = self.data_func["train"]["data_loader"]
@@ -1425,12 +1469,12 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             total_loss, loss_dict = self.compute_loss(pred, label)
             loss = total_loss / self.training_config.accum_step
 
-            # log loss
+            # Accumulate loss into buffer (instance variable that persists across epochs)
             for k, v in loss_dict.items():
-                if k not in batch_loss_dict:
-                    batch_loss_dict[k] = 0.0
-                batch_loss_dict[k] += v
-            batch_count += 1
+                if k not in self.batch_loss_buffer:
+                    self.batch_loss_buffer[k] = 0.0
+                self.batch_loss_buffer[k] += v
+            self.batch_count_buffer += 1
             epoch_loss_list.append(loss.detach().cpu().item() * self.training_config.accum_step)
 
             self.model_engine.backward(loss)
@@ -1439,14 +1483,43 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             ## in the training loop, we only look at the local loss
             should_update = ((i + 1) % self.training_config.accum_step == 0) or (i + 1 == len(dataloader))
 
+            # Buffer gradient norms for averaging
             tensorboard_log_every = self.logging_config.get("tensorboard_log_every") or self.logging_config.report_every
+            if should_update and self.logging_config.use_tensorboard and self.logging_config.log_more:
+                grads = []
+                for tag, value in self.training_model.named_parameters():
+                    tag = tag.replace(".", "/")
+                    if value.grad is not None:
+                        grad = value.grad.data.detach().cpu().numpy()
+                        if not np.isnan(grad).any():
+                            grad_norm = np.linalg.norm(grad)
+                            if tag not in self.param_grad_norms_buffer:
+                                self.param_grad_norms_buffer[tag] = 0.0
+                            self.param_grad_norms_buffer[tag] += grad_norm
+                            grads.append(grad)
+                if grads:
+                    total_grad_norm = np.sqrt(sum(np.linalg.norm(g) ** 2 for g in grads))
+                    self.grad_norms_buffer += total_grad_norm
+
             if self.current_step % tensorboard_log_every == 0 and should_update:
-                report_loss = {k: v / batch_count for k, v in batch_loss_dict.items()}
+                report_loss = {k: v / self.batch_count_buffer for k, v in self.batch_loss_buffer.items()}
 
-                nan_termination = self._log_training_metrics(report_loss, should_exit_on_nan=True)
+                # Compute average gradient norms from buffer
+                avg_param_grad_norms = {k: v / self.batch_count_buffer for k, v in self.param_grad_norms_buffer.items()} if self.param_grad_norms_buffer else None
+                avg_total_grad_norm = self.grad_norms_buffer / self.batch_count_buffer if self.grad_norms_buffer > 0 else None
 
-                batch_loss_dict = {}
-                batch_count = 0
+                nan_termination = self._log_training_metrics(
+                    report_loss,
+                    avg_param_grad_norms=avg_param_grad_norms,
+                    avg_total_grad_norm=avg_total_grad_norm,
+                    should_exit_on_nan=True
+                )
+
+                # Clear all buffers (loss and gradients)
+                self.batch_loss_buffer = {}
+                self.batch_count_buffer = 0
+                self.grad_norms_buffer = 0.0
+                self.param_grad_norms_buffer = {}
 
             # model optimize
             self.model_engine.step()
@@ -1460,6 +1533,9 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             if nan_termination:
                 exit(1)
 
+        # Note: All buffers (batch_loss_buffer, batch_count_buffer, grad_norms_buffer, param_grad_norms_buffer)
+        # are intentionally NOT cleared here. They persist across epochs for continuous averaging
+        # until the next tensorboard_log_every interval.
         self.current_epoch += 1
         self.metrics.update({f"Train/epoch_avg_loss": np.mean(epoch_loss_list)})
 
