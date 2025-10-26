@@ -64,8 +64,8 @@ def poisson_lmse(
         divisor = y_true.shape[dim]
 
     # add eps to protect against tiny values
-    y_true += eps
-    y_pred += eps
+    y_true = torch.clamp(y_true, min=eps)
+    y_pred = torch.clamp(y_pred, min=eps)
 
     # sum across specified dimension for Poisson loss
     s_true = torch.sum(y_true, dim=dim)
@@ -138,9 +138,9 @@ def poisson_multinomial(
         divisor = y_true.shape[dim]
 
     # add eps to protect against tiny values
-    y_true += eps
-    y_pred += eps
-    
+    y_true = torch.clamp(y_true, min=eps)
+    y_pred = torch.clamp(y_pred, min=eps)
+
     # sum across specified dimension
     s_true = torch.sum(y_true, dim=dim)
     s_pred = torch.sum(y_pred, dim=dim)
@@ -215,9 +215,9 @@ def poisson_reverse_multinomial(
         y_pred = y_pred.to(torch.float32)
         divisor = y_true.shape[dim]
 
-    # clip min, max to protect against tiny values
-    y_true = torch.clamp(y_true, min=eps, max=1.0)
-    y_pred = torch.clamp(y_pred, min=eps, max=1.0)
+    # clip min to protect against tiny values
+    y_true = torch.clamp(y_true, min=eps)
+    y_pred = torch.clamp(y_pred, min=eps)
 
     # sum across specified dimension
     s_true = torch.sum(y_true, dim=dim)
@@ -294,9 +294,9 @@ def poisson_combined_multinomial(
         y_pred = y_pred.to(torch.float32)
         divisor = y_true.shape[dim]
 
-    # clip min, max to protect against tiny values
-    y_true = torch.clamp(y_true, min=eps, max=1.0)
-    y_pred = torch.clamp(y_pred, min=eps, max=1.0)
+    # clip min to protect against tiny values
+    y_true = torch.clamp(y_true, min=eps)
+    y_pred = torch.clamp(y_pred, min=eps)
 
     # sum across specified dimension
     s_true = torch.sum(y_true, dim=dim)
@@ -379,8 +379,8 @@ def poisson_js(
         divisor = y_true.shape[dim]
 
     # add eps to protect against tiny values
-    y_true = y_true + eps
-    y_pred = y_pred + eps
+    y_true = torch.clamp(y_true, min=eps)
+    y_pred = torch.clamp(y_pred, min=eps)
 
     # sum across specified dimension
     s_true = torch.sum(y_true, dim=dim)
