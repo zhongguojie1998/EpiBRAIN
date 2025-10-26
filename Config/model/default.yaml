@@ -26,7 +26,7 @@ finetune_param:
     # Default parameters (applied to attention layers)
     r: 8                    # Default LoRA rank for attention
     lora_alpha: 16          # Default LoRA alpha for attention (scale = 16/8 = 2.0)
-    lora_dropout: 0.0       # No dropout for LoRA layers
+    lora_dropout: 0.1       # No dropout for LoRA layers
 
     # Pattern-based configuration for different layer types
     # Use regex to match specific layers and assign different ranks/alphas
