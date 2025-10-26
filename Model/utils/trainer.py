@@ -454,6 +454,8 @@ class DNASeqModelTrainer:
                         "pred_dims": cell_data.index.tolist(),
                         "label_dims": cell_data["label_dim"].tolist(),
                         "cell_data": cell_data,
+                        "num_tracks": len(cell_data),
+                        "percentage_tracks": len(cell_data) / len(label_meta),
                     })
             else:
                 rna_cell_data = None
@@ -738,7 +740,8 @@ class DNASeqModelTrainer:
     def compute_loss(self, pred, label):
         loss_dict = {}
         total_loss = 0.0
-
+        
+        # apply each loss
         for loss_name, loss_info in self.loss_config.items():
             head_name = loss_info["head"]
             criterion = loss_info["criterion"]
@@ -755,8 +758,9 @@ class DNASeqModelTrainer:
             # Get corresponding labels
             task_label = label[task_type].to(self.device, non_blocking=True)
 
-            # Compute loss using cached metadata
+            # Compute loss using cached metadata in each modalities
             if "transcripts" in loss_name:
+                # if loss name is transcripts, we only calculate for rna modalities
                 # get transcripts masks
                 if "transcripts_mask" in label:
                     transcripts_mask = label["transcripts_mask"].to(
@@ -780,17 +784,16 @@ class DNASeqModelTrainer:
                 )
                 # unsqueeze to make it 1 x total_transcripts x cell_types, looks like batch size 1
                 loss_value = criterion(pred_transcripts.unsqueeze(0), label_transcripts.unsqueeze(0))
-            elif "cross_cell" in loss_name:
-                # Use cached modality groups
+            else:
+                # compute loss for each modalities
                 loss_value = 0
                 for mod_group in cache["modality_groups"]:
+                    mod_name = mod_group["modality"]
                     pred_subset = task_pred[:, :, mod_group["pred_dims"], ...]
                     label_subset = task_label[:, :, mod_group["label_dims"]]
-                    loss_value += criterion(pred_subset, label_subset)
-            else:
-                # Use cached all_pred_dims
-                pred_subset = task_pred[:, :, cache["all_pred_dims"], ...]
-                loss_value = criterion(pred_subset, task_label)
+                    loss_value_mod = criterion(pred_subset, label_subset) * mod_group["percentage_tracks"]
+                    loss_dict[f"{loss_name}/{mod_name}"] = loss_value_mod.detach().cpu().item()
+                    loss_value += loss_value_mod
 
             loss_dict[loss_name] = loss_value.detach().cpu().item()
 
