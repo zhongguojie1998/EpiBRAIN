@@ -16,8 +16,8 @@ test_only: False # whether to only run the test stage, if True, load_checkpoint 
 finetune: True # whether to finetune the model
 
 ## training hyperparameter
-lr: 1e-4 # maximum learning rate
-lr_warmup_step: 10000  # gradually increase lr from 0 to `lr` in given optimization steps
+lr: 5e-5 # maximum learning rate
+lr_warmup_step: 2500  # gradually increase lr from 0 to `lr` in given optimization steps
 batch_size: 3 # batch size for one single GPU
 total_epoch: 200  # maximum training epoch number
 accum_step: 2 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
@@ -75,10 +75,12 @@ weight_decay:
     - ndim_1 # exclude 1D parameters (e.g., LayerNorm)
 
 ## scheduler setup
-scheduler: WarmupThenCosineDecay
+scheduler: WarmupThenPolynomialDecay
 scheduler_params:
   num_warmup_steps: ${training.lr_warmup_step}
-  num_training_steps: 84200
+  num_training_steps: 20000
+  lr_end: 5e-6 # final learning rate, only for Polynomial Decay
+  power: 1.0 # the power of the polynomial, only for Polynomial Decay, use 1.0 for linear decay
 # scheduler: WarmupThenReduceLROnPlateau # learning rate scheduler to use
 # scheduler_params: # scheduler parameters
 #   warmup_steps: ${training.lr_warmup_step}

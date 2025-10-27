@@ -59,5 +59,6 @@ SCHEDULER_DICT = {
     "WarmupThenReduceLROnPlateau": WarmupThenReduceLROnPlateau,
     "WarmupThenCosineDecay": transformers.get_cosine_schedule_with_warmup,
     "WarmupThenLinearDecay": transformers.get_linear_schedule_with_warmup,
+    "WarmupThenPolynomialDecay": transformers.get_polynomial_decay_schedule_with_warmup,
     "WarmupThenConstant": transformers.get_constant_schedule_with_warmup,
 }
