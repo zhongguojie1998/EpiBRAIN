@@ -1,0 +1,36 @@
+defaults:
+  - default
+
+world_size: 8
+
+lr: 1e-4 # maximum learning rate
+lr_warmup_step: 10000  # gradually increase lr from 0 to `lr` in given optimization steps
+batch_size: 34 # batch size for one single GPU
+total_epoch: 200  # maximum training epoch number
+accum_step: 1 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
+clip_grad_norm: 1.0 # gradient clipping norm, 1.0 as in ethan's script
+seed: 42  # random seed for reproduciblility
+
+finetune: False # whether to finetune the model
+## weight decay setup (used when add_opt_group is True)
+weight_decay:
+  overall: 0.002 # weight decay for general parameters
+  transformer: 0.002 # weight decay for transformer parameters
+  lora: 0.002 # weight decay for LoRA parameters
+  exclude: # parameter patterns to exclude from weight decay (always 0.0)
+    - bias # exclude bias parameters
+    - ndim_1 # exclude 1D parameters (e.g., LayerNorm)
+
+## scheduler setup
+scheduler: WarmupThenPolynomialDecay
+scheduler_params:
+  num_warmup_steps: ${training.lr_warmup_step}
+  num_training_steps: 35000
+  lr_end: 1e-5 # final learning rate, only for Polynomial Decay
+  power: 1.0 # the power of the polynomial, only for Polynomial Decay, use 1.0 for linear decay
+
+dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader
+  batch_size: ${training.batch_size}
+  pin_memory: False
+  num_workers: 0
+  persistent_workers: False
