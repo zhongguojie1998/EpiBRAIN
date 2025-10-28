@@ -5,9 +5,9 @@ world_size: 8
 
 lr: 1e-4 # maximum learning rate
 lr_warmup_step: 10000  # gradually increase lr from 0 to `lr` in given optimization steps
-batch_size: 34 # batch size for one single GPU
+batch_size: 2 # batch size for one single GPU
 total_epoch: 200  # maximum training epoch number
-accum_step: 1 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
+accum_step: 2 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
 clip_grad_norm: 1.0 # gradient clipping norm, 1.0 as in ethan's script
 seed: 42  # random seed for reproduciblility
 
