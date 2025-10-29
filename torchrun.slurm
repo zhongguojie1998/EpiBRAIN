@@ -42,10 +42,10 @@ srun --cpu-bind=none --jobid $SLURM_JOBID bash -c "torchrun \
     --node_rank=\$SLURM_PROCID \
     --master_addr=\$MASTER_ADDR \
     --master_port=\$MASTER_PORT \
-    Model/train.py -c default -x \"logging.exp_name=$EXP_NAME\" \
-        -x \"training=nygc_multinodes\" --torchrun \
+    Model/train.py -c default -x \"logging.exp_name=full_finetune_original_loss\" \
+        -x \"training=full_finetune_nygc\" --torchrun \
         -x \"data.storage_path=./Data/$EXP_NAME\" \
-        -x \"model=no_celltype_heads\" \
+        -x \"model=full_finetune\" \
         -x \"data.preprocess.trial_summary_path=./Data/data_config/$EXP_NAME.csv\""
 
 date
