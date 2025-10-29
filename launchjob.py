@@ -95,8 +95,6 @@ def launch_distributed(
                 config,
                 "-t",
                 "-x",
-                f"logging=debug",
-                "-x",
                 f"logging.exp_name={exp_name}",
             ]
         elif launch_method == "deepspeed":
@@ -114,8 +112,6 @@ def launch_distributed(
                 "-c",
                 config,
                 "-d",
-                "-x",
-                f"logging=debug",
                 "-x",
                 f"logging.exp_name={exp_name}",
             ]
