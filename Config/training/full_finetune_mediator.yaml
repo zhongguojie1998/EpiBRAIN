@@ -11,7 +11,7 @@ accum_step: 2 # gradient accumulation step (effective batchsize=world_size * bat
 clip_grad_norm: 1.0 # gradient clipping norm, 1.0 as in ethan's script
 seed: 42  # random seed for reproduciblility
 
-finetune: False # whether to finetune the model
+finetune: True # whether to finetune the model
 ## weight decay setup (used when add_opt_group is True)
 weight_decay:
   overall: 0.002 # weight decay for general parameters
