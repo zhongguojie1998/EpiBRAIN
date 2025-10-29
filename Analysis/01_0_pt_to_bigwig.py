@@ -56,6 +56,7 @@ import torch
 import pandas as pd
 import pyBigWig
 import numpy as np
+import yaml
 from pathlib import Path
 from tqdm import tqdm
 from joblib import Parallel, delayed
@@ -522,7 +523,7 @@ def merge_bigwig_files(output_dir, chrom_sizes, per_chrom):
 @click.option("--res_base", required=True, default="./Res", help="Results base directory")
 @click.option("--log_base", required=True, default="./logs", help="Logs base directory")
 @click.option("-o", "--output_dir", required=True, type=str, help="Output directory for BigWig files")
-@click.option("-f", "--fasta", "fasta_file", required=True, type=str, help="Reference genome FASTA file")
+@click.option("-f", "--fasta", "fasta_file", type=str, default=None, help="Reference genome FASTA file")
 @click.option("--trials", type=str, default=None,
               help="Comma-separated list of trial names to export (default: all trials)")
 @click.option("--per_chrom", is_flag=True, default=False,
@@ -563,6 +564,8 @@ def main(exp_name, chk, pt_file, split, res_base, log_base, output_dir, fasta_fi
         print("Warning: Both --pt_file and --chk provided. Using --pt_file and ignoring --chk")
 
     LOG_BASE = os.path.abspath(f"{log_base}/{exp_name}/")
+    # read log yaml file
+    log_yaml = yaml.safe_load(open(f"{LOG_BASE}/overall_setting.yaml", "r"))
     RES_BASE = os.path.abspath(res_base)
 
     # Create output directory
@@ -628,6 +631,8 @@ def main(exp_name, chk, pt_file, split, res_base, log_base, output_dir, fasta_fi
         pred_files_with_splits.append((pred_file, split))
 
     # Get chromosome sizes (only once for all files)
+    if fasta_file is None:
+        fasta_file = log_yaml['data']['refer_genom']
     print(f"\nReading chromosome sizes from: {fasta_file}")
     chrom_sizes = get_chrom_sizes(fasta_file)
     print(f"Found {len(chrom_sizes)} chromosomes")
@@ -672,7 +677,7 @@ def main(exp_name, chk, pt_file, split, res_base, log_base, output_dir, fasta_fi
                 # Try alternative path
                 file_data_path = f"{LOG_BASE}/../../../Data/{exp_name}"
 
-        sequences_bed = f"{file_data_path}/sequences.bed"
+        sequences_bed = f"{log_yaml['data']['storage_path']}/sequences.bed"
         if not os.path.exists(sequences_bed):
             raise FileNotFoundError(f"Sequences bed file not found: {sequences_bed}")
 
