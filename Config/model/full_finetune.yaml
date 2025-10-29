@@ -15,6 +15,7 @@ use_autocast: True  # whether to use autocast, if using FlashAttention, always s
 ### `finetune_layers`: provide some trainable layers and only train these layers
 ### `cont_from_pretrain`: just load the parameters from the pretrained model and continue training 
 finetune_method: cont_from_pretrain
+finetune_param: null
 
 partial_load:
   - res_tower
