@@ -1,5 +1,6 @@
 defaults:
   - default
+  - dataloader: default
 
 world_size: 1
 gpu_id: 0
@@ -7,9 +8,3 @@ gpu_id: 0
 batch_size: 2
 
 accum_step: 1
-
-dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader
-  batch_size: ${training.batch_size}
-  pin_memory: False
-  num_workers: 0
-  persistent_workers: False

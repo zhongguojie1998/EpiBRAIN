@@ -1,5 +1,8 @@
 # Training setup
 
+defaults:
+  - dataloader: multiworker
+
 ## basic hardware setup
 world_size: 4 # how many GPUs to use for training, 1 for single GPU training, >1 for DDP training
 gpu_id: null  # when world size > 1, even if specified, will not be used
@@ -76,10 +79,5 @@ scheduler_params: # scheduler parameters
 #   warmup_type: linear
 
 ## dataloader setup
-dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader
-  batch_size: ${training.batch_size}
-  pin_memory: True
-  num_workers: 12
-  persistent_workers: True
-
-
+# Dataloader configuration is loaded from training/dataloader/ folder via defaults
+# To override: python train.py -x training/dataloader=default

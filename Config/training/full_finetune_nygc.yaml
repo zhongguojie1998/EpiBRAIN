@@ -1,5 +1,6 @@
 defaults:
   - default
+  - dataloader: default
 
 world_size: 6
 
@@ -28,9 +29,3 @@ scheduler_params:
   num_training_steps: 25625
   lr_end: 1e-5 # final learning rate, only for Polynomial Decay
   power: 1.0 # the power of the polynomial, only for Polynomial Decay, use 1.0 for linear decay
-
-dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader
-  batch_size: ${training.batch_size}
-  pin_memory: False
-  num_workers: 0
-  persistent_workers: False

@@ -1,0 +1,6 @@
+# Multi-worker dataloader parameters for production training
+# Should be accepted by torch.utils.data.DataLoader
+batch_size: ${training.batch_size}
+pin_memory: True
+num_workers: 12
+persistent_workers: True
