@@ -324,7 +324,7 @@ class DNASeqModelTrainer:
     def model_data_align(self):
 
         # get the model setting
-        heads_config, use_cell_encoder, _ = std_pred_head_config(self.model_config.output_heads)
+        heads_config, use_cell_encoder, _, _ = std_pred_head_config(self.model_config.output_heads)
 
         # get the data setting
         raw_label_meta = pd.read_csv(f"{self.dataset_config.storage_path}/raw_label_meta.csv")

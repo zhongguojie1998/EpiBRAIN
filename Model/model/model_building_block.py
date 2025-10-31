@@ -281,12 +281,13 @@ class ConvDna(nn.Module):
 
 class PredictionHead(nn.Module):
 
-    def __init__(self, in_features, heads_config=None, use_cell_encoder=False, celltype_hidden_dim=None, **kwargs):
+    def __init__(self, in_features, heads_config=None, use_cell_encoder=False, celltype_hidden_dim=None, cell_encoder_activation='gelu', **kwargs):
         super().__init__()
 
         self.in_features = in_features
         self.use_cell_encoder = use_cell_encoder
         self.celltype_hidden_dim = celltype_hidden_dim
+        self.cell_encoder_activation = cell_encoder_activation
         self.heads_config = heads_config
         self.shared_celltype_num = [v["celltype_num"] for v in heads_config.values()][0]
 
@@ -296,10 +297,16 @@ class PredictionHead(nn.Module):
     def _setup_cell_encoder(self):
         """Setup shared celltype encoder if needed"""
         if self.use_cell_encoder:
-            self.shared_cell_encoder = nn.Sequential(
-                nn.Linear(self.in_features, self.celltype_hidden_dim * self.shared_celltype_num),
-                nn.GELU(approximate="tanh"),
-            )
+            from model.model_utils import get_activation_layer
+
+            layers = [nn.Linear(self.in_features, self.celltype_hidden_dim * self.shared_celltype_num)]
+
+            # Add activation layer if specified
+            activation = get_activation_layer(self.cell_encoder_activation)
+            if activation is not None:
+                layers.append(activation)
+
+            self.shared_cell_encoder = nn.Sequential(*layers)
         else:
             self.shared_cell_encoder = None
 

@@ -44,6 +44,7 @@ def std_pred_head_config(config):
         # Shared parameters (optional)
         'use_cell_encoder': bool,           # Whether to use shared celltype encoder (default: False)
         'celltype_hidden_dim': int,         # Hidden dim for celltype embedding
+        'cell_encoder_activation': str,     # Activation function: 'gelu', 'relu', 'tanh', or 'none' (default: 'gelu')
 
         # Individual head configs
         'head_name': {
@@ -66,6 +67,7 @@ def std_pred_head_config(config):
     # Step 1: Pop shared parameters
     use_cell_encoder = config.pop("use_cell_encoder", False)
     celltype_hidden_dim = config.pop("celltype_hidden_dim", None)
+    cell_encoder_activation = config.pop("cell_encoder_activation", "gelu")
 
     if use_cell_encoder and celltype_hidden_dim is None:
         raise ValueError("celltype_hidden_dim not provided")
@@ -143,7 +145,34 @@ def std_pred_head_config(config):
                 f"All heads must have same celltype_num when use_cell_encoder=True. Got: {set(celltype_nums)}"
             )
 
-    return head_configs, use_cell_encoder, celltype_hidden_dim
+    return head_configs, use_cell_encoder, celltype_hidden_dim, cell_encoder_activation
+
+
+def get_activation_layer(activation_name):
+    """
+    Get activation layer based on string name.
+
+    Args:
+        activation_name: str, one of 'gelu', 'relu', 'tanh', 'none'
+
+    Returns:
+        nn.Module or None
+    """
+    activation_name = activation_name.lower()
+
+    if activation_name == "gelu":
+        return nn.GELU(approximate="tanh")
+    elif activation_name == "relu":
+        return nn.ReLU()
+    elif activation_name == "tanh":
+        return nn.Tanh()
+    elif activation_name == "none":
+        return None
+    else:
+        raise ValueError(
+            f"Unsupported activation: '{activation_name}'. "
+            f"Supported activations: 'gelu', 'relu', 'tanh', 'none'"
+        )
 
 
 # model init utils
