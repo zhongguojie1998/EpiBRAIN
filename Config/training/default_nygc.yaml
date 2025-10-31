@@ -1,6 +1,6 @@
 defaults:
   - default
-  - dataloader: default
+  - override /training/dataloader: default
 
 world_size: 3
 

@@ -1,8 +1,8 @@
 # Training setup
 
 defaults:
-  - loss: poisson_mn  # default loss configuration from training/loss/ folder
-  - dataloader: multiworker
+  - /training/loss: poisson_mn  # default loss configuration from training/loss/ folder
+  - /training/dataloader: multiworker
 
 ## basic hardware setup
 world_size: 4 # how many GPUs to use for training, 1 for single GPU training, >1 for DDP training

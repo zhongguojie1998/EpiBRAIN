@@ -1,7 +1,7 @@
 # Training setup
 
 defaults:
-  - dataloader: multiworker
+  - /training/dataloader: multiworker
 
 ## basic hardware setup
 world_size: 4 # how many GPUs to use for training, 1 for single GPU training, >1 for DDP training
