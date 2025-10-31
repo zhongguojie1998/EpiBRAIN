@@ -1,5 +1,8 @@
 # Training setup
 
+defaults:
+  - loss: poisson_mn  # default loss configuration from training/loss/ folder
+
 ## basic hardware setup
 world_size: 4 # how many GPUs to use for training, 1 for single GPU training, >1 for DDP training
 gpu_id: null  # when world size > 1, even if specified, will not be used
@@ -29,35 +32,8 @@ use_head: # list of heads to use for training
   - regression
 
 ## loss setup
-# loss: poisson # the name of the loss function (now support: poisson, poisson_mn)
-# loss_params:
-#   log_input: False
-#   eps: 1e-7
-#   reduction: mean
-
-loss: 
-  poisson_mn: # the name of the loss function (now support: poisson, poisson_mn, cross_cell_mn)
-    loss_head: regression # the head to use for the loss
-    loss_weight: 0.2 # the weight of the loss
-    params:
-      total_weight: 0.5
-      weight_range: 1
-      eps: 1e-7
-      reduction: mean
-  cross_cell_rmn:
-    loss_head: regression # the head to use for the loss
-    loss_weight: 0.6 # the weight of the loss
-    params:
-      total_weight: 0.5
-      eps: 1e-7
-      reduction: mean
-  cross_batch_mn:
-    loss_head: regression # the head to use for the loss
-    loss_weight: 0.2 # the weight of the loss
-    params:
-      total_weight: 0.2
-      eps: 1e-7
-      reduction: mean    
+# Loss configuration is loaded from training/loss/ folder via defaults
+# To override: python train.py -x training=default -x training/loss=poisson
 
 ## optimizer setup
 add_opt_group: True # whether to use optimizer parameter groups

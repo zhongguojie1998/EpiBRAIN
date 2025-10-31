@@ -1,0 +1,24 @@
+# Poisson MN Loss Configuration
+loss: 
+  poisson_mn: # the name of the loss function (now support: poisson, poisson_mn, cross_cell_mn)
+    loss_head: regression # the head to use for the loss
+    loss_weight: 0.2 # the weight of the loss
+    params:
+      total_weight: 0.5
+      weight_range: 1
+      eps: 1e-7
+      reduction: mean
+  cross_cell_rmn:
+    loss_head: regression # the head to use for the loss
+    loss_weight: 0.6 # the weight of the loss
+    params:
+      total_weight: 0.5
+      eps: 1e-7
+      reduction: mean
+  cross_batch_mn:
+    loss_head: regression # the head to use for the loss
+    loss_weight: 0.2 # the weight of the loss
+    params:
+      total_weight: 0.2
+      eps: 1e-7
+      reduction: mean
