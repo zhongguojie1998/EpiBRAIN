@@ -79,7 +79,7 @@ scheduler_params: # scheduler parameters
 #   warmup_type: linear
 
 ## dataloader setup
-dataloader:
+dataloader_params:
   batch_size: ${training.batch_size}
   pin_memory: True
   num_workers: 12

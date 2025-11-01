@@ -73,7 +73,7 @@ scheduler_params:
 #     min_lr: 1e-6 # the minimum learning rate
 
 ## dataloader setup
-dataloader:
+dataloader_params:
   batch_size: ${training.batch_size}
   pin_memory: True
   num_workers: 12

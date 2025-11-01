@@ -4,7 +4,7 @@ defaults:
 world_size: 4
 
 # Override dataloader for single-worker mode
-dataloader:
+dataloader_params:
   batch_size: ${training.batch_size}
   pin_memory: False
   num_workers: 0
