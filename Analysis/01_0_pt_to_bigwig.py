@@ -287,7 +287,7 @@ def export_trial(test_pred, test_label, regions_df, label_meta, trial_idx, outpu
     regions_df : pd.DataFrame
         DataFrame with genomic regions
     label_meta : pd.DataFrame
-        Label metadata
+        Label metadata (may include 'is_imputed' column)
     trial_idx : int
         Index of the trial to export
     output_dir : str
@@ -307,17 +307,25 @@ def export_trial(test_pred, test_label, regions_df, label_meta, trial_idx, outpu
     """
     trial_name = label_meta.loc[trial_idx, 'trial']
 
+    # Add 'imputed' suffix to filenames if this trial is imputed
+    is_imputed = label_meta.loc[trial_idx, 'is_imputed'] if 'is_imputed' in label_meta.columns else False
+    filename_suffix = "_imputed" if is_imputed else ""
+
+    # Skip label export for imputed trials (we don't have labels for them)
+    if is_imputed and export_labels:
+        export_labels = False
+
     if per_chrom:
         # Check if all chromosome files already exist
         chroms = regions_df['chr'].unique()
         all_exist = True
         for chrom in chroms:
-            output_bw = os.path.join(output_dir, f"{trial_name}_pred_{chrom}.bw")
+            output_bw = os.path.join(output_dir, f"{trial_name}_pred{filename_suffix}_{chrom}.bw")
             if not os.path.exists(output_bw):
                 all_exist = False
                 break
             if export_labels and test_label is not None:
-                output_bw_label = os.path.join(output_dir, f"{trial_name}_label_{chrom}.bw")
+                output_bw_label = os.path.join(output_dir, f"{trial_name}_label{filename_suffix}_{chrom}.bw")
                 if not os.path.exists(output_bw_label):
                     all_exist = False
                     break
@@ -328,19 +336,19 @@ def export_trial(test_pred, test_label, regions_df, label_meta, trial_idx, outpu
 
         # Create separate BigWig files per chromosome for predictions
         write_predictions_to_bigwig(
-            test_pred, regions_df, trial_idx, f"{trial_name}_pred",
+            test_pred, regions_df, trial_idx, f"{trial_name}_pred{filename_suffix}",
             output_dir, chrom_sizes, window_size
         )
 
         # Create separate BigWig files per chromosome for labels
         if export_labels and test_label is not None:
             write_predictions_to_bigwig(
-                test_label, regions_df, trial_idx, f"{trial_name}_label",
+                test_label, regions_df, trial_idx, f"{trial_name}_label{filename_suffix}",
                 output_dir, chrom_sizes, window_size
             )
     else:
         # Check if single BigWig file already exists
-        output_file = os.path.join(output_dir, f"{trial_name}_pred.bw")
+        output_file = os.path.join(output_dir, f"{trial_name}_pred{filename_suffix}.bw")
         if os.path.exists(output_file):
             pred_exists = True
         else:
@@ -348,7 +356,7 @@ def export_trial(test_pred, test_label, regions_df, label_meta, trial_idx, outpu
 
         label_exists = False
         if export_labels and test_label is not None:
-            output_file_label = os.path.join(output_dir, f"{trial_name}_label.bw")
+            output_file_label = os.path.join(output_dir, f"{trial_name}_label{filename_suffix}.bw")
             if os.path.exists(output_file_label):
                 label_exists = True
 
@@ -359,18 +367,127 @@ def export_trial(test_pred, test_label, regions_df, label_meta, trial_idx, outpu
         # Create single BigWig file per trial for predictions
         if not pred_exists:
             write_single_bigwig_per_trial(
-                test_pred, regions_df, trial_idx, f"{trial_name}_pred",
+                test_pred, regions_df, trial_idx, f"{trial_name}_pred{filename_suffix}",
                 output_file, chrom_sizes, window_size
             )
 
         # Create single BigWig file per trial for labels
         if export_labels and test_label is not None and not label_exists:
-            output_file_label = os.path.join(output_dir, f"{trial_name}_label.bw")
+            output_file_label = os.path.join(output_dir, f"{trial_name}_label{filename_suffix}.bw")
             write_single_bigwig_per_trial(
-                test_label, regions_df, trial_idx, f"{trial_name}_label",
+                test_label, regions_df, trial_idx, f"{trial_name}_label{filename_suffix}",
                 output_file_label, chrom_sizes, window_size
             )
     return trial_name
+
+
+def expand_label_meta_for_imputation(label_meta):
+    """
+    Expand label_meta to include all cell type-modality combinations.
+    Each cell type should have all modalities organized sequentially.
+
+    Parameters:
+    -----------
+    label_meta : pd.DataFrame
+        Original label metadata with columns ['trial', 'dim', ...]
+
+    Returns:
+    --------
+    pd.DataFrame : Expanded label metadata with imputed dimensions
+    dict : Mapping from imputed dimension to original dimension (or None if not in original)
+    """
+    # Parse trial names to extract cell type and modality
+    # Assuming trial format is like: "MiniAtlas-L56IT_K27Ac" where L56IT is cell type and K27Ac is modality
+    cell_types = set()
+    modalities = set()
+
+    for trial in label_meta['trial']:
+        parts = trial.split('_')
+        if len(parts) >= 2:
+            # Last part is modality, everything before is cell type
+            modality = parts[-1]
+            cell_type = '_'.join(parts[:-1])
+            cell_types.add(cell_type)
+            modalities.add(modality)
+        else:
+            # If no underscore, try splitting by hyphen
+            if '-' in trial:
+                parts = trial.split('-')
+                if len(parts) >= 2:
+                    # Format like "MiniAtlas-L56IT_K27Ac"
+                    prefix = parts[0]
+                    rest = '-'.join(parts[1:])
+                    if '_' in rest:
+                        ct_mod = rest.split('_')
+                        cell_type = f"{prefix}-{ct_mod[0]}"
+                        modality = '_'.join(ct_mod[1:])
+                    else:
+                        cell_type = f"{prefix}-{rest}"
+                        modality = "default"
+                    cell_types.add(cell_type)
+                    modalities.add(modality)
+
+    # Sort for consistent ordering
+    cell_types = sorted(list(cell_types))
+    modalities = sorted(list(modalities))
+
+    print(f"\nImputation mode: Found {len(cell_types)} cell types and {len(modalities)} modalities")
+    print(f"Cell types: {cell_types[:5]}{'...' if len(cell_types) > 5 else ''}")
+    print(f"Modalities: {modalities}")
+
+    # Create expanded label_meta with all combinations
+    expanded_rows = []
+    dim_mapping = {}  # Maps imputed_dim -> original_dim (or None)
+    imputed_dim = 0
+
+    # Organize sequentially: for each cell type, add all modalities
+    for cell_type in cell_types:
+        for modality in modalities:
+            # Construct trial name
+            trial_name = f"{cell_type}_{modality}"
+
+            # Check if this combination exists in original label_meta
+            matching_rows = label_meta[label_meta['trial'] == trial_name]
+
+            if len(matching_rows) > 0:
+                # Use original metadata
+                original_row = matching_rows.iloc[0].to_dict()
+                original_dim = original_row['dim']
+                dim_mapping[imputed_dim] = original_dim
+
+                # Update dim to imputed_dim, keep label_dim as is
+                original_row['dim'] = imputed_dim
+                original_row['is_imputed'] = False  # Mark as original (not imputed)
+                # label_dim is already set from the original row (if it exists)
+                expanded_rows.append(original_row)
+            else:
+                # Create placeholder for missing combination
+                dim_mapping[imputed_dim] = None  # Not in original data
+
+                # Create new row with minimal info
+                new_row = {
+                    'trial': trial_name,
+                    'dim': imputed_dim,
+                    'is_imputed': True,  # Mark as imputed
+                    'label_dim': None,  # No label dimension for imputed trials
+                    # Copy other columns from first row if they exist
+                }
+                # Add any other columns from original with default values
+                for col in label_meta.columns:
+                    if col not in new_row:
+                        new_row[col] = None
+
+                expanded_rows.append(new_row)
+
+            imputed_dim += 1
+
+    expanded_label_meta = pd.DataFrame(expanded_rows)
+
+    print(f"Expanded label_meta from {len(label_meta)} to {len(expanded_label_meta)} trials")
+    print(f"({len([v for v in dim_mapping.values() if v is not None])} original, "
+          f"{len([v for v in dim_mapping.values() if v is None])} imputed)")
+
+    return expanded_label_meta, dim_mapping
 
 
 def merge_bigwig_files(output_dir, chrom_sizes, per_chrom):
@@ -535,8 +652,10 @@ def merge_bigwig_files(output_dir, chrom_sizes, per_chrom):
               help="Number of parallel jobs (default: use all CPU cores)")
 @click.option("--export_labels", is_flag=True, default=False,
               help="Also export labels to BigWig format (default: False)")
+@click.option("--impute", is_flag=True, default=False,
+              help="Expand label_meta to include all cell type-modality combinations (imputation mode)")
 def main(exp_name, chk, pt_file, split, res_base, log_base, output_dir, fasta_file,
-         trials, per_chrom, window_size, data_path, n_jobs, export_labels):
+         trials, per_chrom, window_size, data_path, n_jobs, export_labels, impute):
     """
     Convert model predictions (and optionally labels) from .pt files to BigWig format at 32bp resolution.
 
@@ -578,6 +697,15 @@ def main(exp_name, chk, pt_file, split, res_base, log_base, output_dir, fasta_fi
 
     label_meta = pd.read_csv(label_meta_path, index_col=None)
     print(f"Loaded label metadata: {len(label_meta)} trials")
+
+    # Store original index as 'label_dim' for consistent label extraction
+    label_meta['label_dim'] = label_meta.index
+
+    # Expand label_meta if impute mode is enabled
+    dim_mapping = None
+    if impute:
+        label_meta, dim_mapping = expand_label_meta_for_imputation(label_meta)
+        print(f"Using expanded label metadata with {len(label_meta)} trials (imputation mode)")
 
     # Determine prediction file path(s)
     pred_files_with_splits = []  # List of (pred_file, split) tuples
@@ -650,20 +778,56 @@ def main(exp_name, chk, pt_file, split, res_base, log_base, output_dir, fasta_fi
 
         # Extract predictions and reshape
         # Shape: (n_samples * n_windows, n_trials) -> (n_samples, n_windows, n_trials)
-        test_pred = test_res["pred"]['regression'][:, :, label_meta['dim']].cpu()
-        n_samples = len(test_res["index"])
-        n_windows = test_pred.shape[1]
-        n_trials = len(label_meta)
+        if impute:
+            # In impute mode, extract predictions using the mapping from imputed to original dims
+            # We need to create a tensor with imputed dimensions
+            n_samples = len(test_res["index"])
+            pred_tensor = test_res["pred"]['regression'].cpu()
+            n_windows = pred_tensor.shape[1]
+            n_imputed_trials = len(label_meta)
 
-        print(f"Predictions shape: {test_pred.shape} ({n_samples} samples, {n_windows} windows, {n_trials} trials)")
+            # Initialize test_pred with zeros (or NaN) for imputed dimensions
+            test_pred = torch.zeros(n_samples, n_windows, n_imputed_trials)
+
+            # Fill in predictions for dimensions that exist in original data
+            for imputed_idx, original_idx in dim_mapping.items():
+                if original_idx is not None:
+                    # This imputed dimension has a corresponding original dimension
+                    test_pred[:, :, imputed_idx] = pred_tensor[:, :, original_idx]
+                # else: keep as zeros (imputed/missing data)
+
+            print(f"Predictions shape: {test_pred.shape} ({n_samples} samples, {n_windows} windows, {n_imputed_trials} trials)")
+            print(f"  ({len([v for v in dim_mapping.values() if v is not None])} from original data, "
+                  f"{len([v for v in dim_mapping.values() if v is None])} imputed as zeros)")
+        else:
+            # Normal mode: extract predictions directly
+            test_pred = test_res["pred"]['regression'][:, :, label_meta['dim']].cpu()
+            n_samples = len(test_res["index"])
+            n_windows = test_pred.shape[1]
+            n_trials = len(label_meta)
+
+            print(f"Predictions shape: {test_pred.shape} ({n_samples} samples, {n_windows} windows, {n_trials} trials)")
 
         # Extract labels if requested
         test_label = None
         file_export_labels = export_labels  # Local copy for this file
         if export_labels:
             if 'label' in test_res and 'regression' in test_res['label']:
-                test_label = test_res["label"]['regression'][:, :, label_meta.index.values].cpu()
+                # Always use label_dim for label extraction (consistent across both modes)
+                label_tensor = test_res["label"]['regression'].cpu()
+                n_trials = len(label_meta)
+                test_label = torch.zeros(n_samples, n_windows, n_trials)
+
+                # Fill in labels for trials that have valid label_dim
+                for idx, row in label_meta.iterrows():
+                    if pd.notna(row['label_dim']):
+                        label_dim = int(row['label_dim'])
+                        test_label[:, :, idx] = label_tensor[:, :, label_dim]
+
+                n_available_labels = label_meta['label_dim'].notna().sum()
                 print(f"Labels shape: {test_label.shape} ({n_samples} samples, {n_windows} windows, {n_trials} trials)")
+                if impute:
+                    print(f"  (Labels available for {n_available_labels} non-imputed trials)")
             else:
                 print("Warning: Labels not found in prediction file. Label export will be skipped for this file.")
                 file_export_labels = False
