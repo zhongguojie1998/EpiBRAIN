@@ -39,9 +39,26 @@ def main(config, checkpoint, output):
     myconfig = load_config(config_name=config)
     logger = BaseLogger(name="Model packaging", level=logging.INFO)
 
+    # Disable compilation temporarily to load the checkpoint
+    use_compile = myconfig.model.get("use_compile", False)
+    myconfig.model.use_compile = False
+
     checkpoint_data = torch.load(checkpoint, map_location="cpu")
     model = setup_model(myconfig, logger=logger)
     model.load_state_dict(checkpoint_data["model_state_dict"])
+
+    # Now compile if it was enabled
+    if use_compile:
+        compile_mode = myconfig.model.get("compile_mode", "default")
+        compile_backend = myconfig.model.get("compile_backend", "inductor")
+        compile_fullgraph = myconfig.model.get("compile_fullgraph", False)
+        logger.info(f"Compiling model with torch.compile (mode={compile_mode}, backend={compile_backend}, fullgraph={compile_fullgraph})")
+        try:
+            model = torch.compile(model, mode=compile_mode, backend=compile_backend, fullgraph=compile_fullgraph)
+            logger.info("Model compilation successful")
+        except Exception as e:
+            logger.warning(f"Model compilation failed: {e}. Proceeding with uncompiled model.")
+
     model.eval()
 
     dna_tokenizer = FastaInterval(
