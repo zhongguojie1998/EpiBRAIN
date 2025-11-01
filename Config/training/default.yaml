@@ -1,9 +1,5 @@
 # Training setup
 
-defaults:
-  - /training/loss: poisson_mn  # default loss configuration from training/loss/ folder
-  - /training/dataloader: multiworker
-
 ## basic hardware setup
 world_size: 4 # how many GPUs to use for training, 1 for single GPU training, >1 for DDP training
 gpu_id: null  # when world size > 1, even if specified, will not be used
@@ -33,8 +29,15 @@ use_head: # list of heads to use for training
   - regression
 
 ## loss setup
-# Loss configuration is loaded from training/loss/ folder via defaults
-# To override: python train.py -x training=default -x training/loss=poisson
+loss:
+  poisson_mn:
+    loss_head: regression
+    loss_weight: 1.0
+    params:
+      total_weight: 0.2
+      weight_range: 1
+      eps: 1e-7
+      reduction: mean
 
 ## optimizer setup
 add_opt_group: True # whether to use optimizer parameter groups
@@ -70,7 +73,10 @@ scheduler_params:
 #     min_lr: 1e-6 # the minimum learning rate
 
 ## dataloader setup
-# Dataloader configuration is loaded from training/dataloader/ folder via defaults
-# To override: python train.py -x training/dataloader=default
+dataloader:
+  batch_size: ${training.batch_size}
+  pin_memory: True
+  num_workers: 12
+  persistent_workers: True
 
 torchrun: false

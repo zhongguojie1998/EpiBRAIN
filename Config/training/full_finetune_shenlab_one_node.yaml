@@ -1,8 +1,14 @@
 defaults:
   - default
-  - override /training/dataloader: default
 
 world_size: 4
+
+# Override dataloader for single-worker mode
+dataloader:
+  batch_size: ${training.batch_size}
+  pin_memory: False
+  num_workers: 0
+  persistent_workers: False
 
 lr: 1e-4 # maximum learning rate
 lr_warmup_step: 625  # gradually increase lr from 0 to `lr` in given optimization steps
