@@ -39,6 +39,9 @@ def main(config, checkpoint, output):
     myconfig = load_config(config_name=config)
     logger = BaseLogger(name="Model packaging", level=logging.INFO)
 
+    # Disable test_only mode to avoid checkpoint validation
+    myconfig.training.test_only = False
+
     # Disable compilation temporarily to load the checkpoint
     use_compile = myconfig.model.get("use_compile", False)
     myconfig.model.use_compile = False
