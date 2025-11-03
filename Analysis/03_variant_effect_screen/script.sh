@@ -86,7 +86,20 @@ done
 EXPERIMENT=${EXPERIMENT:-"variant_effect_screen"}
 CHUNKS=${CHUNKS:-1}
 H5_BASENAME=$(basename "$H5_FILE" .h5)
+
+# Convert paths to absolute paths if they're relative
+if [[ "$H5_FILE" != /* ]]; then
+    H5_FILE="$PWD/$H5_FILE"
+fi
+if [[ "$MODEL_FILE" != /* ]]; then
+    MODEL_FILE="$PWD/$MODEL_FILE"
+fi
+
 JOB_SCRIPT_PATH=${JOB_SCRIPT_PATH:-"$(dirname "$H5_FILE")/${H5_BASENAME}_job_script"}
+# Convert JOB_SCRIPT_PATH to absolute path if it's relative
+if [[ "$JOB_SCRIPT_PATH" != /* ]]; then
+    JOB_SCRIPT_PATH="$PWD/$JOB_SCRIPT_PATH"
+fi
 MACHINES=${MACHINES:-"turing,neumann,euler"}
 MODE=${MODE:-"slurm"}
 
