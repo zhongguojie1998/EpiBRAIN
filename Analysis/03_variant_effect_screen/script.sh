@@ -135,19 +135,19 @@ sync_to_remote() {
 
     # Sync job scripts
     echo "  - Syncing job scripts: $JOB_SCRIPT_PATH -> $machine:$remote_job_script_path"
-    rsync -avz "$JOB_SCRIPT_PATH/" "$machine:$remote_job_script_path/" || { echo "Failed to sync job scripts"; exit 1; }
+    rsync -avz --progress "$JOB_SCRIPT_PATH/" "$machine:$remote_job_script_path/" || { echo "Failed to sync job scripts"; exit 1; }
 
     # Update paths in job scripts on remote machine
-    echo "  - Updating paths in job scripts (replacing $WORKING_HOME with $remote_home)"
-    ssh "$machine" "find $remote_job_script_path -type f -name '*.sh' -exec sed -i 's|$WORKING_HOME|$remote_home|g' {} +" || { echo "Failed to update paths in job scripts"; exit 1; }
+    echo "  - Updating paths in job scripts (replacing local paths with remote paths)"
+    ssh "$machine" "find $remote_job_script_path -type f -name '*.sh' -exec sed -i -e 's|$WORKING_HOME|$remote_home|g' -e 's|/gpfs/commons/home/guojiezhong|$remote_home|g' {} +" || { echo "Failed to update paths in job scripts"; exit 1; }
 
     # Sync h5 file
     echo "  - Syncing h5 file: $H5_FILE -> $machine:$remote_h5_file"
-    rsync -avz "$H5_FILE" "$machine:$remote_h5_file" || { echo "Failed to sync h5 file"; exit 1; }
+    rsync -avz --progress "$H5_FILE" "$machine:$remote_h5_file" || { echo "Failed to sync h5 file"; exit 1; }
 
     # Sync model file
     echo "  - Syncing model file: $MODEL_FILE -> $machine:$remote_model_file"
-    rsync -avz "$MODEL_FILE" "$machine:$remote_model_file" || { echo "Failed to sync model file"; exit 1; }
+    rsync -avz --progress "$MODEL_FILE" "$machine:$remote_model_file" || { echo "Failed to sync model file"; exit 1; }
 
     echo "Sync to $machine completed"
 }
@@ -162,7 +162,7 @@ sync_results_from_remote() {
 
     echo "  - Syncing results from $machine:$remote_results_dir -> $RESULTS_DIR"
     # Use rsync with -a to preserve timestamps, -z for compression, --ignore-missing-args to not fail if dir doesn't exist yet
-    rsync -az --ignore-missing-args "$machine:$remote_results_dir/" "$RESULTS_DIR/" 2>/dev/null || true
+    rsync -avz --progress --ignore-missing-args "$machine:$remote_results_dir/" "$RESULTS_DIR/" 2>/dev/null || true
 }
 
 # Skip validation if only merging
@@ -273,7 +273,7 @@ if [ "$MERGE_ONLY" != "true" ]; then
             if [ "$machine" = "$CURRENT_MACHINE" ]; then
                 # Run locally if machine is current machine
                 echo "Running locally on $machine (current machine)"
-                # bash "$JOB_SCRIPT_PATH/run_all_${machine}.sh" &
+                bash "$JOB_SCRIPT_PATH/run_all_${machine}.sh" &
             else
                 # Check if this is a VPN machine (remote)
                 if [[ "$machine" == *"-vpn"* ]]; then
@@ -292,11 +292,11 @@ if [ "$MERGE_ONLY" != "true" ]; then
 
                     # SSH to remote machine with translated paths
                     echo "Running on remote machine $machine"
-                    # ssh "$machine" "cd $REMOTE_PWD; bash $REMOTE_JOB_SCRIPT/run_all_${machine}.sh" &
+                    ssh "$machine" "cd $REMOTE_PWD; bash $REMOTE_JOB_SCRIPT/run_all_${machine}.sh" &
                 else
                     # Local network machine - direct SSH
                     echo "Running on local network machine $machine"
-                    # ssh "$machine" "cd $PWD; bash $JOB_SCRIPT_PATH/run_all_${machine}.sh" &
+                    ssh "$machine" "cd $PWD; bash $JOB_SCRIPT_PATH/run_all_${machine}.sh" &
                 fi
             fi
         done
@@ -314,7 +314,7 @@ if [ "$MERGE_ONLY" != "true" ]; then
             if [ "$machine" = "$CURRENT_MACHINE" ]; then
                 # Run locally if machine is current machine
                 echo "Running locally on $machine (current machine)"
-                # bash "$JOB_SCRIPT_PATH/run_all_${machine}.sh" &
+                bash "$JOB_SCRIPT_PATH/run_all_${machine}.sh" &
             else
                 # Check if this is a VPN machine (remote)
                 if [[ "$machine" == *"-vpn"* ]]; then
@@ -333,11 +333,11 @@ if [ "$MERGE_ONLY" != "true" ]; then
 
                     # SSH to remote machine with translated paths
                     echo "Running on remote machine $machine"
-                    # ssh "$machine" "cd $REMOTE_PWD; bash $REMOTE_JOB_SCRIPT/run_all_${machine}.sh" &
+                    ssh "$machine" "cd $REMOTE_PWD; bash $REMOTE_JOB_SCRIPT/run_all_${machine}.sh" &
                 else
                     # Local network machine - direct SSH
                     echo "Running on local network machine $machine"
-                    # ssh "$machine" "cd $PWD; bash $JOB_SCRIPT_PATH/run_all_${machine}.sh" &
+                    ssh "$machine" "cd $PWD; bash $JOB_SCRIPT_PATH/run_all_${machine}.sh" &
                 fi
             fi
         done
@@ -358,7 +358,7 @@ if [ "$MERGE_ONLY" != "true" ]; then
                     MEM="64G"
                     TIME="24:00:00"
                 fi
-                # sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="$MEM" --cpus-per-task="8" --time="$TIME" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
+                sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="$MEM" --cpus-per-task="8" --time="$TIME" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
             fi
         done
     else
@@ -378,7 +378,7 @@ if [ "$MERGE_ONLY" != "true" ]; then
                     MEM="64G"
                     TIME="24:00:00"
                 fi
-                # sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="$MEM" --cpus-per-task="8" --time="$TIME" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
+                sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="$MEM" --cpus-per-task="8" --time="$TIME" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
             fi
         done
     fi
@@ -386,50 +386,49 @@ if [ "$MERGE_ONLY" != "true" ]; then
     # wait for all chunks to complete
     echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
 
-    # # Timeout based on input type
-    # if [ -n "$VCF_FILE" ]; then
-    #     TIMEOUT_SECONDS=86400  # 24 hours
-    # else
-    #     TIMEOUT_SECONDS=172800  # 48 hours
-    # fi
-    # START_TIME=$(date +%s)
+    # Timeout based on input type
+    if [ -n "$VCF_FILE" ]; then
+        TIMEOUT_SECONDS=86400  # 24 hours
+    else
+        TIMEOUT_SECONDS=172800  # 48 hours
+    fi
+    START_TIME=$(date +%s)
 
-    # while true; do
-    #     CURRENT_TIME=$(date +%s)
-    #     ELAPSED=$((CURRENT_TIME - START_TIME))
+    while true; do
+        CURRENT_TIME=$(date +%s)
+        ELAPSED=$((CURRENT_TIME - START_TIME))
 
-    #     if [ $ELAPSED -gt $TIMEOUT_SECONDS ]; then
-    #         echo "Error: Timeout after $((TIMEOUT_SECONDS/3600)):00:00. Not all chunks completed within time limit."
-    #         exit 1
-    #     fi
+        if [ $ELAPSED -gt $TIMEOUT_SECONDS ]; then
+            echo "Error: Timeout after $((TIMEOUT_SECONDS/3600)):00:00. Not all chunks completed within time limit."
+            exit 1
+        fi
 
-    #     # Sync results from VPN machines if any
-    #     if [ ${#VPN_MACHINES_MAP[@]} -gt 0 ]; then
-    #         echo "Syncing results from remote VPN machines..."
-    #         for machine in "${!VPN_MACHINES_MAP[@]}"; do
-    #             remote_home="${VPN_MACHINES_MAP[$machine]}"
-    #             sync_results_from_remote "$machine" "$remote_home"
-    #         done
-    #     fi
+        # Sync results from VPN machines if any
+        if [ ${#VPN_MACHINES_MAP[@]} -gt 0 ]; then
+            echo "Syncing results from remote VPN machines..."
+            for machine in "${!VPN_MACHINES_MAP[@]}"; do
+                remote_home="${VPN_MACHINES_MAP[$machine]}"
+                sync_results_from_remote "$machine" "$remote_home"
+            done
+        fi
 
-    #     completed=0
-    #     for ((i=0; i<$CHUNKS; i++)); do
-    #         files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
-    #         if [ -e "${files[0]}" ]; then
-    #             completed=$((completed + 1))
-    #         fi
-    #     done
+        completed=0
+        for ((i=0; i<$CHUNKS; i++)); do
+            files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
+            if [ -e "${files[0]}" ]; then
+                completed=$((completed + 1))
+            fi
+        done
 
-    #     echo "Completed chunks: $completed/$CHUNKS (Elapsed: $((ELAPSED/3600))h $((ELAPSED%3600/60))m)"
+        echo "Completed chunks: $completed/$CHUNKS (Elapsed: $((ELAPSED/3600))h $((ELAPSED%3600/60))m)"
 
-    #     if [ $completed -eq $CHUNKS ]; then
-    #         echo "All chunks completed!"
-    #         break
-    #     fi
+        if [ $completed -eq $CHUNKS ]; then
+            echo "All chunks completed!"
+            break
+        fi
 
-    #     sleep 300  # Wait 5 minutes before checking again
-    # done
-    echo "Job submission completed (execution commented out for testing)"
+        sleep 300  # Wait 5 minutes before checking again
+    done
 else
     echo "Running in merge-only mode. Skipping all processing steps."
     # Still need to set RESULTS_DIR for the merge step
@@ -437,18 +436,15 @@ else
 fi
 
 # wait for jobs to finish, then collate results
-# if python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE" --chunk_dir "$RESULTS_DIR"; then
-#     # cleanup: delete the results directory and job scripts after successful merging
-#     echo "Cleaning up intermediate results directory: $RESULTS_DIR"
-#     rm -r "$RESULTS_DIR"
-#     echo "Cleaning up job scripts directory: $JOB_SCRIPT_PATH"
-#     rm -r "$JOB_SCRIPT_PATH"
-# else
-#     echo "Error: merge_results.py failed. Keeping intermediate files for debugging."
-#     echo "Results directory: $RESULTS_DIR"
-#     echo "Job scripts directory: $JOB_SCRIPT_PATH"
-#     exit 1
-# fi
-echo "Merge step commented out for testing"
-echo "Job scripts directory: $JOB_SCRIPT_PATH"
-echo "Results directory would be: $RESULTS_DIR"
+if python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE" --chunk_dir "$RESULTS_DIR"; then
+    # cleanup: delete the results directory and job scripts after successful merging
+    echo "Cleaning up intermediate results directory: $RESULTS_DIR"
+    rm -r "$RESULTS_DIR"
+    echo "Cleaning up job scripts directory: $JOB_SCRIPT_PATH"
+    rm -r "$JOB_SCRIPT_PATH"
+else
+    echo "Error: merge_results.py failed. Keeping intermediate files for debugging."
+    echo "Results directory: $RESULTS_DIR"
+    echo "Job scripts directory: $JOB_SCRIPT_PATH"
+    exit 1
+fi
