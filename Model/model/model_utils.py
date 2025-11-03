@@ -342,7 +342,7 @@ def setup_model(config, logger, checkpoint=None):
     should_compile = model_config_dict.get("use_compile", False)
 
     # if finetune, load the pretrained model
-    if training_config.finetune:
+    if training_config.finetune and not checkpoint_loaded:
         # in case we need to load the pretrained model and only want to load part of them
         partial_load = model_config_dict.get("partial_load", None) if isinstance(model_config_dict, dict) else getattr(model_config, "partial_load", None)
         partial_load = list(model.state_dict().keys()) if partial_load is None else partial_load
