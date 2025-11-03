@@ -6,6 +6,7 @@ from pathlib import Path
 
 import click
 import torch
+from omegaconf import OmegaConf
 
 ROOT = Path(__file__).parent.parent.parent
 sys.path.append(str(ROOT / "Model"))
@@ -40,13 +41,16 @@ def main(config, checkpoint, output):
     myconfig = load_config(config_name=config, skip_validation=True)
     logger = BaseLogger(name="Model packaging", level=logging.INFO)
 
-    # Disable compilation temporarily to load the checkpoint
+    # Check if compilation is enabled
     use_compile = myconfig.model.get("use_compile", False)
+
+    # Set the checkpoint path in config so setup_model can load it
+    myconfig.training.load_checkpoint = checkpoint
+    # Disable compilation during model setup
     myconfig.model.use_compile = False
 
-    checkpoint_data = torch.load(checkpoint, map_location="cpu")
+    # Setup model - it will load the checkpoint automatically
     model = setup_model(myconfig, logger=logger)
-    model.load_state_dict(checkpoint_data["model_state_dict"])
 
     # Now compile if it was enabled
     if use_compile:
