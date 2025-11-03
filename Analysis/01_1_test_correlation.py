@@ -230,9 +230,9 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, use_mp, n_process
                 print(f"    Using {n_proc} processes for parallel calculation")
 
                 # Calculate metrics in parallel using joblib
-                results = Parallel(n_jobs=n_proc, backend='loky')(
+                results = Parallel(n_jobs=n_proc, backend='loky', verbose=10)(
                     delayed(calculate_trial_metrics)(trial_data)
-                    for trial_data in tqdm(trial_data_list, desc=f"    Calculating metrics ({trans})")
+                    for trial_data in trial_data_list
                 )
 
                 # Store results
