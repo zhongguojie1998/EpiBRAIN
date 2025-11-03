@@ -44,13 +44,17 @@ def main(config, checkpoint, output):
     # Check if compilation is enabled
     use_compile = myconfig.model.get("use_compile", False)
 
-    # Set the checkpoint path in config so setup_model can load it
-    myconfig.training.load_checkpoint = checkpoint
+    # Prevent setup_model from loading checkpoint automatically
+    myconfig.training.load_checkpoint = None
     # Disable compilation during model setup
     myconfig.model.use_compile = False
 
-    # Setup model - it will load the checkpoint automatically
+    # Setup model - it will initialize without loading checkpoint
     model = setup_model(myconfig, logger=logger)
+
+    # Manually load the checkpoint
+    checkpoint_data = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    model.load_state_dict(checkpoint_data["model_state_dict"])
 
     # Now compile if it was enabled
     if use_compile:
