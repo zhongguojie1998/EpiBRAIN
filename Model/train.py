@@ -152,11 +152,15 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
 
     ## save the configs
     logger.debug(myconfig)
-    with open(f"{myconfig.logging.log_dir}/overall_setting.yaml", "w") as f:
-        OmegaConf.save(myconfig, f)
-    if deepspeed:
+    if not myconfig.training.get("test_only", False):
+        with open(f"{myconfig.logging.log_dir}/overall_setting.yaml", "w") as f:
+            OmegaConf.save(myconfig, f)
+        if deepspeed:
+            myconfig.training.deepspeed_config = f"{myconfig.logging.log_dir}/deepspeed_setup.json"
+            write_deepspeed_config(myconfig, f"{myconfig.logging.log_dir}/deepspeed_setup.json")
+    elif deepspeed:
+        # Still need to set deepspeed_config path for test_only mode with deepspeed
         myconfig.training.deepspeed_config = f"{myconfig.logging.log_dir}/deepspeed_setup.json"
-        write_deepspeed_config(myconfig, f"{myconfig.logging.log_dir}/deepspeed_setup.json")
     
     if only_config:
         exit(0)

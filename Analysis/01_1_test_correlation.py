@@ -101,8 +101,8 @@ def calculate_trial_metrics(trial_data):
 @click.option("--data_base", required=True, default="./Data")
 @click.option("--use_mp", is_flag=True, default=False, help="Enable multiprocessing for metric calculation")
 @click.option("--n_processes", type=int, default=None, help="Number of processes to use (default: CPU count)")
-@click.option("--transform", multiple=True, type=click.Choice(['none', 'log', 'quantile', 'log_quantile', 'log_quantile_substract_mean']),
-              default=['none'], help="Data transformation(s) to apply before calculating correlation (can specify multiple)")
+@click.option("-t", "--transform", multiple=True, type=click.Choice(['none', 'log', 'quantile', 'log_quantile', 'log_quantile_substract_mean']),
+              default=['none', 'log', 'log_quantile', 'log_quantile_substract_mean'], help="Data transformation(s) to apply before calculating correlation (can specify multiple)")
 def main(exp_name, chk, splits, res_base, log_base, data_base, use_mp, n_processes, transform):
     LOG_BASE = os.path.abspath(f"{log_base}/{exp_name}/")
     RES_BASE = os.path.abspath(res_base)
