@@ -135,6 +135,8 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
             logger.info(f"Using gpu 0 to {world_size - 1} for training")
         else:
             gpu_id = myconfig.training.get("gpu_id", 0)
+            if gpu_id is None:
+                gpu_id = 0
             gpu_id = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
             logger.info(f"Using {gpu_id} for training")
         myconfig.training.world_size = world_size

@@ -9,7 +9,6 @@ warnings.filterwarnings("ignore")
 PWD = f'{os.getenv("workingHOME")}/BICAN'
 sys.path.append(f'{PWD}/')
 os.chdir(PWD)
-import click
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
@@ -19,9 +18,9 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from tqdm import tqdm
 
 # %%
-test_res = torch.load(f"Res/full_finetune_original_loss_celltype_head_dim8_linear/Test_preds_epoch_25.pt")
+test_res = torch.load(f"Res/full_finetune_original_loss_celltype_head_dim4_linear/Test_preds_epoch_25.pt")
 # %%
-pred_track_info = pd.read_csv('logs/full_finetune_original_loss_celltype_head_dim8_linear/regression_label_meta.csv')
+pred_track_info = pd.read_csv('logs/full_finetune_original_loss_celltype_head_dim4_linear/regression_label_meta.csv')
 label_track_info = pd.read_csv('Data/basal_ganglia_miniatlas_drop_celltype_v1/raw_label_meta.csv')
 # %% compare miniatlas track 93 and label_track 3
 miniatlas_non_neuron_names = ['MiniAtlas-AST', 'MiniAtlas-OGC', 'MiniAtlas-OPC', 'MiniAtlas-MGC']
