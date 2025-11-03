@@ -93,6 +93,9 @@ MODE=${MODE:-"slurm"}
 # Get workingHOME from environment (set in ~/.bashrc)
 WORKING_HOME=${workingHOME:?Error: workingHOME environment variable not set}
 
+# Remote workingHOME (same for all machines)
+REMOTE_WORKING_HOME="/share/vault/Users/gz2294"
+
 # Function to translate local path to remote path
 translate_path() {
     local path="$1"
@@ -262,19 +265,17 @@ if [ "$MERGE_ONLY" != "true" ]; then
                 # Check if this is a VPN machine (remote)
                 if [[ "$machine" == *"-vpn"* ]]; then
                     echo "Detected VPN machine: $machine"
-                    # Get remote workingHOME from remote machine's environment
-                    REMOTE_HOME=$(ssh "$machine" "source ~/.bashrc; echo \$workingHOME")
-                    echo "Remote workingHOME: $REMOTE_HOME"
+                    echo "Remote workingHOME: $REMOTE_WORKING_HOME"
 
                     # Track this VPN machine for result syncing
-                    VPN_MACHINES_MAP["$machine"]="$REMOTE_HOME"
+                    VPN_MACHINES_MAP["$machine"]="$REMOTE_WORKING_HOME"
 
                     # Sync files to remote machine
-                    sync_to_remote "$machine" "$REMOTE_HOME"
+                    sync_to_remote "$machine" "$REMOTE_WORKING_HOME"
 
                     # Translate paths for remote execution
-                    REMOTE_PWD=$(translate_path "$PWD" "$REMOTE_HOME")
-                    REMOTE_JOB_SCRIPT=$(translate_path "$JOB_SCRIPT_PATH" "$REMOTE_HOME")
+                    REMOTE_PWD=$(translate_path "$PWD" "$REMOTE_WORKING_HOME")
+                    REMOTE_JOB_SCRIPT=$(translate_path "$JOB_SCRIPT_PATH" "$REMOTE_WORKING_HOME")
 
                     # SSH to remote machine with translated paths
                     echo "Running on remote machine $machine"
@@ -305,19 +306,17 @@ if [ "$MERGE_ONLY" != "true" ]; then
                 # Check if this is a VPN machine (remote)
                 if [[ "$machine" == *"-vpn"* ]]; then
                     echo "Detected VPN machine: $machine"
-                    # Get remote workingHOME from remote machine's environment
-                    REMOTE_HOME=$(ssh "$machine" "source ~/.bashrc; echo \$workingHOME")
-                    echo "Remote workingHOME: $REMOTE_HOME"
+                    echo "Remote workingHOME: $REMOTE_WORKING_HOME"
 
                     # Track this VPN machine for result syncing
-                    VPN_MACHINES_MAP["$machine"]="$REMOTE_HOME"
+                    VPN_MACHINES_MAP["$machine"]="$REMOTE_WORKING_HOME"
 
                     # Sync files to remote machine
-                    sync_to_remote "$machine" "$REMOTE_HOME"
+                    sync_to_remote "$machine" "$REMOTE_WORKING_HOME"
 
                     # Translate paths for remote execution
-                    REMOTE_PWD=$(translate_path "$PWD" "$REMOTE_HOME")
-                    REMOTE_JOB_SCRIPT=$(translate_path "$JOB_SCRIPT_PATH" "$REMOTE_HOME")
+                    REMOTE_PWD=$(translate_path "$PWD" "$REMOTE_WORKING_HOME")
+                    REMOTE_JOB_SCRIPT=$(translate_path "$JOB_SCRIPT_PATH" "$REMOTE_WORKING_HOME")
 
                     # SSH to remote machine with translated paths
                     echo "Running on remote machine $machine"
