@@ -13,6 +13,7 @@
 # --job_script_path is path for job scripts, optional, default "$(dirname H5_FILE)/job_script"
 # --machine is comma-separated list of machines, optional, default "turing,neumann,euler"
 # --mode is execution mode: "ssh" or "slurm", optional, default "ssh"
+# --merge if set, only run the merge step (skip all processing steps)
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -65,6 +66,10 @@ while [[ $# -gt 0 ]]; do
             FORCE="true"
             shift 1
             ;;
+        --merge)
+            MERGE_ONLY="true"
+            shift 1
+            ;;
         *)
             echo "Unknown option $1"
             exit 1
@@ -80,158 +85,168 @@ JOB_SCRIPT_PATH=${JOB_SCRIPT_PATH:-"$(dirname "$H5_FILE")/${H5_BASENAME}_job_scr
 MACHINES=${MACHINES:-"turing,neumann,euler"}
 MODE=${MODE:-"slurm"}
 
-# Validate input: either --vcf or --filelist must be provided
-if [ -z "$VCF_FILE" ] && [ -z "$FILE_LIST" ]; then
-    echo "Error: Either --vcf or --filelist must be provided"
-    exit 1
-fi
-
-if [ -n "$VCF_FILE" ] && [ -n "$FILE_LIST" ]; then
-    echo "Error: Cannot use both --vcf and --filelist at the same time"
-    exit 1
-fi
-
-# Handle .pt model files - convert to packaged model
-if [[ "$MODEL_FILE" == *.pt ]]; then
-    echo "Detected .pt model file. Converting to packaged model..."
-
-    # Check if config file is provided
-    if [ -z "$CONFIG_FILE" ]; then
-        echo "Error: --config parameter is required when using .pt model files"
+# Skip validation if only merging
+if [ "$MERGE_ONLY" != "true" ]; then
+    # Validate input: either --vcf or --filelist must be provided
+    if [ -z "$VCF_FILE" ] && [ -z "$FILE_LIST" ]; then
+        echo "Error: Either --vcf or --filelist must be provided"
         exit 1
     fi
 
-    if [ ! -f "$CONFIG_FILE" ]; then
-        echo "Error: Config file $CONFIG_FILE not found"
+    if [ -n "$VCF_FILE" ] && [ -n "$FILE_LIST" ]; then
+        echo "Error: Cannot use both --vcf and --filelist at the same time"
         exit 1
     fi
-
-    PACKAGED_MODEL="${MODEL_FILE%.pt}_packaged.pkl"
-    python Analysis/03_variant_effect_screen/prebuild_model.py --config "$CONFIG_FILE" --checkpoint "$MODEL_FILE" --output "$PACKAGED_MODEL"
-
-    # Use the packaged model for the rest of the script
-    MODEL_FILE="$PACKAGED_MODEL"
 fi
 
-# Initialize tasks based on input type
-FORCE_FLAG=""
-if [ "$FORCE" = "true" ]; then
-    FORCE_FLAG="--force"
-fi
+# Skip all processing steps if only merging
+if [ "$MERGE_ONLY" != "true" ]; then
+    # Handle .pt model files - convert to packaged model
+    if [[ "$MODEL_FILE" == *.pt ]]; then
+        echo "Detected .pt model file. Converting to packaged model..."
 
-# Only run init_tasks if H5 file doesn't exist or force flag is on
-if [ ! -f "$H5_FILE" ] || [ "$FORCE" = "true" ]; then
-    if [ -n "$VCF_FILE" ]; then
-        # VCF mode
-        python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
-            -h5 "$H5_FILE" \
-            -l "$LABEL_META" \
-            -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG
+        # Check if config file is provided
+        if [ -z "$CONFIG_FILE" ]; then
+            echo "Error: --config parameter is required when using .pt model files"
+            exit 1
+        fi
+
+        if [ ! -f "$CONFIG_FILE" ]; then
+            echo "Error: Config file $CONFIG_FILE not found"
+            exit 1
+        fi
+
+        PACKAGED_MODEL="${MODEL_FILE%.pt}_packaged.pkl"
+        python Analysis/03_variant_effect_screen/prebuild_model.py --config "$CONFIG_FILE" --checkpoint "$MODEL_FILE" --output "$PACKAGED_MODEL"
+
+        # Use the packaged model for the rest of the script
+        MODEL_FILE="$PACKAGED_MODEL"
+    fi
+
+    # Initialize tasks based on input type
+    FORCE_FLAG=""
+    if [ "$FORCE" = "true" ]; then
+        FORCE_FLAG="--force"
+    fi
+
+    # Only run init_tasks if H5 file doesn't exist or force flag is on
+    if [ ! -f "$H5_FILE" ] || [ "$FORCE" = "true" ]; then
+        if [ -n "$VCF_FILE" ]; then
+            # VCF mode
+            python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
+                -h5 "$H5_FILE" \
+                -l "$LABEL_META" \
+                -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG
+        else
+            # Filelist mode
+            python Analysis/03_variant_effect_screen/init_tasks.py -fl "$FILE_LIST" \
+                -h5 "$H5_FILE" \
+                -l "$LABEL_META" \
+                -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG
+        fi
     else
-        # Filelist mode
-        python Analysis/03_variant_effect_screen/init_tasks.py -fl "$FILE_LIST" \
-            -h5 "$H5_FILE" \
-            -l "$LABEL_META" \
-            -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG
+        echo "H5 file already exists and --force not specified. Skipping init_tasks."
     fi
-else
-    echo "H5 file already exists and --force not specified. Skipping init_tasks."
-fi
 
-# Build -g arguments based on mode
-G_ARGS=""
-if [ "$MODE" = "ssh" ]; then
-    # SSH mode: use machine names
-    IFS=',' read -ra MACHINE_ARRAY <<< "$MACHINES"
-    for machine in "${MACHINE_ARRAY[@]}"; do
-        G_ARGS="$G_ARGS -g ${machine}:4:1:gpu"
-    done
-else
-    # SLURM mode: use nygc naming
-    for ((i=0; i<$CHUNKS; i++)); do
-        G_ARGS="$G_ARGS -g nygc$i:1:1:gpu"
-    done
-fi
+    # Build -g arguments based on mode
+    G_ARGS=""
+    if [ "$MODE" = "ssh" ]; then
+        # SSH mode: use machine names
+        IFS=',' read -ra MACHINE_ARRAY <<< "$MACHINES"
+        for machine in "${MACHINE_ARRAY[@]}"; do
+            G_ARGS="$G_ARGS -g ${machine}:4:1:gpu"
+        done
+    else
+        # SLURM mode: use nygc naming
+        for ((i=0; i<$CHUNKS; i++)); do
+            G_ARGS="$G_ARGS -g nygc$i:1:1:gpu"
+        done
+    fi
 
-python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
-    -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path
+    python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
+        -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path
 
-# Job submission based on mode
-RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/${H5_BASENAME}_chunk_results"
+    # Job submission based on mode
+    RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/${H5_BASENAME}_chunk_results"
 
-if [ "$MODE" = "ssh" ]; then
-    # SSH to each machine and run jobs
-    CURRENT_MACHINE=$(hostname)
-    for machine in "${MACHINE_ARRAY[@]}"; do
-        echo "Submitting jobs to $machine"
-        if [ "$machine" = "$CURRENT_MACHINE" ]; then
-            # Run locally if machine is current machine
-            echo "Running locally on $machine (current machine)"
-            bash "$JOB_SCRIPT_PATH/run_all_${machine}.sh" &
-        else
-            # SSH to remote machine
-            ssh "$machine" "cd $PWD; bash $JOB_SCRIPT_PATH/run_all_${machine}.sh" &
-        fi
-    done
-else
-    # SLURM submission
-    for ((i=0; i<$CHUNKS; i++)); do
-        # Check if chunk results already exist
-        files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
-        if [ -e "${files[0]}" ]; then
-            echo "Chunk $i results already exist, skipping job submission"
-        else
-            echo "Submitting job for chunk $i"
-            # Use different memory based on input type
-            if [ -n "$VCF_FILE" ]; then
-                MEM="24G"
-                TIME="12:00:00"
+    if [ "$MODE" = "ssh" ]; then
+        # SSH to each machine and run jobs
+        CURRENT_MACHINE=$(hostname)
+        for machine in "${MACHINE_ARRAY[@]}"; do
+            echo "Submitting jobs to $machine"
+            if [ "$machine" = "$CURRENT_MACHINE" ]; then
+                # Run locally if machine is current machine
+                echo "Running locally on $machine (current machine)"
+                bash "$JOB_SCRIPT_PATH/run_all_${machine}.sh" &
             else
-                MEM="64G"
-                TIME="24:00:00"
+                # SSH to remote machine
+                ssh "$machine" "cd $PWD; bash $JOB_SCRIPT_PATH/run_all_${machine}.sh" &
             fi
-            sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="$MEM" --cpus-per-task="8" --time="$TIME" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
+        done
+    else
+        # SLURM submission
+        for ((i=0; i<$CHUNKS; i++)); do
+            # Check if chunk results already exist
+            files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
+            if [ -e "${files[0]}" ]; then
+                echo "Chunk $i results already exist, skipping job submission"
+            else
+                echo "Submitting job for chunk $i"
+                # Use different memory based on input type
+                if [ -n "$VCF_FILE" ]; then
+                    MEM="24G"
+                    TIME="12:00:00"
+                else
+                    MEM="64G"
+                    TIME="24:00:00"
+                fi
+                sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="$MEM" --cpus-per-task="8" --time="$TIME" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
+            fi
+        done
+    fi
+
+    # wait for all chunks to complete
+    echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
+
+    # Timeout based on input type
+    if [ -n "$VCF_FILE" ]; then
+        TIMEOUT_SECONDS=86400  # 24 hours
+    else
+        TIMEOUT_SECONDS=172800  # 48 hours
+    fi
+    START_TIME=$(date +%s)
+
+    while true; do
+        CURRENT_TIME=$(date +%s)
+        ELAPSED=$((CURRENT_TIME - START_TIME))
+
+        if [ $ELAPSED -gt $TIMEOUT_SECONDS ]; then
+            echo "Error: Timeout after $((TIMEOUT_SECONDS/3600)):00:00. Not all chunks completed within time limit."
+            exit 1
         fi
+
+        completed=0
+        for ((i=0; i<$CHUNKS; i++)); do
+            files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
+            if [ -e "${files[0]}" ]; then
+                completed=$((completed + 1))
+            fi
+        done
+
+        echo "Completed chunks: $completed/$CHUNKS (Elapsed: $((ELAPSED/3600))h $((ELAPSED%3600/60))m)"
+
+        if [ $completed -eq $CHUNKS ]; then
+            echo "All chunks completed!"
+            break
+        fi
+
+        sleep 300  # Wait 5 minutes before checking again
     done
-fi
-
-# wait for all chunks to complete
-echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
-
-# Timeout based on input type
-if [ -n "$VCF_FILE" ]; then
-    TIMEOUT_SECONDS=86400  # 24 hours
 else
-    TIMEOUT_SECONDS=172800  # 48 hours
+    echo "Running in merge-only mode. Skipping all processing steps."
+    # Still need to set RESULTS_DIR for the merge step
+    RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/${H5_BASENAME}_chunk_results"
 fi
-START_TIME=$(date +%s)
-
-while true; do
-    CURRENT_TIME=$(date +%s)
-    ELAPSED=$((CURRENT_TIME - START_TIME))
-
-    if [ $ELAPSED -gt $TIMEOUT_SECONDS ]; then
-        echo "Error: Timeout after $((TIMEOUT_SECONDS/3600)):00:00. Not all chunks completed within time limit."
-        exit 1
-    fi
-
-    completed=0
-    for ((i=0; i<$CHUNKS; i++)); do
-        files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
-        if [ -e "${files[0]}" ]; then
-            completed=$((completed + 1))
-        fi
-    done
-
-    echo "Completed chunks: $completed/$CHUNKS (Elapsed: $((ELAPSED/3600))h $((ELAPSED%3600/60))m)"
-
-    if [ $completed -eq $CHUNKS ]; then
-        echo "All chunks completed!"
-        break
-    fi
-
-    sleep 300  # Wait 5 minutes before checking again
-done
 
 # wait for jobs to finish, then collate results
 if python Analysis/03_variant_effect_screen/merge_results.py -h5 "$H5_FILE" --chunk_dir "$RESULTS_DIR"; then
