@@ -1,4 +1,3 @@
-import multiprocessing as mp
 import os
 import warnings
 
@@ -15,6 +14,7 @@ from sklearn.preprocessing import quantile_transform
 from tqdm import tqdm
 import numpy as np
 from omegaconf import OmegaConf
+from joblib import Parallel, delayed
 
 base_cmap = plt.get_cmap("tab20")
 
@@ -217,7 +217,7 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, use_mp, n_process
             avg_seq_pearsonr_per_trial = np.mean(seq_corrs, axis=0)  # Average across sequences for each trial
 
             if use_mp:
-                # Prepare data for multiprocessing
+                # Prepare data for parallel processing
                 trial_data_list = []
                 for i in label_meta.index:
                     trial_name = label_meta.loc[i, "trial"]
@@ -225,19 +225,15 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, use_mp, n_process
                     trial_pred = test_pred[:, i]
                     trial_data_list.append((trial_name, trial_label, trial_pred))
 
-                # Set number of processes
-                n_proc = n_processes if n_processes else mp.cpu_count()
+                # Set number of processes (cap at 16 to avoid resource limits)
+                n_proc = n_processes if n_processes else min(os.cpu_count(), 72)
                 print(f"    Using {n_proc} processes for parallel calculation")
 
-                # Calculate metrics in parallel
-                with mp.Pool(n_proc) as pool:
-                    results = list(
-                        tqdm(
-                            pool.imap(calculate_trial_metrics, trial_data_list),
-                            total=len(trial_data_list),
-                            desc=f"    Calculating metrics ({trans})",
-                        )
-                    )
+                # Calculate metrics in parallel using joblib
+                results = Parallel(n_jobs=n_proc, backend='loky')(
+                    delayed(calculate_trial_metrics)(trial_data)
+                    for trial_data in tqdm(trial_data_list, desc=f"    Calculating metrics ({trans})")
+                )
 
                 # Store results
                 for trial_name, (mse, mae, pearsonr_val) in results:
