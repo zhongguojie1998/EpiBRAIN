@@ -1113,6 +1113,7 @@ class DNASeqModelTrainer:
         tm_metrics.reset()
 
         dataloader = self.data_func[log_prefix.lower()]["data_loader"]
+        transcripts_warning_shown = False  # Flag to show warning only once
 
         with torch.no_grad():
             for i, (seq_embedding, label, ind) in enumerate(dataloader):
@@ -1200,7 +1201,9 @@ class DNASeqModelTrainer:
                                 label_transcripts.double(),
                             )
                     elif "transcripts_mask" not in label and cache["rna_mods"]:
-                        logging.warning(f"Transcripts mask not found in label, skip calculation for TranscriptsPearsonR")
+                        if not transcripts_warning_shown:
+                            logging.warning(f"Transcripts mask not found in label, skip calculation for TranscriptsPearsonR")
+                            transcripts_warning_shown = True
 
                     # metrics for non-RNA modalities using cached data
                     for mod, mod_data in cache["non_rna_mods"].items():
