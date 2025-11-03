@@ -36,11 +36,9 @@ class ModelPackage:
 @click.option("--checkpoint", "-chk", required=True, help="Path to checkpoint file")
 @click.option("--output", "-o", required=True, help="Output path for packaged model")
 def main(config, checkpoint, output):
-    myconfig = load_config(config_name=config)
+    # Override test_only to False to bypass checkpoint validation during packaging
+    myconfig = load_config(config_name=config, overrides=("training.test_only=False",))
     logger = BaseLogger(name="Model packaging", level=logging.INFO)
-
-    # Disable test_only mode to avoid checkpoint validation
-    myconfig.training.test_only = False
 
     # Disable compilation temporarily to load the checkpoint
     use_compile = myconfig.model.get("use_compile", False)
