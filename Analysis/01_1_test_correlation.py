@@ -14,6 +14,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import quantile_transform
 from tqdm import tqdm
 import numpy as np
+from omegaconf import OmegaConf
 
 base_cmap = plt.get_cmap("tab20")
 
@@ -115,6 +116,10 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, use_mp, n_process
     transform_list = list(transform)
     print(f"Using transformations: {transform_list}")
 
+    # Load config from overall_settings.yaml
+    config = OmegaConf.load(f"{LOG_BASE}/overall_setting.yaml")
+    sequences_bed_path = f"{config.data.preprocess.storage_path}/sequences.bed"
+
     # load label meta info
     label_meta = pd.read_csv(f"{LOG_BASE}/regression_label_meta.csv", index_col=None)
 
@@ -196,7 +201,7 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, use_mp, n_process
             avg_corr_per_seq = np.nanmean(seq_corrs, axis=1)  # Average across trials for each sequence
             best_seq_idx = test_res["index"].cpu().numpy()[np.argmax(avg_corr_per_seq)]
             best_seq_corr = avg_corr_per_seq[np.argmax(avg_corr_per_seq)]
-            seq_info = pd.read_csv(f"{DATA_BASE}/{exp_name}/sequences.bed", sep="\t", header=None,
+            seq_info = pd.read_csv(sequences_bed_path, sep="\t", header=None,
                                    names=["chrom", "start", "end", "split"])
             seq_info = seq_info[seq_info["split"] == split.lower()].reset_index(drop=True)
             best_seq = seq_info.iloc[best_seq_idx]
