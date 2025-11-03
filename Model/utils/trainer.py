@@ -1543,6 +1543,10 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 # this function also support single GPU training
 def mp_main(rank, world_size, myconfig, local_rank=None):
     # special train loggers which can also log to tensorboard
+    # Disable tensorboard when test_only is True
+    if myconfig.training.get("test_only", False):
+        myconfig.logging.use_tensorboard = False
+
     logger = TrainingLogger(
         name=f"{LOGGER_PREFIX}-Trainer",
         level=myconfig.logging.log_level,
