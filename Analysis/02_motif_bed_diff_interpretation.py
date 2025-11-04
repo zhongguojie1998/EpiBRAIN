@@ -84,15 +84,30 @@ class ModelWrapper(torch.nn.Module):
         self.model = model
         self.output_key = output_key
         self.target_pos_dim = target_pos_dim
-        self.target_neg_dims = target_neg_dims
-        self.bin_range = bin_range
+        # Convert arrays to tensors for proper indexing and gradient computation
+        if isinstance(target_neg_dims, np.ndarray):
+            self.target_neg_dims = torch.from_numpy(target_neg_dims).long()
+        else:
+            self.target_neg_dims = torch.tensor(target_neg_dims, dtype=torch.long)
+
+        if isinstance(bin_range, np.ndarray):
+            self.bin_range = torch.from_numpy(bin_range).long()
+        else:
+            self.bin_range = torch.tensor(bin_range, dtype=torch.long)
 
     def forward(self, x):
         output_dict = self.model(x)
         output = output_dict[self.output_key]
+
+        # Move index tensors to same device as output
+        device = output.device
+        bin_range = self.bin_range.to(device)
+        target_neg_dims = self.target_neg_dims.to(device)
+
         # [batch, N, dim] -> [batch]
-        output_pos = output[:, self.bin_range, self.target_pos_dim].mean(dim=1)
-        output_neg = output[:, self.bin_range, :].mean(dim=1)[:, self.target_neg_dims].mean(dim=1)
+        # Use index_select for better gradient support
+        output_pos = output[:, bin_range, self.target_pos_dim].mean(dim=1)
+        output_neg = output[:, bin_range, :][:, :, target_neg_dims].mean(dim=(1, 2))
         return output_pos - output_neg
 
 def process_region_chunk(args):
