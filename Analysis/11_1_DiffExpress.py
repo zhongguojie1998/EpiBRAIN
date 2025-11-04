@@ -112,10 +112,38 @@ def add_exon_annotations(input_csv, output_csv, gtf_path):
         print(f"  First 10 genes without exons: {', '.join(genes_without_exons[:10])}")
 
 
-def select_top_genes_by_celltype(input_csv, output_csv, top_n=1000, fdr_threshold=0.05):
+def calculate_exon_span(exons_str):
+    """
+    Calculate the span from minimum start to maximum end of exons.
+    Returns None if exons string is empty or invalid.
+    """
+    if pd.isna(exons_str) or exons_str == '':
+        return None
+
+    try:
+        positions = []
+        for exon in exons_str.split(';'):
+            if not exon:
+                continue
+            # Parse chr:start-end
+            match = re.match(r'(.+):(\d+)-(\d+)', exon)
+            if match:
+                start = int(match.group(2))
+                end = int(match.group(3))
+                positions.extend([start, end])
+
+        if not positions:
+            return None
+
+        return max(positions) - min(positions)
+    except:
+        return None
+
+
+def select_top_genes_by_celltype(input_csv, output_csv, top_n=1000, fdr_threshold=0.05, max_exon_span=524288):
     """
     Select top N genes with largest positive fold change for each celltype.
-    Only includes genes with significant FDR.
+    Only includes genes with significant FDR and exon span <= max_exon_span.
     """
     print(f"\nReading annotated data: {input_csv}")
     df = pd.read_csv(input_csv)
@@ -123,30 +151,52 @@ def select_top_genes_by_celltype(input_csv, output_csv, top_n=1000, fdr_threshol
     print(f"Total rows: {len(df)}")
     print(f"Celltypes: {df['celltype'].unique()}")
 
+    # Calculate exon spans
+    print(f"\nCalculating exon spans...")
+    df['exon_span'] = df['exons'].apply(calculate_exon_span)
+
     # Group by celltype and select top N by positive fold change
-    print(f"\nSelecting top {top_n} genes by positive logFC for each celltype (FDR < {fdr_threshold})...")
+    print(f"\nSelecting top {top_n} genes by positive logFC for each celltype (FDR < {fdr_threshold}, exon span <= {max_exon_span})...")
 
     top_genes_list = []
+    total_filtered_by_span = 0
+
     for celltype in df['celltype'].unique():
         celltype_df = df[df['celltype'] == celltype].copy()
 
         # Filter by significant FDR
         significant_df = celltype_df[celltype_df['FDR'] < fdr_threshold]
 
+        # Filter by exon span
+        before_span_filter = len(significant_df)
+        significant_df = significant_df[
+            (significant_df['exon_span'].notna()) &
+            (significant_df['exon_span'] <= max_exon_span)
+        ]
+        filtered_by_span = before_span_filter - len(significant_df)
+        total_filtered_by_span += filtered_by_span
+
         # Sort by logFC in descending order (largest positive fold change)
+        # Keep taking genes until we have top_n valid genes
         celltype_top = significant_df.nlargest(top_n, 'logFC')
 
         if len(celltype_top) > 0:
             max_logfc = celltype_top['logFC'].max()
             min_logfc = celltype_top['logFC'].min()
-            print(f"  {celltype}: selected {len(celltype_top)} genes (max logFC: {max_logfc:.2f}, min logFC: {min_logfc:.2f})")
+            print(f"  {celltype}: selected {len(celltype_top)} genes (max logFC: {max_logfc:.2f}, min logFC: {min_logfc:.2f}, filtered by span: {filtered_by_span})")
         else:
-            print(f"  {celltype}: no significant genes found")
+            print(f"  {celltype}: no valid genes found (filtered by span: {filtered_by_span})")
 
         top_genes_list.append(celltype_top)
 
+    print(f"\nTotal genes filtered by exon span: {total_filtered_by_span}")
+
     # Combine all celltypes
     result_df = pd.concat(top_genes_list, ignore_index=True)
+
+    # Remove exon_span column before writing (it was only used for filtering)
+    if 'exon_span' in result_df.columns:
+        result_df = result_df.drop(columns=['exon_span'])
 
     # Write output
     print(f"\nWriting output to: {output_csv}")
