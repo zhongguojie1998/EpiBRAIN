@@ -342,8 +342,8 @@ if [ "$MERGE_ONLY" != "true" ]; then
             fi
         done
 
-        # Submit SLURM jobs for remaining chunks
-        for ((i=0; i<$SLURM_CHUNKS; i++)); do
+        # Submit SLURM jobs for remaining chunks (starting from SSH_CHUNKS)
+        for ((i=$SSH_CHUNKS; i<$CHUNKS; i++)); do
             # Check if chunk results already exist
             files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
             if [ -e "${files[0]}" ]; then
