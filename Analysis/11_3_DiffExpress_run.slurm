@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-#SBATCH --job-name=abc_analysis              # name
+#SBATCH --job-name=diffexpress              # name
 #SBATCH --mail-user=gz2294@cumc.columbia.edu # email
 #SBATCH --mail-type=ALL
 #SBATCH --nodes=1                            # nodes
@@ -12,14 +12,21 @@
 #SBATCH --output=%x-%j.out                   # output file name
 
 # Parse command line arguments (passed after script name in sbatch)
-BED_FILE=${1}
-INPUT_NAME=${2}
+PART_NUM=${1}
+EXP_NAME=${2}
 CHK_NUM=${3}
 
 # Validate required parameters
-if [ -z "$BED_FILE" ] || [ -z "$INPUT_NAME" ] || [ -z "$CHK_NUM" ]; then
+if [ -z "$PART_NUM" ] || [ -z "$EXP_NAME" ] || [ -z "$CHK_NUM" ]; then
     echo "Error: Missing required parameters"
-    echo "Usage: sbatch 09_ABC_run.sh <bed_file> <input_name> <checkpoint_file>"
+    echo "Usage: sbatch 11_3_DiffExpress_run.slurm <part_num> <exp_name> <checkpoint_num>"
+    echo "Example: sbatch 11_3_DiffExpress_run.slurm 01 baskerville_atac_only 50"
+    exit 1
+fi
+
+# Validate part number is between 01-06
+if [[ ! "$PART_NUM" =~ ^0[1-6]$ ]]; then
+    echo "Error: PART_NUM must be between 01 and 06"
     exit 1
 fi
 
@@ -33,11 +40,24 @@ export NCCL_DEBUG=INFO
 CONDA_PREFIX=/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN
 export CPLUS_INCLUDE_PATH=${CONDA_PREFIX}/lib/python3.12/site-packages/torch/include:${CONDA_PREFIX}/lib/python3.12/site-packages/torch/include/torch/csrc/api/include
 
-# Run the motif interpretation script
-/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/02_motif_diff_interpretation.py \
+# Set BED file path based on part number
+BED_FILE="Data/source/DiffExpress/split_files/part_${PART_NUM}.bed"
+
+echo "Processing part ${PART_NUM}"
+echo "BED file: ${BED_FILE}"
+echo "Experiment: ${EXP_NAME}"
+echo "Checkpoint: ${CHK_NUM}"
+
+# Run the motif bed interpretation script
+/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/02_motif_bed_diff_interpretation.py \
     --region_bed "$BED_FILE" \
-    --exp_name "$INPUT_NAME" \
+    --exp_name "$EXP_NAME" \
     --chk "$CHK_NUM" \
+    --baseline random \
+    --log_base ./logs \
+    --chk_base ./Chk \
+    --res_base ./Res \
+    --processor gpu \
     --save_raw \
     --num_processes 1
 
