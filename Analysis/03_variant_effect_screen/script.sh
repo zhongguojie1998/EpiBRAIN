@@ -429,10 +429,46 @@ if [ "$MERGE_ONLY" != "true" ]; then
 
         sleep 300  # Wait 5 minutes before checking again
     done
+
+    # Verify all chunks are actually completed before proceeding to merge
+    echo "Verifying all chunks are complete..."
+    final_completed=0
+    for ((i=0; i<$CHUNKS; i++)); do
+        files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
+        if [ -e "${files[0]}" ]; then
+            final_completed=$((final_completed + 1))
+        fi
+    done
+
+    if [ $final_completed -ne $CHUNKS ]; then
+        echo "Error: Not all chunks completed. Only $final_completed/$CHUNKS chunks are ready."
+        echo "Cannot proceed to merge. Exiting."
+        exit 1
+    fi
+
+    echo "Verification passed: All $CHUNKS chunks are ready for merging."
 else
     echo "Running in merge-only mode. Skipping all processing steps."
     # Still need to set RESULTS_DIR for the merge step
     RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/${H5_BASENAME}_chunk_results"
+
+    # In merge-only mode, also verify all chunks exist
+    echo "Verifying all chunks exist before merging..."
+    final_completed=0
+    for ((i=0; i<$CHUNKS; i++)); do
+        files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
+        if [ -e "${files[0]}" ]; then
+            final_completed=$((final_completed + 1))
+        fi
+    done
+
+    if [ $final_completed -ne $CHUNKS ]; then
+        echo "Error: Not all chunks found. Only $final_completed/$CHUNKS chunks exist."
+        echo "Cannot proceed to merge. Exiting."
+        exit 1
+    fi
+
+    echo "Verification passed: All $CHUNKS chunks are ready for merging."
 fi
 
 # wait for jobs to finish, then collate results
