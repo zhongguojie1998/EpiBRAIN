@@ -5,7 +5,6 @@ Create BED file from DiffExpress data with exon annotations.
 
 import pandas as pd
 import re
-import math
 
 
 def parse_exon_coordinates(exon_string):
@@ -74,6 +73,23 @@ def convert_exons_to_relative(exons, window_start, bin_size=32):
     return relative_exons
 
 
+def load_chromosome_lengths(fai_path):
+    """
+    Load chromosome lengths from .fai file.
+    Returns dict mapping chromosome name to length.
+    """
+    chrom_lengths = {}
+    with open(fai_path, 'r') as f:
+        for line in f:
+            parts = line.strip().split('\t')
+            if len(parts) >= 2:
+                chrom_name = parts[0]
+                chrom_length = int(parts[1])
+                chrom_lengths[chrom_name] = chrom_length
+    print(f"Loaded {len(chrom_lengths)} chromosome lengths")
+    return chrom_lengths
+
+
 def load_miniatlas_celltypes(config_path):
     """
     Load MiniAtlas celltypes from config file.
@@ -94,10 +110,14 @@ def load_miniatlas_celltypes(config_path):
     return sorted(miniatlas_celltypes)
 
 
-def create_bed_file(input_csv, output_bed, config_path):
+def create_bed_file(input_csv, output_bed, config_path, fai_path):
     """
     Create BED file from DiffExpress data with exon annotations.
+    Validates that coordinates are within chromosome boundaries.
     """
+    # Load chromosome lengths
+    chrom_lengths = load_chromosome_lengths(fai_path)
+
     # Load MiniAtlas celltypes
     miniatlas_celltypes = load_miniatlas_celltypes(config_path)
     miniatlas_celltypes_set = set(miniatlas_celltypes)
@@ -142,9 +162,39 @@ def create_bed_file(input_csv, output_bed, config_path):
         # Calculate midpoint
         mid = (min_pos + max_pos) // 2
 
-        # Calculate window
+        # Calculate initial window
         window_start = mid - window_half_size
         window_end = mid + window_half_size
+
+        # Validate and adjust coordinates based on chromosome boundaries
+        if chrom not in chrom_lengths:
+            print(f"Warning: Chromosome {chrom} not found in reference, skipping gene {gene}")
+            skipped += 1
+            continue
+
+        chrom_length = chrom_lengths[chrom]
+
+        # Adjust coordinates to be within chromosome boundaries
+        # Note: Using 1-based coordinates where valid range is [1, chrom_length]
+        if window_start < 1:
+            # Region starts before chromosome start
+            adjustment = 1 - window_start
+            window_start = 1
+            window_end = min(window_end + adjustment, chrom_length)
+            print(f"Info: Adjusted window for {gene} on {chrom} - start was < 1")
+
+        if window_end > chrom_length:
+            # Region extends beyond chromosome end
+            adjustment = window_end - chrom_length
+            window_end = chrom_length
+            window_start = max(window_start - adjustment, 1)
+            print(f"Info: Adjusted window for {gene} on {chrom} - end was > {chrom_length}")
+
+        # Final validation: ensure window is still valid
+        if window_start >= window_end:
+            print(f"Warning: Invalid window coordinates for gene {gene} on {chrom}, skipping")
+            skipped += 1
+            continue
 
         # Convert exons to relative coordinates
         relative_exons = convert_exons_to_relative(exons, window_start)
@@ -190,9 +240,10 @@ def main():
     config_path = "Data/data_config/basal_ganglia_miniatlas_drop_celltype_v1.csv"
     input_csv = "Data/source/DiffExpress/DiffExpress.tss.exons.top1000.csv"
     output_bed = "Data/source/DiffExpress/DiffExpress.tss.exons.top1000.bed"
+    fai_path = "Data/source/hg38/hg38.fa.fai"
 
     # Create BED file
-    create_bed_file(input_csv, output_bed, config_path)
+    create_bed_file(input_csv, output_bed, config_path, fai_path)
 
     print("\nDone!")
 
