@@ -88,7 +88,6 @@ class ModelWrapper(torch.nn.Module):
         self.bin_range = bin_range
 
     def forward(self, x):
-        import pdb; pdb.set_trace()
         output_dict = self.model(x)
         output = output_dict[self.output_key]
         # [batch, N, dim] -> [batch]
