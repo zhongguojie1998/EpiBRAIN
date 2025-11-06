@@ -344,9 +344,8 @@ if [ "$MERGE_ONLY" != "true" ]; then
 
         # Submit SLURM jobs for remaining chunks (starting from SSH_CHUNKS)
         for ((i=$SSH_CHUNKS; i<$CHUNKS; i++)); do
-            # Check if chunk results already exist
-            files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
-            if [ -e "${files[0]}" ]; then
+            # Check if chunk summary file exists (indicates completion)
+            if [ -f "${RESULTS_DIR}/chunk_${i}_summary.txt" ]; then
                 echo "SLURM chunk $i results already exist, skipping job submission"
             else
                 echo "Submitting SLURM job for chunk $i"
@@ -364,9 +363,8 @@ if [ "$MERGE_ONLY" != "true" ]; then
     else
         # SLURM submission
         for ((i=0; i<$CHUNKS; i++)); do
-            # Check if chunk results already exist
-            files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
-            if [ -e "${files[0]}" ]; then
+            # Check if chunk summary file exists (indicates completion)
+            if [ -f "${RESULTS_DIR}/chunk_${i}_summary.txt" ]; then
                 echo "Chunk $i results already exist, skipping job submission"
             else
                 echo "Submitting job for chunk $i"
@@ -414,8 +412,7 @@ if [ "$MERGE_ONLY" != "true" ]; then
 
         completed=0
         for ((i=0; i<$CHUNKS; i++)); do
-            files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
-            if [ -e "${files[0]}" ]; then
+            if [ -f "${RESULTS_DIR}/chunk_${i}_summary.txt" ]; then
                 completed=$((completed + 1))
             fi
         done
@@ -434,8 +431,7 @@ if [ "$MERGE_ONLY" != "true" ]; then
     echo "Verifying all chunks are complete..."
     final_completed=0
     for ((i=0; i<$CHUNKS; i++)); do
-        files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
-        if [ -e "${files[0]}" ]; then
+        if [ -f "${RESULTS_DIR}/chunk_${i}_summary.txt" ]; then
             final_completed=$((final_completed + 1))
         fi
     done
@@ -456,8 +452,7 @@ else
     echo "Verifying all chunks exist before merging..."
     final_completed=0
     for ((i=0; i<$CHUNKS; i++)); do
-        files=(${RESULTS_DIR}/chunk_${i}_part_*.h5)
-        if [ -e "${files[0]}" ]; then
+        if [ -f "${RESULTS_DIR}/chunk_${i}_summary.txt" ]; then
             final_completed=$((final_completed + 1))
         fi
     done

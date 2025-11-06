@@ -639,8 +639,8 @@ def merge_bigwig_files(output_dir, chrom_sizes, per_chrom):
 @click.option("-s", "--split", type=str, default="Test", help="Data split (Train/Valid/Test). Auto-detected from filename when using --pt_file")
 @click.option("--res_base", required=True, default="./Res", help="Results base directory")
 @click.option("--log_base", required=True, default="./logs", help="Logs base directory")
-@click.option("-o", "--output_dir", required=True, type=str, help="Output directory for BigWig files")
-@click.option("-f", "--fasta", "fasta_file", type=str, default=None, help="Reference genome FASTA file")
+@click.option("-o", "--output_dir", required=False, type=str, help="Output directory for BigWig files")
+@click.option("-f", "--fasta", "fasta_file", type=str, default=None, help="Reference genome FASTA file, if not provided, use from log yaml")
 @click.option("--trials", type=str, default=None,
               help="Comma-separated list of trial names to export (default: all trials)")
 @click.option("--per_chrom", is_flag=True, default=False,
@@ -688,6 +688,8 @@ def main(exp_name, chk, pt_file, split, res_base, log_base, output_dir, fasta_fi
     RES_BASE = os.path.abspath(res_base)
 
     # Create output directory
+    if output_dir is None:
+        output_dir = f'{RES_BASE}/{exp_name}/bigwig/'
     os.makedirs(output_dir, exist_ok=True)
 
     # Load label metadata

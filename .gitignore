@@ -16,6 +16,7 @@ westminster
 archive/
 local/
 .history/
+figures/
 
 # symbolic links
 logs

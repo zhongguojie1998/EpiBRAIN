@@ -24,12 +24,6 @@ if [ -z "$PART_NUM" ] || [ -z "$EXP_NAME" ] || [ -z "$CHK_NUM" ]; then
     exit 1
 fi
 
-# Validate part number is between 01-06
-if [[ ! "$PART_NUM" =~ ^0[1-6]$ ]]; then
-    echo "Error: PART_NUM must be between 01 and 06"
-    exit 1
-fi
-
 date;hostname;pwd
 
 export CUDA_HOME=/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN

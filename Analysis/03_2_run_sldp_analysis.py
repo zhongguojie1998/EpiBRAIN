@@ -99,7 +99,7 @@ def main():
         res = h5py.File(input_file, mode='r')
         
         # Extract data
-        tracks = res.attrs["trial_names"]
+        tracks = res["model_meta/trial_names"][:]
         exp_index = res[f"experiments/{exp_key}/index_key"][:]
         all_variant_index = res["variants/index_key"][:]
         exp_reverse_map = res[f"experiments/{exp_key}/reverse_map"][:]
@@ -115,7 +115,7 @@ def main():
         exp_score = exp_score[sort_idx]
         exp_n = exp_n[sort_idx]
         # Calculate variant effects
-        exp_var_score = res["results/variant_effects"][positions, :]
+        exp_var_score = res["results/local_log_square"][positions, :]
         final_score = exp_var_score * (1 - 2 * exp_reverse_map).reshape(-1, 1)
         variant_effects = pd.DataFrame(final_score, columns=tracks)
         
