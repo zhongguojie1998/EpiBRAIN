@@ -77,7 +77,7 @@ class VariantDataset(Dataset):
     def __getitem__(self, idx):
         task_index, chr_name, pos, ref, alt = self.variants[idx]
         if chr_name not in STD_CHR:
-            return None, task_index, "invalid_chr"
+            return None, None, task_index, "invalid_chr"
 
         try:
             token_dict = self.dna_tokenizer(
