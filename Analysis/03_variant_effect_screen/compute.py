@@ -88,7 +88,7 @@ class VariantDataset(Dataset):
 
             wt_nt_fetched = onehot_to_str(wt_seq_onehot[s_idx:e_idx])
             if ref != wt_nt_fetched:
-                return None, task_index, f"ref_mismatch(ref:{ref},get:{wt_nt_fetched})"
+                return None, None, task_index, f"ref_mismatch(ref:{ref},get:{wt_nt_fetched})"
 
             alt_nt_onehot = str_to_one_hot(alt)
             mut_seq_onehot = wt_seq_onehot.clone()
