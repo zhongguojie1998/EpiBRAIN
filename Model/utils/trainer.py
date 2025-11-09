@@ -21,6 +21,7 @@ torch.backends.cudnn.deterministic = True
 
 
 from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSampler, collate_fn
+from data.tokenizer import one_hot_reverse_complement
 from model.model_utils import setup_model, std_pred_head_config
 from utils.logging import LOGGER_PREFIX, TrainingLogger, timer
 from utils.loss import LOSS_DICT
@@ -1096,7 +1097,7 @@ class DNASeqModelTrainer:
         # get and write the metric logs
         # self.metrics.update(tm_metrics.compute())
 
-    def infer_step(self, log_loss=False, save_pred=False, save_method="merge", log_prefix="Valid"):
+    def infer_step(self, log_loss=False, save_pred=False, save_method="merge", log_prefix="Valid", rev_aug=False):
         self.inference_model.eval()
 
         if log_loss:
@@ -1126,6 +1127,71 @@ class DNASeqModelTrainer:
                     self.training_config.use_head,
                     data_parallel_training=True if self.world_size > 1 else False,
                 )
+
+                # Reverse complement augmentation
+                if rev_aug:
+                    # seq_embedding shape: [batch, L, 4] with one-hot encoding [A, C, G, T]
+                    # Use the one_hot_reverse_complement function from tokenizer
+                    seq_embedding_rc = one_hot_reverse_complement(seq_embedding)
+
+                    pred_rc = self.inference_model(
+                        seq_embedding_rc.permute(0, 2, 1),
+                        self.training_config.use_head,
+                        data_parallel_training=True if self.world_size > 1 else False,
+                    )
+
+                    # Average predictions - handle strand-specific RNA tracks
+                    for head_name in pred.keys():
+                        # pred[head_name] has shape [batch, seq_len, features, ...]
+                        # Reverse the sequence dimension (dim 1) of pred_rc
+                        pred_rc_reversed = torch.flip(pred_rc[head_name], dims=[1])
+
+                        # Get label_meta to identify RNAplus and RNAminus tracks
+                        head_data = self.head_data_setting[head_name]
+                        label_meta = head_data["label_meta"]
+
+                        # For RNA, we need to swap plus and minus strands
+                        if "modality" in label_meta.columns:
+                            # Create a copy of forward predictions
+                            averaged_pred = pred[head_name].clone()
+
+                            # Identify plus and minus strand tracks by cell type
+                            for cell_type in label_meta["cell_type"].unique():
+                                # Get RNAplus and RNAminus track indices for this cell type
+                                rnaplus_mask = (label_meta["cell_type"] == cell_type) & (label_meta["modality"] == "RNAplus")
+                                rnaminus_mask = (label_meta["cell_type"] == cell_type) & (label_meta["modality"] == "RNAminus")
+
+                                if rnaplus_mask.any() and rnaminus_mask.any():
+                                    # Get the dimension indices
+                                    rnaplus_dims = label_meta[rnaplus_mask]["dim"].tolist()
+                                    rnaminus_dims = label_meta[rnaminus_mask]["dim"].tolist()
+
+                                    # Swap: forward RNAplus averaged with RC RNAminus
+                                    averaged_pred[:, :, rnaplus_dims] = (
+                                        pred[head_name][:, :, rnaplus_dims] +
+                                        pred_rc_reversed[:, :, rnaminus_dims]
+                                    ) / 2.0
+
+                                    # Swap: forward RNAminus averaged with RC RNAplus
+                                    averaged_pred[:, :, rnaminus_dims] = (
+                                        pred[head_name][:, :, rnaminus_dims] +
+                                        pred_rc_reversed[:, :, rnaplus_dims]
+                                    ) / 2.0
+                                else:
+                                    # For non-strand-specific tracks, just average normally
+                                    other_mask = (label_meta["cell_type"] == cell_type) & \
+                                                ~(label_meta["modality"].isin(["RNAplus", "RNAminus"]))
+                                    if other_mask.any():
+                                        other_dims = label_meta[other_mask]["dim"].tolist()
+                                        averaged_pred[:, :, other_dims] = (
+                                            pred[head_name][:, :, other_dims] +
+                                            pred_rc_reversed[:, :, other_dims]
+                                        ) / 2.0
+
+                            pred[head_name] = averaged_pred
+                        else:
+                            # No modality column, just average normally
+                            pred[head_name] = (pred[head_name] + pred_rc_reversed) / 2.0
 
                 # loss - use new compute_loss function
                 if log_loss:
