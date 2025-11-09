@@ -11,13 +11,49 @@ REQUIRED_COLS = ["rsid", "chr", "pos", "ref", "alt", "index_key"]
 
 def load_enriched_sumstats(csv_path: str):
     """Load enriched summary statistics"""
-    df = pd.read_csv(csv_path, sep="\t", compression="gzip" if csv_path.endswith(".gz") else None)
-
     if csv_path.endswith("vcf") or csv_path.endswith("vcf.gz"):
-        df.rename({"#CHROM": "chr", "POS": "pos", "REF": "ref", "ALT": "alt"}, axis=1, inplace=True)
-        if "rsid" not in df.columns:
+        # Skip lines starting with ## but keep the #CHROM header line
+        import gzip
+        open_func = gzip.open if csv_path.endswith(".gz") else open
+        mode = 'rt' if csv_path.endswith(".gz") else 'r'
+
+        # Count header lines starting with ##
+        skip_lines = []
+        with open_func(csv_path, mode) as f:
+            for i, line in enumerate(f):
+                if line.startswith('##'):
+                    skip_lines.append(i)
+                else:
+                    break
+
+        df = pd.read_csv(
+            csv_path,
+            sep="\t",
+            compression="gzip" if csv_path.endswith(".gz") else None,
+            skiprows=skip_lines
+        )
+        df.rename({"#CHROM": "chr", "POS": "pos", "ID": "rsid", "REF": "ref", "ALT": "alt"}, axis=1, inplace=True)
+        if "rsid" not in df.columns or df["rsid"].isna().all():
             df["rsid"] = "NA"
+
+        # Normalize for consistent index_key generation
+        # Strip whitespace and ensure uppercase for alleles
+        df["chr"] = df["chr"].astype(str).str.strip()
+        df["ref"] = df["ref"].astype(str).str.strip().str.upper()
+        df["alt"] = df["alt"].astype(str).str.strip().str.upper()
+
         df["index_key"] = df["chr"] + ":" + df["pos"].astype("str") + ":" + df["ref"] + ":" + df["alt"]
+    else:
+        df = pd.read_csv(csv_path, sep="\t", compression="gzip" if csv_path.endswith(".gz") else None)
+
+        # Normalize for consistent index_key generation
+        if "chr" in df.columns and "pos" in df.columns and "ref" in df.columns and "alt" in df.columns:
+            df["chr"] = df["chr"].astype(str).str.strip()
+            df["ref"] = df["ref"].astype(str).str.strip().str.upper()
+            df["alt"] = df["alt"].astype(str).str.strip().str.upper()
+
+            # Recreate index_key if it doesn't exist or to ensure consistency
+            df["index_key"] = df["chr"] + ":" + df["pos"].astype("str") + ":" + df["ref"] + ":" + df["alt"]
 
     # Validate required columns
 
@@ -139,6 +175,66 @@ def load_existing_index(h5_path):
     return index_lookup
 
 
+def transfer_existing_predictions(source_h5_path, target_h5_path):
+    """Transfer predictions from an existing HDF5 file to a new one"""
+    if not os.path.exists(source_h5_path):
+        print(f"Source HDF5 file not found: {source_h5_path}")
+        return 0
+
+    print(f"Transferring predictions from {source_h5_path} to {target_h5_path}...")
+
+    transferred_count = 0
+
+    with h5py.File(source_h5_path, "r") as src_f, h5py.File(target_h5_path, "r+") as tgt_f:
+        # Get source and target data
+        src_variants = src_f["variants"]
+        src_results = src_f["results"]
+
+        tgt_variants = tgt_f["variants"]
+        tgt_results = tgt_f["results"]
+
+        # Get score names from target file
+        score_names = tgt_f.attrs.get("score_names", ["raw_diff"])
+
+        # Build index mapping from source to target
+        src_index_keys = src_variants["index_key"][:]
+        src_finished = src_variants["finished"][:]
+
+        tgt_index_keys = tgt_variants["index_key"][:]
+
+        # Create lookup dictionary for target indices
+        print("Building target index lookup...")
+        tgt_index_lookup = {key.decode() if isinstance(key, bytes) else key: idx
+                           for idx, key in enumerate(tgt_index_keys)}
+
+        # Transfer finished predictions
+        print("Transferring finished predictions...")
+        for src_idx, (src_key, is_finished) in enumerate(tqdm(zip(src_index_keys, src_finished),
+                                                              total=len(src_index_keys),
+                                                              desc="Transferring")):
+            if not is_finished:
+                continue
+
+            src_key_str = src_key.decode() if isinstance(src_key, bytes) else src_key
+
+            # Check if this variant exists in target
+            if src_key_str in tgt_index_lookup:
+                tgt_idx = tgt_index_lookup[src_key_str]
+
+                # Copy predictions for each score type
+                for score_name in score_names:
+                    if score_name in src_results and score_name in tgt_results:
+                        tgt_results[score_name][tgt_idx, :] = src_results[score_name][src_idx, :]
+
+                # Mark as finished in target
+                tgt_variants["finished"][tgt_idx] = True
+                transferred_count += 1
+
+        print(f"Transferred {transferred_count} predictions")
+
+    return transferred_count
+
+
 @click.command()
 @click.option("-f", "--enriched_sumstats", help="Path to enriched summary statistics CSV/CSV.GZ file")
 @click.option("-e", "--experiment_name", help="Unique experiment name")
@@ -155,7 +251,11 @@ def load_existing_index(h5_path):
     default=["raw_diff"],
     help="Score names for results_grp (can be used multiple times)",
 )
-def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, force, score_names):
+@click.option(
+    "--load_existing",
+    help="Path to existing HDF5 file to transfer predictions from",
+)
+def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, force, score_names, load_existing):
     """Initialize variant effect analysis from enriched summary statistics"""
 
     # Validate input arguments
@@ -191,7 +291,8 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
         print("Removed existing HDF5 file")
 
     # Initialize or load HDF5
-    if not os.path.exists(hdf5_file):
+    file_was_new = not os.path.exists(hdf5_file)
+    if file_was_new:
         print("Initializing HDF5 structure...")
         trial_names = init_hdf5_structure(hdf5_file, label_meta, list(score_names))
         existing_index = set()
@@ -207,6 +308,11 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
 
     print(f"Existing variants in index: {len(existing_index)}")
     print(f"Score names: {score_names}")
+
+    # Transfer predictions from existing HDF5 file if requested (only if file already existed)
+    if load_existing and not file_was_new:
+        transferred_count = transfer_existing_predictions(load_existing, hdf5_file)
+        print(f"Successfully transferred {transferred_count} predictions from {load_existing}")
 
     # Process each experiment separately to efficiently use existing_index
     new_variant_data = {"index_key": [], "rsid": [], "chr": [], "pos": [], "ref": [], "alt": [], "finished": []}
@@ -300,6 +406,12 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
                 for i in exp_df.columns:
                     exp_data_grp.create_dataset(i, data=exp_df[i].values, compression="gzip")
 
+    # Transfer predictions from existing HDF5 file if it wasn't done earlier (file was newly created)
+    if load_existing and file_was_new:
+        print("\nTransferring predictions from existing HDF5 file...")
+        transferred_count = transfer_existing_predictions(load_existing, hdf5_file)
+        print(f"Successfully transferred {transferred_count} predictions from {load_existing}")
+
     # Summary
     print("\n" + "=" * 60)
     print("INITIALIZATION SUMMARY")
@@ -307,6 +419,8 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
 
     print(f"Total enriched variants: {total_variants}")
     print(f"New variants added to main table: {n_new_variants}")
+    if load_existing:
+        print(f"Predictions transferred from: {load_existing}")
     print(f"HDF5 file: {hdf5_file}")
     print(f"Experiment data stored under: experiments/[experiment_name]")
 

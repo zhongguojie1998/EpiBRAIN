@@ -18,6 +18,7 @@
 #        - "ssh": submit all chunks to SSH machines (each machine gets 4 GPUs)
 #        - "slurm": submit all chunks to SLURM
 #        - "ssh+slurm": submit first N chunks to SSH machines, remaining chunks to SLURM
+# --load_existing is path to existing HDF5 file to transfer predictions from, optional
 # --merge if set, only run the merge step (skip all processing steps)
 
 # Parse command line arguments
@@ -75,6 +76,10 @@ while [[ $# -gt 0 ]]; do
             MERGE_ONLY="true"
             shift 1
             ;;
+        --load_existing)
+            LOAD_EXISTING="$2"
+            shift 2
+            ;;
         *)
             echo "Unknown option $1"
             exit 1
@@ -93,6 +98,9 @@ if [[ "$H5_FILE" != /* ]]; then
 fi
 if [[ "$MODEL_FILE" != /* ]]; then
     MODEL_FILE="$PWD/$MODEL_FILE"
+fi
+if [[ -n "$LOAD_EXISTING" ]] && [[ "$LOAD_EXISTING" != /* ]]; then
+    LOAD_EXISTING="$PWD/$LOAD_EXISTING"
 fi
 
 JOB_SCRIPT_PATH=${JOB_SCRIPT_PATH:-"$(dirname "$H5_FILE")/${H5_BASENAME}_job_script"}
@@ -148,6 +156,14 @@ sync_to_remote() {
     # Sync model file
     echo "  - Syncing model file: $MODEL_FILE -> $machine:$remote_model_file"
     rsync -avz --progress "$MODEL_FILE" "$machine:$remote_model_file" || { echo "Failed to sync model file"; exit 1; }
+
+    # Sync load_existing file if specified
+    if [[ -n "$LOAD_EXISTING" ]] && [[ -f "$LOAD_EXISTING" ]]; then
+        local remote_load_existing=$(translate_path "$LOAD_EXISTING" "$remote_home")
+        echo "  - Syncing load_existing file: $LOAD_EXISTING -> $machine:$remote_load_existing"
+        ssh "$machine" "mkdir -p $(dirname "$remote_load_existing")" || { echo "Failed to create remote load_existing directory"; exit 1; }
+        rsync -avz --progress "$LOAD_EXISTING" "$machine:$remote_load_existing" || { echo "Failed to sync load_existing file"; exit 1; }
+    fi
 
     echo "Sync to $machine completed"
 }
@@ -209,6 +225,11 @@ if [ "$MERGE_ONLY" != "true" ]; then
         FORCE_FLAG="--force"
     fi
 
+    LOAD_EXISTING_FLAG=""
+    if [ -n "$LOAD_EXISTING" ]; then
+        LOAD_EXISTING_FLAG="--load_existing $LOAD_EXISTING"
+    fi
+
     # Only run init_tasks if H5 file doesn't exist or force flag is on
     if [ ! -f "$H5_FILE" ] || [ "$FORCE" = "true" ]; then
         if [ -n "$VCF_FILE" ]; then
@@ -216,13 +237,13 @@ if [ "$MERGE_ONLY" != "true" ]; then
             python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
                 -h5 "$H5_FILE" \
                 -l "$LABEL_META" \
-                -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG
+                -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG $LOAD_EXISTING_FLAG
         else
             # Filelist mode
             python Analysis/03_variant_effect_screen/init_tasks.py -fl "$FILE_LIST" \
                 -h5 "$H5_FILE" \
                 -l "$LABEL_META" \
-                -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG
+                -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG $LOAD_EXISTING_FLAG
         fi
     else
         echo "H5 file already exists and --force not specified. Skipping init_tasks."

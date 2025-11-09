@@ -99,7 +99,7 @@ class VariantDataset(Dataset):
 
             return (wt_seq_onehot, mut_seq_onehot), (wt_seq_onehot_rev, mut_seq_onehot_rev), task_index, None
         except Exception as e:
-            return None, task_index, str(e)
+            return None, None, task_index, str(e)
 
 
 def collate_fn(batch):
