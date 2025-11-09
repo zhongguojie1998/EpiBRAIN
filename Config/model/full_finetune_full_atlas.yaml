@@ -1,0 +1,29 @@
+# full precision Model Setup, no flashatten and autocast
+defaults:
+  - default
+
+model_name: ./Chk/borzoi_pretrain
+
+## technical setup
+flashed: False  # whether to use FlashAttention, in finetune setting, we should disable this
+use_autocast: False  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
+
+## fine tune setting
+
+## Available finetune_method
+### `lora`: low rank approximation, adding some trainable layers to the model and fix the rest (using peft LoraConfig)
+### `finetune_layers`: provide some trainable layers and only train these layers
+### `cont_from_pretrain`: just load the parameters from the pretrained model and continue training 
+finetune_method: cont_from_pretrain
+finetune_param: null
+
+# new output head setting for the model
+output_heads: # set up the prediction head name and trial number
+  use_cell_encoder: True  # whether to use shared cell encoder for the output heads, if True, the output will be calculated as celltype embedding then shared task output, else, directly output separate celltype * modality
+  celltype_hidden_dim: 8  # the dimension of the cell type embedding, if use_cell_encoder is True, this will be used to calculate the cell type embedding
+  cell_encoder_activation: 'none'  # activation function for the cell type encoder
+  regression:
+      track_num: 386
+      celltype_num: 70
+      modality_num: 6 # ATAC, H3K27ac, H3K27me3, H3K9me3, RNA_plus, RNA_minus
+      task: regression # choose from `regression` or `classification`

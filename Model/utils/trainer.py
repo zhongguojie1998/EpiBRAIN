@@ -1097,7 +1097,7 @@ class DNASeqModelTrainer:
         # get and write the metric logs
         # self.metrics.update(tm_metrics.compute())
 
-    def infer_step(self, log_loss=False, save_pred=False, save_method="merge", log_prefix="Valid", rev_aug=False):
+    def infer_step(self, log_loss=False, save_pred=False, save_method="merge", log_prefix="Valid", rev_aug=True):
         self.inference_model.eval()
 
         if log_loss:
@@ -1177,16 +1177,15 @@ class DNASeqModelTrainer:
                                         pred[head_name][:, :, rnaminus_dims] +
                                         pred_rc_reversed[:, :, rnaplus_dims]
                                     ) / 2.0
-                                else:
-                                    # For non-strand-specific tracks, just average normally
-                                    other_mask = (label_meta["cell_type"] == cell_type) & \
-                                                ~(label_meta["modality"].isin(["RNAplus", "RNAminus"]))
-                                    if other_mask.any():
-                                        other_dims = label_meta[other_mask]["dim"].tolist()
-                                        averaged_pred[:, :, other_dims] = (
-                                            pred[head_name][:, :, other_dims] +
-                                            pred_rc_reversed[:, :, other_dims]
-                                        ) / 2.0
+                                # For non-strand-specific tracks, just average normally
+                                other_mask = (label_meta["cell_type"] == cell_type) & \
+                                            ~(label_meta["modality"].isin(["RNAplus", "RNAminus"]))
+                                if other_mask.any():
+                                    other_dims = label_meta[other_mask]["dim"].tolist()
+                                    averaged_pred[:, :, other_dims] = (
+                                        pred[head_name][:, :, other_dims] +
+                                        pred_rc_reversed[:, :, other_dims]
+                                    ) / 2.0
 
                             pred[head_name] = averaged_pred
                         else:
