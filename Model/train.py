@@ -73,8 +73,13 @@ logger = LazyLogger(f"{LOGGER_PREFIX}-Main")
     is_flag=True,
     help="If to just generate the config",
 )
+@click.option(
+    "--rev_aug",
+    is_flag=True,
+    help="If to use reverse complement augmentation during inference (only applicable with test_only mode)",
+)
 @record
-def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_data, bypass_data, only_config):
+def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_data, bypass_data, only_config, rev_aug):
 
     if torchrun and deepspeed:
         raise ValueError("Cannot both enable torchrun and deepspeed")
@@ -97,6 +102,7 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
     ## set up training devices (and logging)
     myconfig.training.torchrun = torchrun
     myconfig.training.deepspeed = deepspeed
+    myconfig.training.rev_aug = rev_aug
     if torchrun or deepspeed:
         ### get world size, gpu id and rank from torchrun (from environment) or deepspeed (from input parameter)
         world_size = int(os.environ.get("WORLD_SIZE", 1))
