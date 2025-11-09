@@ -18,6 +18,62 @@ from sklearn.preprocessing import quantile_transform
 base_cmap = plt.get_cmap("tab20")
 
 
+def untransform_predictions(data, label_meta):
+    """
+    Untransform model predictions back to original scale.
+
+    Reverses the forward transformations applied during data preprocessing:
+    1. Scale multiplication: y = scale * y
+    2. Soft clipping: if y > clip_soft: y = (clip_soft - 1) + sqrt(y - clip_soft + 1)
+    3. Three-quarter power: y = y^(3/4) for sum_three_quarter
+
+    Args:
+        data: numpy array of predictions to untransform
+        scale: scale factor applied in forward transform (default: 1.0)
+        clip_soft: soft clipping threshold (default: 48.0)
+        sum_stat: summary statistic used (default: "sum_three_quarter")
+
+    Returns:
+        Untransformed data in original scale
+    """
+    data = data.copy()
+
+    if label_meta is not None:
+        # do it for each trial based on label_meta
+        for i, row in label_meta.iterrows():
+            trial_scale = row.get('scale', 1.0)
+            trial_clip_soft = row.get('clip_soft', 48.0)
+            trial_sum_stat = row.get('sum_stat', 'sum_three_quarter')
+
+            # Step 1: Undo scale
+            if trial_scale != 1.0:
+                data[:, i] = data[:, i] / trial_scale
+
+            # Step 2: Undo soft clip
+            # Forward: if x > clip_soft: x = (clip_soft - 1) + sqrt(x - clip_soft + 1)
+            # Reverse: if x > clip_soft: x = clip_soft - 1 + (x - (clip_soft - 1))^2
+            if trial_clip_soft is not None:
+                clip_mask = data[:, i] > trial_clip_soft
+                data[clip_mask, i] = (trial_clip_soft - 1) + (data[clip_mask, i] - (trial_clip_soft - 1)) ** 2
+
+            # Step 3: Undo three-quarter power
+            # Forward: x = x^(3/4)
+            # Reverse: x = x^(4/3)
+            if trial_sum_stat == "sum_three_quarter":
+                data[:, i] = data[:, i] ** (4.0 / 3.0)
+            elif trial_sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
+                data[:, i] = (data[:, i] + 1) ** 2 - 1
+            elif trial_sum_stat in ['sum', 'mean', "avg"]:
+                # no transformation applied
+                pass
+            else:
+                raise ValueError(f"Unknown sum_stat: {trial_sum_stat}")
+
+    return data
+
+
+
+
 def apply_transform(data, transform_type="none"):
     """
     Apply transformation to data.
@@ -87,7 +143,7 @@ def calculate_modality_metrics_batch(mod_name, label_data, pred_data):
 @click.option("--log_base", required=True, default="./logs")
 @click.option("--n_processes", type=int, default=None, help="Number of processes to use (default: CPU count)")
 @click.option("--transform", multiple=True, type=click.Choice(['none', 'log', 'log_quantile']),
-              default=['none'], help="Data transformation(s) to apply before calculating correlation (can specify multiple)")
+              default=['none', 'log'], help="Data transformation(s) to apply before calculating correlation (can specify multiple)")
 def main(exp_name, chk, splits, res_base, log_base, n_processes, transform):
     LOG_BASE = os.path.abspath(f"{log_base}/{exp_name}/")
     RES_BASE = os.path.abspath(res_base)
@@ -117,6 +173,9 @@ def main(exp_name, chk, splits, res_base, log_base, n_processes, transform):
             # Convert to numpy arrays to avoid deprecation warnings
             test_label_orig = test_res["label"]['regression'].reshape(-1, test_res["label"]['regression'].shape[-1]).cpu().numpy()
             test_pred_orig = test_res["pred"]['regression'].reshape(-1, test_res["pred"]['regression'].shape[-1]).cpu().numpy()
+            # transform back to original scale
+            test_label_orig = untransform_predictions(test_label_orig, label_meta)
+            test_pred_orig = untransform_predictions(test_pred_orig, label_meta)
 
             # Apply transformation
             print(f"  Applying transform: {trans}")
@@ -177,141 +236,7 @@ def main(exp_name, chk, splits, res_base, log_base, n_processes, transform):
                     metric.loc[mod, "PearsonR:75%"] = np.percentile(pearsonr_vals, 75)
 
             metric.to_csv(metric_file)
-
-    # %% plot (modality level)
-    for split in splits:
-        for trans in transform_list:
-            print(f"Plot metric (modality level) for {split} with transform {trans}")
-
-            pkl_file = f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric_across_celltypes_{trans}.pkl"
-            if not os.path.exists(pkl_file):
-                print(f"Skipping plotting for {split} {trans}: file not found")
-                continue
-
-            with open(pkl_file, "rb") as f:
-                metric_dict = pickle.load(f)
-
-            metric_file = f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric_across_celltypes_{trans}.csv"
-            metric = pd.read_csv(metric_file, index_col=0)
-
-            # prepare data for plotting
-            plot_df = pd.DataFrame(columns=["modality", "PearsonR"])
-            for mod in metric.index:
-                pearsonr_vals = np.array(metric_dict[mod]["pearsonr"])
-                pearsonr_vals = pearsonr_vals[~np.isnan(pearsonr_vals)]
-                temp_df = pd.DataFrame({"modality": [mod]*len(pearsonr_vals), "PearsonR": pearsonr_vals})
-                plot_df = pd.concat([plot_df, temp_df], ignore_index=True)
-
-            # Create figure with adjusted dimensions
-            fig, ax = plt.subplots(figsize=(6, 6))
-
-            # Create violin plot
-            sns.violinplot(
-                y="PearsonR", x="modality", data=plot_df, palette="tab20", inner="quartile", cut=0, ax=ax
-            )
-
-            # add grid line
-            ax.grid(axis="x", linestyle="--", alpha=0.6, color="gray")
-            sns.despine(left=True, bottom=True)
-
-            # Adjust legend position (optional - may not be needed with y-axis labels)
-            ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", borderaxespad=0.0, ncol=1, title="Modality")
-            transform_label = "Raw" if trans == "none" else trans.replace("_", " ").title()
-            ax.set_title(f"Pearson Correlation - {transform_label} ({split} Set)")
-            fig.tight_layout()
-            fig.savefig(
-                f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/{split}_pearsonr_{trans}_across_cell_types.png",
-                dpi=300,
-                bbox_inches="tight",
-            )
-            plt.close(fig)
-            # %% plot correlation between mean/var and pearsonr
-            for stat in ["mean", "var"]:
-                fig, ax = plt.subplots(figsize=(8, 6))
-                for i, mod in enumerate(metric.index):
-                    pearsonr_vals = np.array(metric_dict[mod]["pearsonr"])
-                    pearsonr_vals = pearsonr_vals[~np.isnan(pearsonr_vals)]
-                    if len(pearsonr_vals) == 0:
-                        continue
-                    # Use label stats
-                    label_stats = np.array(metric_dict[mod][f"label_{stat}"])
-                    label_stats = label_stats[~np.isnan(label_stats)]
-                    if len(label_stats) == 0:
-                        continue
-                    # Match lengths by truncating to the shorter array
-                    min_len = min(len(pearsonr_vals), len(label_stats))
-                    pearsonr_vals = pearsonr_vals[:min_len]
-                    label_stats = label_stats[:min_len]
-
-                    ax.scatter(
-                        label_stats,
-                        pearsonr_vals,
-                        color=base_cmap(i),
-                        alpha=0.6,
-                        label=mod,
-                        s=10,
-                    )
-                transform_label = "Raw" if trans == "none" else trans.replace("_", " ").title()
-                ax.set_xlabel(f"Label {stat.capitalize()} ({transform_label})")
-                ax.set_ylabel(f"PearsonR ({transform_label})")
-                ax.set_title(f"PearsonR ({transform_label}) vs Label {stat.capitalize()} ({split} Set)")
-                ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", borderaxespad=0.0, ncol=1, title="Modality")
-                fig.tight_layout()
-                fig.savefig(
-                    f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/{split}_pearsonr_{trans}_vs_label_{stat}.png",
-                    dpi=300,
-                    bbox_inches="tight",
-                )
-                plt.close(fig)
-
-            # %% plot by mean-var and color by pearsonr (separate plots for each modality)
-            for i, mod in enumerate(metric.index):
-                pearsonr_vals = np.array(metric_dict[mod]["pearsonr"])
-                pearsonr_vals = pearsonr_vals[~np.isnan(pearsonr_vals)]
-                if len(pearsonr_vals) == 0:
-                    continue
-                label_means = np.array(metric_dict[mod]["label_mean"])
-                label_means = label_means[~np.isnan(label_means)]
-                if len(label_means) == 0:
-                    continue
-                label_vars = np.array(metric_dict[mod]["label_var"])
-                label_vars = label_vars[~np.isnan(label_vars)]
-                if len(label_vars) == 0:
-                    continue
-                # Match lengths by truncating to the shortest array
-                min_len = min(len(pearsonr_vals), len(label_means), len(label_vars))
-                pearsonr_vals = pearsonr_vals[:min_len]
-                label_means = label_means[:min_len]
-                label_vars = label_vars[:min_len]
-
-                # Create separate plot for this modality
-                fig, ax = plt.subplots(figsize=(10, 8))
-                sc = ax.scatter(
-                    label_means,
-                    label_vars,
-                    c=pearsonr_vals,
-                    cmap="viridis",
-                    alpha=0.6,
-                    s=20,
-                    vmin=-1,
-                    vmax=1,
-                )
-                transform_label = "Raw" if trans == "none" else trans.replace("_", " ").title()
-                ax.set_xlabel(f"Label Mean ({transform_label})")
-                ax.set_ylabel(f"Label Variance ({transform_label})")
-                ax.set_title(f"Label Mean-Variance Colored by PearsonR ({transform_label})\n{mod} ({split} Set)")
-                cbar = plt.colorbar(sc, ax=ax)
-                cbar.set_label("PearsonR")
-                fig.tight_layout()
-
-                # Create safe filename
-                safe_mod = mod.replace('/', '_').replace(' ', '_')
-                fig.savefig(
-                    f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/{split}_{safe_mod}_label_mean_var_colored_by_pearsonr_{trans}.png",
-                    dpi=300,
-                    bbox_inches="tight",
-                )
-                plt.close(fig)
+            print(f"  Saved metrics to {metric_file}")
 
 # %%
 if __name__ == "__main__":

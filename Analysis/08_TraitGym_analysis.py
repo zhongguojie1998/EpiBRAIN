@@ -93,7 +93,7 @@ if __name__ == "__main__":
         print(f"{'='*80}\n")
 
         # %% load bican results
-        bican_h5 = h5py.File(f'Data/source/TraitGym/basal_ganglia_miniatlas_drop_celltype_v1/{trait_type}_traits_test.h5', 'r')
+        bican_h5 = h5py.File(f'Data/source/TraitGym/full_finetune.dim8.chk20/{trait_type}_traits.h5', 'r')
         bican_res = bican_h5['results/log_square'][:]
         bican_info_df = pd.DataFrame({'chr': bican_h5['variants/chr'][:],
                                       'pos': bican_h5['variants/pos'][:],
@@ -220,7 +220,7 @@ if __name__ == "__main__":
 
         # %% read in track annotations
         borzoi_track_anno = pd.read_csv('Data/data_config/borzoi.published.targets.csv', sep=',', index_col=0)
-        bican_track_anno = pd.read_csv('logs/basal_ganglia_miniatlas_drop_celltype_v1/regression_label_meta.csv', sep=',')
+        bican_track_anno = pd.read_csv('logs/full_finetune_original_loss_celltype_head_dim8_linear/regression_label_meta.csv', sep=',')
 
         # %% Parallel AUPRC calculation with per-consequence breakdown
         # Determine which consequence categories to use based on trait type

@@ -35,6 +35,9 @@ SLDP/
 .nfs*
 *.bw
 
+# dot env
+.env
+
 # genomespy
 .genomespy_temp_*.html
 .genomespy_shared/

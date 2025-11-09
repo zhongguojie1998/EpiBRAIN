@@ -1,6 +1,8 @@
 import os
 import warnings
 
+from omegaconf import OmegaConf
+
 warnings.filterwarnings("ignore")
 
 import click
@@ -75,7 +77,7 @@ def calculate_modality_metrics_batch(mod_name, label_data, pred_data):
     return mod_name, (pearsonr_vals_raw, pearsonr_vals_log, label_vars_raw, label_means_raw, label_vars_log, label_means_log)
 
 
-def load_genomic_coordinates(exp_name, split, test_res, bin_size=32):
+def load_genomic_coordinates(sequences_bed, split, test_res, bin_size=32):
     """
     Load genomic coordinates for predictions.
     Loads from Data/{exp_name}/sequences.bed, filters by split, indexes by test_res['index'],
@@ -93,7 +95,6 @@ def load_genomic_coordinates(exp_name, split, test_res, bin_size=32):
     coords: pd.DataFrame with columns ['chr', 'start', 'end'] for each bin
     """
     # Load the full sequences bed file
-    sequences_bed = f"Data/{exp_name}/sequences.bed"
     if not os.path.exists(sequences_bed):
         raise FileNotFoundError(f"Could not find sequences bed file: {sequences_bed}")
 
@@ -231,6 +232,60 @@ def aggregate_predictions_in_regions(bed_regions, coords, labels, preds, aggrega
     return aggregated_labels, aggregated_preds
 
 
+def untransform_predictions(data, label_meta):
+    """
+    Untransform model predictions back to original scale.
+
+    Reverses the forward transformations applied during data preprocessing:
+    1. Scale multiplication: y = scale * y
+    2. Soft clipping: if y > clip_soft: y = (clip_soft - 1) + sqrt(y - clip_soft + 1)
+    3. Three-quarter power: y = y^(3/4) for sum_three_quarter
+
+    Args:
+        data: numpy array of predictions to untransform
+        scale: scale factor applied in forward transform (default: 1.0)
+        clip_soft: soft clipping threshold (default: 48.0)
+        sum_stat: summary statistic used (default: "sum_three_quarter")
+
+    Returns:
+        Untransformed data in original scale
+    """
+    data = data.copy()
+
+    if label_meta is not None:
+        # do it for each trial based on label_meta
+        for i, row in label_meta.iterrows():
+            trial_scale = row.get('scale', 1.0)
+            trial_clip_soft = row.get('clip_soft', 48.0)
+            trial_sum_stat = row.get('sum_stat', 'sum_three_quarter')
+
+            # Step 1: Undo scale
+            if trial_scale != 1.0:
+                data[:, i] = data[:, i] / trial_scale
+
+            # Step 2: Undo soft clip
+            # Forward: if x > clip_soft: x = (clip_soft - 1) + sqrt(x - clip_soft + 1)
+            # Reverse: if x > clip_soft: x = clip_soft - 1 + (x - (clip_soft - 1))^2
+            if trial_clip_soft is not None:
+                clip_mask = data[:, i] > trial_clip_soft
+                data[clip_mask, i] = (trial_clip_soft - 1) + (data[clip_mask, i] - (trial_clip_soft - 1)) ** 2
+
+            # Step 3: Undo three-quarter power
+            # Forward: x = x^(3/4)
+            # Reverse: x = x^(4/3)
+            if trial_sum_stat == "sum_three_quarter":
+                data[:, i] = data[:, i] ** (4.0 / 3.0)
+            elif trial_sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
+                data[:, i] = (data[:, i] + 1) ** 2 - 1
+            elif trial_sum_stat in ['sum', 'mean', "avg"]:
+                # no transformation applied
+                pass
+            else:
+                raise ValueError(f"Unknown sum_stat: {trial_sum_stat}")
+
+    return data
+
+
 @click.command()
 @click.option("-e", "--exp_name", required=True, type=str, help="Experiment name")
 @click.option("--chk", required=True, type=str, help="Checkpoint name")
@@ -238,16 +293,18 @@ def aggregate_predictions_in_regions(bed_regions, coords, labels, preds, aggrega
 @click.option("--res_base", required=True, default="./Res", help="Results base directory")
 @click.option("--log_base", required=True, default="./logs", help="Logs base directory")
 @click.option("--bed_file", required=True, type=str, help="BED file with regions to analyze")
+@click.option("--trials", type=str, default=None, help="Comma-separated list of trial names to export (default: all trials)")
 @click.option("--coord_file", type=str, default=None, help="Coordinate file for predictions (optional, defaults to Data/{exp_name}/sequences.bed)")
 @click.option("--bin_size", type=int, default=32, help="Bin size in bp (default: 32)")
-@click.option("--aggregation", type=str, default="mean", help="Aggregation method: mean, sum, or max")
+@click.option("--aggregation", type=str, default="sum", help="Aggregation method: mean, sum, or max")
 @click.option("--n_processes", type=int, default=None, help="Number of processes to use (default: CPU count)")
-def main(exp_name, chk, splits, res_base, log_base, bed_file, coord_file, bin_size, aggregation, n_processes):
+def main(exp_name, chk, splits, res_base, trials, log_base, bed_file, coord_file, bin_size, aggregation, n_processes):
     LOG_BASE = os.path.abspath(f"{log_base}/{exp_name}/")
     RES_BASE = os.path.abspath(res_base)
 
     bed_basename = os.path.splitext(os.path.basename(bed_file))[0]
     output_dir = f"{RES_BASE}/{exp_name}/analysis_{chk}_bed_{bed_basename}"
+    config = OmegaConf.load(f"{LOG_BASE}/overall_setting.yaml")
     os.makedirs(f"{output_dir}/plot", exist_ok=True)
     os.makedirs(f"{output_dir}/raw_data", exist_ok=True)
 
@@ -277,7 +334,10 @@ def main(exp_name, chk, splits, res_base, log_base, bed_file, coord_file, bin_si
             # Convert to numpy arrays to avoid deprecation warnings
             test_label_full = test_res["label"]['regression'].reshape(-1, test_res["label"]['regression'].shape[-1]).cpu().numpy()
             test_pred_full = test_res["pred"]['regression'].reshape(-1, test_res["pred"]['regression'].shape[-1]).cpu().numpy()
-
+            # Untransform predictions
+            test_label_full = untransform_predictions(test_label_full, label_meta)
+            test_pred_full = untransform_predictions(test_pred_full, label_meta)
+            
             print(f"Loaded predictions: {test_label_full.shape[0]} bins, {test_label_full.shape[1]} cell types (raw)")
 
             # Filter predictions to only include cell types defined in label_meta
@@ -296,7 +356,8 @@ def main(exp_name, chk, splits, res_base, log_base, bed_file, coord_file, bin_si
                 coords['chr'] = coords['chr'].astype(str)
             else:
                 print("Loading coordinates from sequences.bed...")
-                coords = load_genomic_coordinates(exp_name, split, test_res, bin_size=bin_size)
+                sequences_bed_path = f"{config.data.preprocess.storage_path}/sequences.bed"
+                coords = load_genomic_coordinates(sequences_bed_path, split, test_res, bin_size=bin_size)
 
             print(f"Loaded {len(coords)} coordinate entries")
 
@@ -315,6 +376,12 @@ def main(exp_name, chk, splits, res_base, log_base, bed_file, coord_file, bin_si
 
             print(f"Aggregated to {aggregated_label.shape[0]} regions")
 
+            with open(f"{output_dir}/raw_data/{split}_aggregated_pred_bed.pkl", "wb") as f:
+                pickle.dump(aggregated_pred, f)
+                
+            with open(f"{output_dir}/raw_data/{split}_aggregated_label_bed.pkl", "wb") as f:
+                pickle.dump(aggregated_label, f)
+                
             # Initialize metrics dataframe
             metric = pd.DataFrame(index=label_meta["modality"].unique(),
                                   columns=["PearsonR_raw:mean", "PearsonR_raw:std", "PearsonR_raw:median", "PearsonR_raw:25%", "PearsonR_raw:75%",
@@ -323,7 +390,21 @@ def main(exp_name, chk, splits, res_base, log_base, bed_file, coord_file, bin_si
             # Precompute modality indices and prepare batched data
             modality_data = {}
             for mod in metric.index:
+                # Determine which trials to calculate
                 mod_celltypes = label_meta[label_meta["modality"] == mod]
+                if trials is not None:
+                    trial_list = [t.strip() for t in trials.split(',')]
+                    trial_indices = []
+                    for trial_name in trial_list:
+                        matching_trials = mod_celltypes[mod_celltypes['trial'].str.contains(trial_name, na=False)]
+                        if len(matching_trials) > 0:
+                            trial_indices.extend(matching_trials.index.tolist())
+                        else:
+                            print(f"Warning: Trial '{trial_name}' not found in metadata, skipping")
+                else:
+                    trial_list = mod_celltypes['trial'].tolist()
+                    trial_indices = mod_celltypes.index.tolist()
+                mod_celltypes = mod_celltypes.loc[trial_indices]
                 label_indices = mod_celltypes.index.values
                 pred_indices = mod_celltypes.index.values
 

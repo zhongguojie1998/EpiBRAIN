@@ -182,7 +182,7 @@ def untransform_predictions(data, label_meta=None, scale=1.0, clip_soft=48.0, su
 
             # Step 1: Undo scale
             if trial_scale != 1.0:
-                data[:, i] = data[:, i] / trial_scale
+                data[:, :, i] = data[:, :, i] / trial_scale
 
             # Step 2: Undo soft clip
             # Forward: if x > clip_soft: x = (clip_soft - 1) + sqrt(x - clip_soft + 1)
@@ -354,7 +354,7 @@ def make_genes_bed(genes_gtf_file, out_dir, use_span=False):
 
 
 def aggregate_genes_from_predictions(
-    predictions, targets, sequences_bed, genes_bed_file, split, pool_width
+    predictions, targets, label_meta, sequences_bed, genes_bed_file, split, pool_width, filter_to_full_length_gene=True
 ):
     """
     Aggregate predictions and targets by gene.
@@ -403,12 +403,36 @@ def aggregate_genes_from_predictions(
     print("Intersecting sequences with genes...")
     seqs_genes_pr = seqs_pr.join(genes_pr)
 
+    # Filter out genes whose exons are not all in one sequence
+    if filter_to_full_length_gene:
+        print("Filtering genes with all exons in one sequence...")
+        seqs_genes_df = seqs_genes_pr.df
+        # get pairs of sequence-gene
+        seqs_genes_df['ID'] = seqs_genes_df['Chromosome'].astype(str) + ":" + seqs_genes_df['Start'].astype(str) + "-" + seqs_genes_df['End'].astype(str) + "_" + seqs_genes_df['Name_b']
+        # count the number of sequence-gene pairs
+        valid_ids = []
+        for seq_gene_id, count in seqs_genes_df['ID'].value_counts().items():
+            gene = seq_gene_id.split("_")[1]
+            # check the count matches the number of exons for that gene
+            if count == len(genes_pr[genes_pr.Name == gene].df):
+                valid_ids.append(seq_gene_id)
+        print(f"Kept {len(valid_ids)} gene-sequences with all exons in one sequence (filtered {len(seqs_genes_df['ID'].unique()) - len(valid_ids)} genes-sequeces)")
+        # filter seqs_genes_pr to only valid ids
+        seqs_genes_pr = seqs_genes_pr[seqs_genes_df['ID'].isin(valid_ids)]
     # Hash predictions/targets by gene_id
     gene_preds_dict = defaultdict(list)
     gene_targets_dict = defaultdict(list)
 
     n_sequences = predictions.shape[0]
-    n_trials = predictions.shape[2]
+    # get trials for two strands
+    trials_plus_strand = label_meta[label_meta['modality'] != 'RNAplus'].index.to_list()
+    trials_minus_strand = label_meta[label_meta['modality'] != 'RNAminus'].index.to_list()
+    # create a new label_meta with which modality is 'RNA'
+    label_meta_rna = label_meta.iloc[trials_plus_strand].copy()
+    label_meta_rna.loc[label_meta_rna['modality'] == 'RNAminus', 'modality'] = 'RNA'
+    # rename the trials to 'RNA'
+    label_meta_rna.loc[label_meta_rna['modality'] == 'RNAminus', 'trial'] = label_meta_rna.loc[label_meta_rna['modality'] == 'RNAminus', 'trial'].str.replace('RNAminus', 'RNA')
+    n_trials = len(label_meta_rna)
 
     for si in tqdm(range(n_sequences), desc="Processing sequences"):
         seq = seqs_df.iloc[si]
@@ -434,9 +458,13 @@ def aggregate_genes_from_predictions(
             bin_start = int(np.round(gene_seq_start / pool_width))
             bin_end = int(np.round(gene_seq_end / pool_width))
 
-            # Slice gene region
-            yhb = predictions[si, bin_start:bin_end].astype("float32")
-            yb = targets[si, bin_start:bin_end].astype("float32")
+            # Slice gene region, note for RNAminus or RNAplus tracks, we only select one strand based on gene_strand
+            if gene_strand[gene_id] == '+':
+                trials_to_use = trials_plus_strand
+            else:
+                trials_to_use = trials_minus_strand
+            yhb = predictions[si, bin_start:bin_end][:, trials_to_use].astype("float32")
+            yb = targets[si, bin_start:bin_end][:, trials_to_use].astype("float32")
 
             if len(yb) > 0:
                 gene_preds_dict[gene_id].append(yhb)
@@ -489,7 +517,7 @@ def aggregate_genes_from_predictions(
     gene_preds = np.array(gene_preds)
     gene_within = np.array(gene_within)
 
-    return gene_targets, gene_preds, gene_ids, gene_within
+    return gene_targets, gene_preds, gene_ids, gene_within, label_meta_rna
 
 
 @click.command()
@@ -504,7 +532,7 @@ def aggregate_genes_from_predictions(
 @click.option("--pool_width", type=int, default=32, help="Prediction bin width in bp")
 @click.option("-t", "--transform", multiple=True,
               type=click.Choice(['none', 'log', 'quantile', 'log_quantile']),
-              default=['none', 'log', 'log_quantile'],
+              default=['none', 'log'],
               help="Data transformation(s) to apply before calculating correlation")
 @click.option("--no_untransform", is_flag=True, default=False, help="Disable untransforming predictions back to original scale")
 def main(exp_name, chk, splits, res_base, log_base, data_base, genes_gtf, use_span, pool_width, transform, no_untransform):
@@ -530,7 +558,8 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, genes_gtf, use_sp
 
     # Create gene BED file
     print("Creating gene BED file...")
-    genes_bed_file = make_genes_bed(genes_gtf, gene_out_dir, use_span=use_span)
+    # genes_bed_file = make_genes_bed(genes_gtf, gene_out_dir, use_span=use_span)
+    genes_bed_file = f"{gene_out_dir}/genes.bed" # for debug only
     
     # Process each split
     for split in splits:
@@ -560,25 +589,25 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, genes_gtf, use_sp
             targets = untransform_predictions(targets, label_meta=label_meta)
 
         # Aggregate by gene
-        gene_targets, gene_preds, gene_ids, gene_within = aggregate_genes_from_predictions(
-            predictions, targets, sequences_bed_path, genes_bed_file, split, pool_width
+        gene_targets, gene_preds, gene_ids, gene_within, label_meta_rna = aggregate_genes_from_predictions(
+            predictions, targets, label_meta, sequences_bed_path, genes_bed_file, split, pool_width
         )
 
         print(f"Found {len(gene_ids)} genes with predictions")
 
         # Save raw gene values (before log transform)
         genes_targets_df = pd.DataFrame(
-            gene_targets, index=gene_ids, columns=label_meta["trial"]
+            gene_targets, index=gene_ids, columns=label_meta_rna["trial"]
         )
         genes_targets_df.to_csv(f"{gene_out_dir}/raw_data/{split}_gene_targets_raw.tsv", sep="\t")
 
         genes_preds_df = pd.DataFrame(
-            gene_preds, index=gene_ids, columns=label_meta["trial"]
+            gene_preds, index=gene_ids, columns=label_meta_rna["trial"]
         )
         genes_preds_df.to_csv(f"{gene_out_dir}/raw_data/{split}_gene_preds_raw.tsv", sep="\t")
 
         genes_within_df = pd.DataFrame(
-            gene_within, index=gene_ids, columns=label_meta["trial"]
+            gene_within, index=gene_ids, columns=label_meta_rna["trial"]
         )
         genes_within_df.to_csv(f"{gene_out_dir}/raw_data/{split}_gene_within.tsv", sep="\t")
 
@@ -597,7 +626,7 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, genes_gtf, use_sp
             acc_r2 = []
             acc_wpearsonr = []
 
-            for ti in tqdm(range(len(label_meta)), desc=f"  Calculating metrics ({trans})"):
+            for ti in tqdm(range(len(label_meta_rna)), desc=f"  Calculating metrics ({trans})"):
                 # Overall correlation
                 r_ti = pearsonr(gene_targets_trans[:, ti], gene_preds_trans[:, ti])[0]
                 acc_pearsonr.append(r_ti)
@@ -617,9 +646,9 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, genes_gtf, use_sp
             # Create metrics dataframe
             col_suffix = f"_{trans}" if trans != "none" else ""
             metrics_df = pd.DataFrame({
-                "trial": label_meta["trial"],
-                "cell_type": label_meta["trial"].str.rsplit("_", n=1).str[0],
-                "modality": label_meta["trial"].str.rsplit("_", n=1).str[-1],
+                "trial": label_meta_rna["trial"],
+                "cell_type": label_meta_rna["trial"].str.rsplit("_", n=1).str[0],
+                "modality": label_meta_rna["trial"].str.rsplit("_", n=1).str[-1],
                 f"pearsonr{col_suffix}": acc_pearsonr,
                 f"r2{col_suffix}": acc_r2,
                 f"pearsonr_within{col_suffix}": acc_wpearsonr,
