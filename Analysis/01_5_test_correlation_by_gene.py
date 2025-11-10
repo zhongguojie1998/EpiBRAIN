@@ -426,11 +426,12 @@ def aggregate_genes_from_predictions(
         gene_targets_gi = gene_targets_gi.mean(axis=0) / float(pool_width)
 
         # Scale by gene length (is it really necessary in borzoi script?)
-        # gene_preds_gi *= gene_lengths[gene_id]
-        # gene_targets_gi *= gene_lengths[gene_id]
+        # probably yes because we don't know isoform information, some exons might be skipped
+        gene_preds_gi *= gene_lengths[gene_id]
+        gene_targets_gi *= gene_lengths[gene_id]
         # scale to RPKM
-        gene_preds_gi *= 1e3
-        gene_targets_gi *= 1e3
+        # gene_preds_gi *= 1e3
+        # gene_targets_gi *= 1e3
 
         gene_preds.append(gene_preds_gi)
         gene_targets.append(gene_targets_gi)

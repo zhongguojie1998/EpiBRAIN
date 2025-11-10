@@ -17,127 +17,21 @@ Workflow:
 """
 
 import os
+import sys
 import warnings
 
 import click
 import h5py
 import numpy as np
 import pandas as pd
-import gzip
 from intervaltree import IntervalTree
-from tqdm import tqdm
+from joblib import Parallel, delayed
 
 warnings.filterwarnings("ignore")
 
-
-class Exon:
-    """Simple exon class."""
-    def __init__(self, start, end):
-        self.start = start
-        self.end = end
-
-
-class Transcript:
-    """Simple transcript class."""
-    def __init__(self, transcript_id):
-        self.transcript_id = transcript_id
-        self.exons = []
-
-
-class Gene:
-    """Simple gene class."""
-    def __init__(self, gene_id, chrom, strand):
-        self.gene_id = gene_id
-        self.chrom = chrom
-        self.strand = strand
-        self.transcripts = {}
-        self._start = float('inf')
-        self._end = 0
-
-    def add_transcript(self, transcript_id):
-        if transcript_id not in self.transcripts:
-            self.transcripts[transcript_id] = Transcript(transcript_id)
-        return self.transcripts[transcript_id]
-
-    def update_span(self, start, end):
-        self._start = min(self._start, start)
-        self._end = max(self._end, end)
-
-    def span(self):
-        return (self._start, self._end)
-
-
-class GTF:
-    """Simple GTF parser."""
-    def __init__(self, gtf_file):
-        self.genes = {}
-        self._parse_gtf(gtf_file)
-
-    def _parse_gtf(self, gtf_file):
-        """Parse GTF file and extract gene/transcript/exon information."""
-        print(f"Parsing GTF file: {gtf_file}")
-
-        # Handle gzipped files
-        if gtf_file.endswith('.gz'):
-            f = gzip.open(gtf_file, 'rt')
-        else:
-            f = open(gtf_file, 'r')
-
-        for line in f:
-            if line.startswith('#'):
-                continue
-
-            fields = line.strip().split('\t')
-            if len(fields) < 9:
-                continue
-
-            chrom = fields[0]
-            feature = fields[2]
-            start = int(fields[3])
-            end = int(fields[4])
-            strand = fields[6]
-            attributes = fields[8]
-
-            # Parse attributes
-            attr_dict = {}
-            for attr in attributes.split(';'):
-                attr = attr.strip()
-                if not attr:
-                    continue
-                # Handle both "key value" and "key=value" formats
-                if ' "' in attr:
-                    key, value = attr.split(' "', 1)
-                    value = value.rstrip('"')
-                elif '=' in attr:
-                    key, value = attr.split('=', 1)
-                    value = value.strip('"')
-                else:
-                    continue
-                attr_dict[key] = value
-
-            gene_id = attr_dict.get('gene_id', attr_dict.get('gene', None))
-            if not gene_id:
-                continue
-
-            # Create gene if needed
-            if gene_id not in self.genes:
-                self.genes[gene_id] = Gene(gene_id, chrom, strand)
-
-            gene = self.genes[gene_id]
-            gene.update_span(start, end)
-
-            # Handle transcripts and exons
-            if feature in ['transcript', 'exon']:
-                transcript_id = attr_dict.get('transcript_id', attr_dict.get('transcript', None))
-                if transcript_id:
-                    transcript = gene.add_transcript(transcript_id)
-
-                    if feature == 'exon':
-                        exon = Exon(start, end)
-                        transcript.exons.append(exon)
-
-        f.close()
-        print(f"Parsed {len(self.genes)} genes")
+# Import pygene for GTF parsing
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pygene
 
 
 def get_gene_exon_intervals(gene):
@@ -235,9 +129,13 @@ def process_variant_by_gene(variant_h5_path, gtf, label_meta, pool_width=32):
     rna_plus_tracks = []   # List of (idx, trial_name) tuples
 
     for _, row in label_meta.iterrows():
-        if row['modality'] == 'RNAminus':
+        if row['modality'] == 'RNAplus': # 10x RNAplus and RNAminus are reversed
             rna_minus_tracks.append((row['dim'], row['trial']))
-        elif row['modality'] == 'RNAplus':
+        elif row['modality'] == 'RNAminus':
+            rna_plus_tracks.append((row['dim'], row['trial']))
+        else:
+            # append to both for non-RNA modalities
+            rna_minus_tracks.append((row['dim'], row['trial']))
             rna_plus_tracks.append((row['dim'], row['trial']))
 
     if len(rna_minus_tracks) == 0 or len(rna_plus_tracks) == 0:
@@ -248,64 +146,110 @@ def process_variant_by_gene(variant_h5_path, gtf, label_meta, pool_width=32):
 
     # Find genes overlapping this region
     overlapping_genes = []
-    for gene in gtf.genes.values():
+    for gene_id, gene in gtf.genes.items():
         if gene.chrom != chr_name:
             continue
 
         gene_start, gene_end = gene.span()
         # Check if gene overlaps with prediction context
         if not (gene_end <= context_start or gene_start >= context_end):
-            overlapping_genes.append(gene)
+            overlapping_genes.append((gene_id, gene))
 
     print(f"  Found {len(overlapping_genes)} genes overlapping variant region")
 
     # Calculate gene-level effects
     results = []
 
-    for gene in overlapping_genes:
+    for gene_id, gene in overlapping_genes:
         # Get exon intervals
         exon_intervals = get_gene_exon_intervals(gene)
 
         if len(exon_intervals) == 0:
             continue
 
-        # Choose RNA tracks based on strand
+        # Get gene span and calculate TSS
+        gene_start, gene_end = gene.span()
         if gene.strand == '+':
+            tss = gene_start
             tracks_to_use = rna_plus_tracks
         elif gene.strand == '-':
+            tss = gene_end
             tracks_to_use = rna_minus_tracks
         else:
             continue  # Skip genes without strand information
 
-        # Process each track for this gene
-        for track_idx, track_name in tracks_to_use:
-            # Aggregate predictions over exons for ref and alt
-            ref_agg = aggregate_exons_from_prediction(
-                pred_ref[:, [track_idx]], exon_intervals, context_start, context_end, pool_width
-            )
-            alt_agg = aggregate_exons_from_prediction(
-                pred_alt[:, [track_idx]], exon_intervals, context_start, context_end, pool_width
-            )
+        # Calculate distance from variant to TSS (signed: positive if downstream, negative if upstream)
+        distance_to_tss = pos - tss
 
-            if ref_agg is not None and alt_agg is not None:
-                # Calculate variant effect (alt - ref)
-                variant_effect = alt_agg[0] - ref_agg[0]
+        # Get all track indices and names
+        track_indices = [idx for idx, _ in tracks_to_use]
+        track_names = [name for _, name in tracks_to_use]
 
-                results.append({
-                    'chr': chr_name,
-                    'pos': pos,
-                    'ref': ref,
-                    'alt': alt,
-                    'gene_id': gene.gene_id,
-                    'gene_strand': gene.strand,
-                    'track': track_name,
-                    'ref_value': ref_agg[0],
-                    'alt_value': alt_agg[0],
-                    'variant_effect': variant_effect,
-                    'n_exons': len(exon_intervals)
-                })
+        # Aggregate predictions over exons for all tracks at once
+        ref_agg = aggregate_exons_from_prediction(
+            pred_ref[:, track_indices], exon_intervals, context_start, context_end, pool_width
+        )
+        alt_agg = aggregate_exons_from_prediction(
+            pred_alt[:, track_indices], exon_intervals, context_start, context_end, pool_width
+        )
 
-    return pd.DataFrame(results)
+        if ref_agg is not None and alt_agg is not None:
+            # Calculate variant effects for all tracks at once
+            variant_effects = alt_agg - ref_agg
+
+            # Create DataFrame chunk for this gene with all tracks
+            gene_results = pd.DataFrame({
+                'chr': chr_name,
+                'pos': pos,
+                'ref': ref,
+                'alt': alt,
+                'gene_id': gene_id,
+                'gene_strand': gene.strand,
+                'gene_tss': tss,
+                'distance_to_tss': distance_to_tss,
+                'track': track_names,
+                'ref_value': ref_agg,
+                'alt_value': alt_agg,
+                'variant_effect': variant_effects,
+                'n_exons': len(exon_intervals)
+            })
+            results.append(gene_results)
+
+    if len(results) > 0:
+        return pd.concat(results, ignore_index=True)
+    else:
+        return pd.DataFrame()
+
+
+def process_single_variant(variant_info, variant_dir, gtf, label_meta, pool_width):
+    """
+    Process a single variant from the VCF file.
+
+    Args:
+        variant_info: Tuple of (chr_name, pos, ref, alt)
+        variant_dir: Directory containing variant effect h5 files
+        gtf: GTF object with gene annotations
+        label_meta: DataFrame with label metadata
+        pool_width: Width of prediction bins in bp
+
+    Returns:
+        DataFrame with gene-level variant effects for this variant, or None if file not found
+    """
+    chr_name, pos, ref, alt = variant_info
+
+    variant_name = f"{chr_name}_{ref}{pos}{alt}"
+    variant_h5 = f"{variant_dir}/{variant_name}.h5"
+
+    if not os.path.exists(variant_h5):
+        print(f"Warning: Variant file not found: {variant_h5}")
+        return None
+
+    # Process this variant
+    variant_results = process_variant_by_gene(variant_h5, gtf, label_meta, pool_width)
+
+    if len(variant_results) > 0:
+        return variant_results
+    return None
 
 
 @click.command()
@@ -316,8 +260,9 @@ def process_variant_by_gene(variant_h5_path, gtf, label_meta, pool_width=32):
 @click.option("--log_base", required=True, type=str, default="./logs", help="Logs base directory")
 @click.option("--genes_gtf", type=str, default="Data/source/gencode.v48.annotation.gtf.gz", help="Path to genes GTF file")
 @click.option("--pool_width", type=int, default=32, help="Prediction bin width in bp")
-@click.option("--output", "-o", type=str, default=None, help="Output file path (default: <res_base>/<exp_name>/analysis_<chk>/variant_effects_by_gene.tsv)")
-def main(vcf, exp_name, chk, res_base, log_base, genes_gtf, pool_width, output):
+@click.option("--n_jobs", type=int, default=-1, help="Number of parallel jobs (-1 uses all cores)")
+@click.option("--output", "-o", type=str, default=None, help="Output file path (default: <res_base>/<exp_name>/analysis_<chk>/var_eff/variant_effects_by_gene.tsv)")
+def main(vcf, exp_name, chk, res_base, log_base, genes_gtf, pool_width, n_jobs, output):
     """Calculate gene-level variant effects from VCF predictions."""
 
     RES_BASE = os.path.abspath(res_base)
@@ -325,10 +270,10 @@ def main(vcf, exp_name, chk, res_base, log_base, genes_gtf, pool_width, output):
 
     # Set default output path
     if output is None:
-        output = f"{RES_BASE}/{exp_name}/analysis_{chk}/variant_effects_by_gene.tsv"
+        output = f"{RES_BASE}/{exp_name}/analysis_{chk}/var_eff/variant_effects_by_gene.tsv"
 
     print(f"Loading gene annotations from {genes_gtf}...")
-    gtf = GTF(genes_gtf)
+    gtf = pygene.GTF(genes_gtf)
 
     # Load label metadata
     label_meta_path = f"{LOG_BASE}/{exp_name}/regression_label_meta.csv"
@@ -340,28 +285,23 @@ def main(vcf, exp_name, chk, res_base, log_base, genes_gtf, pool_width, output):
     vcf_df = pd.read_csv(vcf, sep="\t", comment='#', header=None)
 
     # Process each variant
-    all_results = []
-    variant_dir = f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/var_eff"
+    variant_dir = f"{RES_BASE}/{exp_name}/analysis_{chk}/var_eff/raw_data/"
 
-    print(f"\nProcessing {len(vcf_df)} variants...")
-    for i in tqdm(range(len(vcf_df)), desc="Processing variants"):
-        chr_name = vcf_df.iloc[i, 0]
-        pos = vcf_df.iloc[i, 1]
-        ref = vcf_df.iloc[i, 3]
-        alt = vcf_df.iloc[i, 4]
+    # Prepare variant information list
+    variant_infos = [
+        (vcf_df.iloc[i, 0], vcf_df.iloc[i, 1], vcf_df.iloc[i, 3], vcf_df.iloc[i, 4])
+        for i in range(len(vcf_df))
+    ]
 
-        variant_name = f"{chr_name}_{ref}{pos}{alt}"
-        variant_h5 = f"{variant_dir}/{variant_name}.h5"
+    print(f"\nProcessing {len(variant_infos)} variants in parallel with {n_jobs} jobs...")
+    # Process variants in parallel
+    all_results = Parallel(n_jobs=n_jobs, verbose=10)(
+        delayed(process_single_variant)(variant_info, variant_dir, gtf, label_meta, pool_width)
+        for variant_info in variant_infos
+    )
 
-        if not os.path.exists(variant_h5):
-            print(f"Warning: Variant file not found: {variant_h5}")
-            continue
-
-        # Process this variant
-        variant_results = process_variant_by_gene(variant_h5, gtf, label_meta, pool_width)
-
-        if len(variant_results) > 0:
-            all_results.append(variant_results)
+    # Filter out None results
+    all_results = [result for result in all_results if result is not None]
 
     # Combine all results
     if len(all_results) > 0:
