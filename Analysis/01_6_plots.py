@@ -137,11 +137,11 @@ for ti in range(gene_target_rna.shape[1]):
 # log transform
 gene_pred_rna_log = np.log1p(gene_pred_rna)
 gene_target_rna_log = np.log1p(gene_target_rna)
-# remove genes that low expressed in all cell types (average log count in target < 0.1)
-mean_log_counts = gene_target_rna_log.mean(axis=1)
-genes_to_keep = mean_log_counts[mean_log_counts >= 1].index
-gene_pred_rna_log = gene_pred_rna_log.loc[genes_to_keep]
-gene_target_rna_log = gene_target_rna_log.loc[genes_to_keep]
+# # remove genes that low expressed in all cell types (average log count in target < 0.1)
+# mean_log_counts = gene_target_rna_log.mean(axis=1)
+# genes_to_keep = mean_log_counts[mean_log_counts >= 1].index
+# gene_pred_rna_log = gene_pred_rna_log.loc[genes_to_keep]
+# gene_target_rna_log = gene_target_rna_log.loc[genes_to_keep]
 # %% pick variable genes or differentially expressed genes
 variable_genes = pd.read_csv('Data/source/DiffExpress/MiniAtlas_RNA_merged_dual_filt_clean_corrected_250529.var.feature', header=None)[0].tolist()
 diffexp = pd.read_csv('Data/source/DiffExpress/subclass_corrected_edgeR.dds')
@@ -253,8 +253,9 @@ for ct, group in pearsonr_df.groupby('cell_type_group'):
 sns.histplot(data=pearsonr_df, x='PearsonR', hue='cell_type_group: avg', ax=ax, fill=False, bins=20, alpha=1)
 
 # %% calculate the correlation for each gene across all tracks
+transform_to_use = 'log'  # options: 'log_fc' or 'quantile_centered' or 'log'
 gene_pearsonr_values = {}
-for gene in gene_pred_rna_log_fc.index:
+for gene in gene_pred_rna_log.index:
     if transform_to_use == 'quantile_centered':
         gene_pred_values = gene_pred_rna_quantile_centered.loc[gene]
         gene_target_values = gene_target_rna_quantile_centered.loc[gene]
@@ -273,6 +274,44 @@ for gene in gene_pred_rna_log_fc.index:
         'mean': gene_mean_expression,
         'variance': gene_variance_expression
     }
+# plot
+gene_pearsonr_df = pd.DataFrame.from_dict(gene_pearsonr_values, orient='index')
+fig, ax = plt.subplots(ncols=2, figsize=(10, 4), gridspec_kw={'wspace': 0.4})
+sns.kdeplot(data=gene_pearsonr_df, x='mean', y='pearsonr', 
+            ax=ax[0], fill=True, cmap='Blues', levels=20, thresh=0.05)
+ax[0].set_xlabel('Mean Expression Level (log counts)')
+ax[0].set_ylabel('PearsonR across Cell Types')
+ax[0].set_title('All Genes')
+sns.kdeplot(data=gene_pearsonr_df[gene_pearsonr_df['mean'] >= 1], x='mean', y='pearsonr', 
+            ax=ax[1], fill=True, cmap='Oranges', levels=20, thresh=0.05)
+ax[1].set_xlabel('Mean of Expression Level (log counts)')
+ax[1].set_ylabel('PearsonR across Cell Types')
+ax[1].set_title('Genes with Mean Expression >= 1')
+fig.savefig('figures/celltype_head/Gene_level_PearsonR_vs_mean_expression_logcounts.pdf')
+# kde on pearsonr only
+fig, ax = plt.subplots(figsize=(6, 4))
+gene_pearsonr_df['Expression Level Group'] = pd.cut(gene_pearsonr_df['mean'], bins=[-np.inf, 1, 3, 5, np.inf], labels=['Low (<1)', 'Medium (1-3)', 'High (3-5)', 'Very High (>5)'])
+# Define consistent color palette for each group
+group_colors = {
+    'Low (<1)': '#4575b4',
+    'Medium (1-3)': '#91bfdb',
+    'High (3-5)': '#fc8d59',
+    'Very High (>5)': '#d73027'
+}
+sns.kdeplot(data=gene_pearsonr_df, x='pearsonr', ax=ax, hue='Expression Level Group', fill=True, alpha=0.2, palette=group_colors, common_norm=False, legend=False)
+ax.set_xlabel('PearsonR across Cell Types')
+# add text on average pearsonr
+mean_pearsonr = gene_pearsonr_df['pearsonr'].mean()
+ax.text(0.02, 0.95, f'Average PearsonR: {mean_pearsonr:.4f}', transform=ax.transAxes, fontsize=10, verticalalignment='top', color='black', fontweight='bold')
+ax.text(0.02, 0.90, 'Avg Expression Level:', transform=ax.transAxes, fontsize=10, verticalalignment='top', color='gray', fontweight='bold')
+# for each expression level group, add average pearsonr with matching colors
+for i, (group, group_df) in enumerate(gene_pearsonr_df.groupby('Expression Level Group')):
+    group_mean_pearsonr = group_df['pearsonr'].mean()
+    n_genes = len(group_df)
+    ax.text(0.02, 0.85 - i*0.05, f'{group}: μ = {group_mean_pearsonr:.2f} (n={n_genes})', transform=ax.transAxes, fontsize=10, verticalalignment='top', color=group_colors[group])
+ax.set_title('Gene-level PearsonR Density across Cell Types')
+fig.savefig('figures/celltype_head/Gene_level_PearsonR_density_across_cell_types.pdf')
+
 
 # %% visualize one track
 track_to_visualize = 'MiniAtlas-PV-CHC_RNAminus'

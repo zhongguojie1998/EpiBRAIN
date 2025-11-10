@@ -24,6 +24,7 @@ import click
 import h5py
 import numpy as np
 import pandas as pd
+import pyranges as pr
 from intervaltree import IntervalTree
 from joblib import Parallel, delayed
 
@@ -32,6 +33,31 @@ warnings.filterwarnings("ignore")
 # Import pygene for GTF parsing
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pygene
+
+
+def create_genes_pyranges(gtf):
+    """
+    Create a PyRanges object from GTF genes for efficient overlap queries.
+
+    Args:
+        gtf: pygene.GTF object
+
+    Returns:
+        PyRanges object with gene spans
+    """
+    gene_data = []
+    for gene_id, gene in gtf.genes.items():
+        gene_start, gene_end = gene.span()
+        gene_data.append({
+            'Chromosome': gene.chrom,
+            'Start': gene_start - 1,  # Convert to 0-based
+            'End': gene_end,
+            'gene_id': gene_id,
+            'Strand': gene.strand
+        })
+
+    genes_df = pd.DataFrame(gene_data)
+    return pr.PyRanges(genes_df)
 
 
 def get_gene_exon_intervals(gene):
@@ -100,13 +126,14 @@ def aggregate_exons_from_prediction(prediction, exon_intervals, context_start, c
         return None
 
 
-def process_variant_by_gene(variant_h5_path, gtf, label_meta, pool_width=32):
+def process_variant_by_gene(variant_h5_path, gtf, genes_pr, label_meta, pool_width=32):
     """
     Process a single variant and calculate gene-level effects.
 
     Args:
         variant_h5_path: Path to variant effect h5 file
         gtf: GTF object with gene annotations
+        genes_pr: PyRanges object with gene spans for efficient overlap queries
         label_meta: DataFrame with label metadata (must have 'modality' and 'trial' columns)
         pool_width: Width of prediction bins in bp (default: 32)
 
@@ -142,18 +169,24 @@ def process_variant_by_gene(variant_h5_path, gtf, label_meta, pool_width=32):
         print(f"Warning: Could not find RNAminus or RNAplus tracks in label metadata")
         return pd.DataFrame()
 
-    print(f"  Found {len(rna_minus_tracks)} RNAminus tracks and {len(rna_plus_tracks)} RNAplus tracks")
+    # print(f"  Found {len(rna_minus_tracks)} RNAminus tracks and {len(rna_plus_tracks)} RNAplus tracks")
 
-    # Find genes overlapping this region
-    overlapping_genes = []
-    for gene_id, gene in gtf.genes.items():
-        if gene.chrom != chr_name:
-            continue
+    # Find genes overlapping this region using PyRanges
+    variant_pr = pr.PyRanges(pd.DataFrame({
+        'Chromosome': [chr_name],
+        'Start': [context_start],
+        'End': [context_end]
+    }))
 
-        gene_start, gene_end = gene.span()
-        # Check if gene overlaps with prediction context
-        if not (gene_end <= context_start or gene_start >= context_end):
-            overlapping_genes.append((gene_id, gene))
+    # Get overlapping genes
+    overlapping_pr = genes_pr.overlap(variant_pr)
+
+    if len(overlapping_pr) == 0:
+        print(f"  Found 0 genes overlapping variant region")
+        return pd.DataFrame()
+
+    overlapping_gene_ids = overlapping_pr.df['gene_id'].tolist()
+    overlapping_genes = [(gene_id, gtf.genes[gene_id]) for gene_id in overlapping_gene_ids]
 
     print(f"  Found {len(overlapping_genes)} genes overlapping variant region")
 
@@ -221,20 +254,27 @@ def process_variant_by_gene(variant_h5_path, gtf, label_meta, pool_width=32):
         return pd.DataFrame()
 
 
-def process_single_variant(variant_info, variant_dir, gtf, label_meta, pool_width):
+# Global variables shared across worker threads
+_worker_gtf = None
+_worker_genes_pr = None
+
+
+def process_single_variant(variant_info, variant_dir, label_meta, pool_width):
     """
     Process a single variant from the VCF file.
+    Uses global _worker_gtf and _worker_genes_pr initialized in main process.
 
     Args:
         variant_info: Tuple of (chr_name, pos, ref, alt)
         variant_dir: Directory containing variant effect h5 files
-        gtf: GTF object with gene annotations
         label_meta: DataFrame with label metadata
         pool_width: Width of prediction bins in bp
 
     Returns:
         DataFrame with gene-level variant effects for this variant, or None if file not found
     """
+    global _worker_gtf, _worker_genes_pr
+
     chr_name, pos, ref, alt = variant_info
 
     variant_name = f"{chr_name}_{ref}{pos}{alt}"
@@ -244,8 +284,8 @@ def process_single_variant(variant_info, variant_dir, gtf, label_meta, pool_widt
         print(f"Warning: Variant file not found: {variant_h5}")
         return None
 
-    # Process this variant
-    variant_results = process_variant_by_gene(variant_h5, gtf, label_meta, pool_width)
+    # Process this variant using global worker variables
+    variant_results = process_variant_by_gene(variant_h5, _worker_gtf, _worker_genes_pr, label_meta, pool_width)
 
     if len(variant_results) > 0:
         return variant_results
@@ -272,8 +312,12 @@ def main(vcf, exp_name, chk, res_base, log_base, genes_gtf, pool_width, n_jobs, 
     if output is None:
         output = f"{RES_BASE}/{exp_name}/analysis_{chk}/var_eff/variant_effects_by_gene.tsv"
 
+    # Initialize GTF in main process (will be shared with worker threads)
     print(f"Loading gene annotations from {genes_gtf}...")
-    gtf = pygene.GTF(genes_gtf)
+    global _worker_gtf, _worker_genes_pr
+    _worker_gtf = pygene.GTF(genes_gtf)
+    print("Creating PyRanges object for efficient gene overlap queries...")
+    _worker_genes_pr = create_genes_pyranges(_worker_gtf)
 
     # Load label metadata
     label_meta_path = f"{LOG_BASE}/{exp_name}/regression_label_meta.csv"
@@ -294,9 +338,13 @@ def main(vcf, exp_name, chk, res_base, log_base, genes_gtf, pool_width, n_jobs, 
     ]
 
     print(f"\nProcessing {len(variant_infos)} variants in parallel with {n_jobs} jobs...")
-    # Process variants in parallel
-    all_results = Parallel(n_jobs=n_jobs, verbose=10)(
-        delayed(process_single_variant)(variant_info, variant_dir, gtf, label_meta, pool_width)
+    # Process variants in parallel using threading backend (shares memory)
+    all_results = Parallel(
+        n_jobs=n_jobs,
+        verbose=10,
+        require='sharedmem'
+    )(
+        delayed(process_single_variant)(variant_info, variant_dir, label_meta, pool_width)
         for variant_info in variant_infos
     )
 
