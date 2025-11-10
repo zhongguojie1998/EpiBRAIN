@@ -144,7 +144,8 @@ def calculate_modality_metrics_batch(mod_name, label_data, pred_data):
 @click.option("--n_processes", type=int, default=None, help="Number of processes to use (default: CPU count)")
 @click.option("--transform", multiple=True, type=click.Choice(['none', 'log', 'log_quantile']),
               default=['none', 'log'], help="Data transformation(s) to apply before calculating correlation (can specify multiple)")
-def main(exp_name, chk, splits, res_base, log_base, n_processes, transform):
+@click.option("--force_restart", is_flag=True, default=False, help="Force restart: skip checking for existing results and recompute everything")
+def main(exp_name, chk, splits, res_base, log_base, n_processes, transform, force_restart):
     LOG_BASE = os.path.abspath(f"{log_base}/{exp_name}/")
     RES_BASE = os.path.abspath(res_base)
 
@@ -164,8 +165,8 @@ def main(exp_name, chk, splits, res_base, log_base, n_processes, transform):
     for split in splits:
         for trans in transform_list:
             metric_file = f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/{split}_metric_across_celltypes_{trans}.csv"
-            if os.path.exists(metric_file):
-                print(f"Skipping {split} with transform {trans}: file already exists")
+            if not force_restart and os.path.exists(metric_file):
+                print(f"Skipping {split} with transform {trans}: file already exists (use --force_restart to recompute)")
                 continue
             print(f"Calculate metric for {split}")
 

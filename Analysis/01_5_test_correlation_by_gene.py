@@ -273,7 +273,7 @@ def make_genes_span(
     
     
 def aggregate_genes_from_predictions(
-    predictions, targets, label_meta, sequences_bed, genes_bed_file, split, pool_width, filter_to_full_length_gene=True
+    predictions, targets, label_meta, sequences_bed, genes_bed_file, split, pool_width, filter_to_full_length_gene=True, gene_scale='length'
 ):
     """
     Aggregate predictions and targets by gene.
@@ -285,10 +285,8 @@ def aggregate_genes_from_predictions(
         genes_bed_file: Path to genes BED file
         split: Dataset split name (e.g., 'test')
         pool_width: Width of each prediction bin in bp
-        untransform: Whether to untransform predictions/targets (default: True)
-        scale: Scale factor for untransform (default: 1.0)
-        clip_soft: Soft clipping threshold for untransform (default: 48.0)
-        sum_stat: Summary statistic used in preprocessing (default: "sum_three_quarter")
+        filter_to_full_length_gene: Whether to filter genes with all exons in one sequence
+        gene_scale: Gene scaling method - 'length', 'rpkm', or 'none'
 
     Returns:
         gene_targets: Array of gene-level target values (n_genes, n_trials)
@@ -425,13 +423,18 @@ def aggregate_genes_from_predictions(
         gene_preds_gi = gene_preds_gi.mean(axis=0) / float(pool_width)
         gene_targets_gi = gene_targets_gi.mean(axis=0) / float(pool_width)
 
-        # Scale by gene length (is it really necessary in borzoi script?)
-        # probably yes because we don't know isoform information, some exons might be skipped
-        gene_preds_gi *= gene_lengths[gene_id]
-        gene_targets_gi *= gene_lengths[gene_id]
-        # scale to RPKM
-        # gene_preds_gi *= 1e3
-        # gene_targets_gi *= 1e3
+        # Apply gene scaling based on gene_scale parameter
+        if gene_scale == 'length':
+            # Scale by gene length
+            # Necessary because we don't know isoform information, some exons might be skipped
+            gene_preds_gi *= gene_lengths[gene_id]
+            gene_targets_gi *= gene_lengths[gene_id]
+        elif gene_scale == 'rpkm':
+            # Scale to RPKM (Reads Per Kilobase per Million mapped reads)
+            # RPKM = (coverage * 1000) where coverage is already per-bp
+            gene_preds_gi *= 1e3
+            gene_targets_gi *= 1e3
+        # elif gene_scale == 'none': no scaling applied
 
         gene_preds.append(gene_preds_gi)
         gene_targets.append(gene_targets_gi)
@@ -458,7 +461,8 @@ def aggregate_genes_from_predictions(
               default=['none', 'log'],
               help="Data transformation(s) to apply before calculating correlation")
 @click.option("--no_untransform", is_flag=True, default=False, help="Disable untransforming predictions back to original scale")
-def main(exp_name, chk, splits, res_base, log_base, data_base, genes_gtf, use_span, pool_width, transform, no_untransform):
+@click.option("--gene_scale", type=click.Choice(['length', 'rpkm', 'none']), default='length', help="Gene scaling method: 'length' (scale by gene length), 'rpkm' (RPKM scaling), or 'none' (no scaling)")
+def main(exp_name, chk, splits, res_base, log_base, data_base, genes_gtf, use_span, pool_width, transform, no_untransform, gene_scale):
     """Calculate gene-level correlation metrics for model predictions."""
 
     LOG_BASE = os.path.abspath(f"{log_base}/{exp_name}/")
@@ -478,6 +482,7 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, genes_gtf, use_sp
     # Convert transform tuple to list
     transform_list = list(transform)
     print(f"Using transformations: {transform_list}")
+    print(f"Using gene scaling method: {gene_scale}")
 
     # Create gene BED file
     print("Creating gene BED file...")
@@ -516,7 +521,7 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, genes_gtf, use_sp
 
         # Aggregate by gene
         gene_targets, gene_preds, gene_ids, gene_within, label_meta_rna = aggregate_genes_from_predictions(
-            predictions, targets, label_meta, sequences_bed_path, genes_bed_file, split, pool_width
+            predictions, targets, label_meta, sequences_bed_path, genes_bed_file, split, pool_width, gene_scale=gene_scale
         )
 
         print(f"Found {len(gene_ids)} genes with predictions")
@@ -525,17 +530,17 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, genes_gtf, use_sp
         genes_targets_df = pd.DataFrame(
             gene_targets, index=gene_ids, columns=label_meta_rna["trial"]
         )
-        genes_targets_df.to_csv(f"{gene_out_dir}/raw_data/{split}_gene_targets_raw.tsv", sep="\t")
+        genes_targets_df.to_csv(f"{gene_out_dir}/raw_data/{split}_gene_targets_raw_{gene_scale}.tsv", sep="\t")
 
         genes_preds_df = pd.DataFrame(
             gene_preds, index=gene_ids, columns=label_meta_rna["trial"]
         )
-        genes_preds_df.to_csv(f"{gene_out_dir}/raw_data/{split}_gene_preds_raw.tsv", sep="\t")
+        genes_preds_df.to_csv(f"{gene_out_dir}/raw_data/{split}_gene_preds_raw_{gene_scale}.tsv", sep="\t")
 
         genes_within_df = pd.DataFrame(
             gene_within, index=gene_ids, columns=label_meta_rna["trial"]
         )
-        genes_within_df.to_csv(f"{gene_out_dir}/raw_data/{split}_gene_within.tsv", sep="\t")
+        genes_within_df.to_csv(f"{gene_out_dir}/raw_data/{split}_gene_within_{gene_scale}.tsv", sep="\t")
 
         # Calculate metrics for each transformation
         all_metrics = []
@@ -595,7 +600,7 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, genes_gtf, use_sp
             )
 
         # Save metrics
-        metric_file = f"{gene_out_dir}/raw_data/{split}_gene_metrics.csv"
+        metric_file = f"{gene_out_dir}/raw_data/{split}_gene_metrics_{gene_scale}.csv"
         final_metrics.to_csv(metric_file, index=False)
         print(f"\nSaved metrics to: {metric_file}")
 

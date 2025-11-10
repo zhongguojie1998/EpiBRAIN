@@ -187,7 +187,7 @@ def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, proces
     CHK_BASE = os.path.abspath(chk_base)
     RES_BASE = os.path.abspath(res_base)
 
-    os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/var_eff", exist_ok=True)
+    os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/var_eff/raw_data/", exist_ok=True)
 
     logger = BaseLogger(name="Variant Effect", level=logging.INFO)
 
@@ -198,7 +198,7 @@ def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, proces
         chr_name, pos, ref, alt = vcf_file.iloc[i, [0, 1, 3, 4]]
         name_base = f"{chr_name}_{ref}{pos}{alt}"
         todo = (
-            not os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/var_eff/{name_base}.h5")
+            not os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/var_eff/raw_data/{name_base}.h5")
             or force_restart
         )
         vcf_df.loc[i] = [chr_name, pos, ref, alt, todo]
@@ -285,7 +285,7 @@ def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, proces
             chunk,
             f"{LOG_BASE}/{exp_name}/overall_setting.yaml",
             f"{CHK_BASE}/{exp_name}/chk_epoch_{chk}.pt",
-            f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/var_eff",
+            f"{RES_BASE}/{exp_name}/analysis_{chk}/var_eff/raw_data",
             device,
             use_head,
         )

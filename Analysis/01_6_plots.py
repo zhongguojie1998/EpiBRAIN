@@ -110,30 +110,32 @@ for res, use_celltype_head in zip([gene_level_results, gene_level_results_orig],
         res.loc[res['atlas_name'] == atlas_name, 'atlas_name: avg'] = atlas_label
     sns.histplot(data=res, x='pearsonr_log', hue='atlas_name: avg', ax=ax, fill=True, alpha=1, bins=20)
     if use_celltype_head:
-        ax.set_title('Density plot of PearsonR on Test dataset')
+        ax.set_title('Histogram plot of PearsonR on Test dataset')
     else:
-        ax.set_title('Density plot of PearsonR on Test dataset (No cell type head)')
+        ax.set_title('Histogram plot of PearsonR on Test dataset (No cell type head)')
     fig.tight_layout()
     save_dir = 'figures/' + ('celltype_head/' if use_celltype_head else 'original/')
-    fig.savefig(save_dir + 'Gene_level_PearsonR_density_RNA_by_atlas.pdf')
+    fig.savefig(save_dir + 'Gene_level_PearsonR_histogram_RNA_by_atlas.pdf')
 
 
 # %% get gene level raw counts
-gene_pred_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_preds_raw.tsv', index_col=0, sep='\t')
-gene_target_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_targets_raw.tsv', index_col=0, sep='\t')
+gene_pred_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_preds_raw_length.tsv', index_col=0, sep='\t')
+gene_target_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_targets_raw_length.tsv', index_col=0, sep='\t')
 # filter to RNA tracks
 rna_tracks = gene_pred_raw.columns[gene_pred_raw.columns.str.contains('RNA')]
+basalganglia_tracks = [c for c in rna_tracks if 'BasalGanglia' in c]
+miniatlas_tracks = [c for c in rna_tracks if 'MiniAtlas' in c]
 gene_pred_rna = gene_pred_raw[rna_tracks]
 gene_target_rna = gene_target_raw[rna_tracks]
 # add pseudo coverage
-pseudo_qtl= 0.05
-for ti in range(gene_target_rna.shape[1]):
-    nonzero_index = np.nonzero(gene_target_rna.iloc[:, ti] != 0.)[0]
-
-    pseudo_t = np.quantile(gene_target_rna.iloc[:, ti][nonzero_index], q=pseudo_qtl)
-    pseudo_p = np.quantile(gene_pred_rna.iloc[:, ti][nonzero_index], q=pseudo_qtl)
-    gene_target_rna.iloc[:, ti] += pseudo_t
-    gene_pred_rna.iloc[:, ti] += pseudo_p
+def add_pseudo_coverage(gene_rna, pseudo_qtl=0.05):
+    for ti in range(gene_rna.shape[1]):
+        nonzero_index = np.nonzero(gene_rna.iloc[:, ti] != 0.)[0]
+        pseudo_t = np.quantile(gene_rna.iloc[:, ti][nonzero_index], q=pseudo_qtl)
+        gene_rna.iloc[:, ti] += pseudo_t
+    return gene_rna
+gene_target_rna = add_pseudo_coverage(gene_target_rna, pseudo_qtl=0.05)
+gene_pred_rna = add_pseudo_coverage(gene_pred_rna, pseudo_qtl=0.05)
 # log transform
 gene_pred_rna_log = np.log1p(gene_pred_rna)
 gene_target_rna_log = np.log1p(gene_target_rna)
@@ -253,18 +255,24 @@ for ct, group in pearsonr_df.groupby('cell_type_group'):
 sns.histplot(data=pearsonr_df, x='PearsonR', hue='cell_type_group: avg', ax=ax, fill=False, bins=20, alpha=1)
 
 # %% calculate the correlation for each gene across all tracks
-transform_to_use = 'log'  # options: 'log_fc' or 'quantile_centered' or 'log'
+gene_pred_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_preds_raw_rpkm.tsv', index_col=0, sep='\t')
+gene_target_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_targets_raw_rpkm.tsv', index_col=0, sep='\t')
+# filter to RNA tracks
+rna_tracks = gene_pred_raw.columns[gene_pred_raw.columns.str.contains('RNA')]
+basalganglia_tracks = [c for c in rna_tracks if 'BasalGanglia' in c]
+miniatlas_tracks = [c for c in rna_tracks if 'MiniAtlas' in c]
+gene_pred_rna = gene_pred_raw[rna_tracks]
+gene_target_rna = gene_target_raw[rna_tracks]
+# add pseudo coverage
+gene_target_rna = add_pseudo_coverage(gene_target_rna, pseudo_qtl=0.05)
+gene_pred_rna = add_pseudo_coverage(gene_pred_rna, pseudo_qtl=0.05)
+# log transform
+gene_pred_rna_log = np.log1p(gene_pred_rna)
+gene_target_rna_log = np.log1p(gene_target_rna)
 gene_pearsonr_values = {}
 for gene in gene_pred_rna_log.index:
-    if transform_to_use == 'quantile_centered':
-        gene_pred_values = gene_pred_rna_quantile_centered.loc[gene]
-        gene_target_values = gene_target_rna_quantile_centered.loc[gene]
-    elif transform_to_use == 'log_fc':
-        gene_pred_values = gene_pred_rna_log_fc.loc[gene]
-        gene_target_values = gene_target_rna_log_fc.loc[gene]
-    else:
-        gene_pred_values = gene_pred_rna_log.loc[gene]
-        gene_target_values = gene_target_rna_log.loc[gene]
+    gene_pred_values = gene_pred_rna_log.loc[gene]
+    gene_target_values = gene_target_rna_log.loc[gene]
     corr, _ = pearsonr(gene_pred_values, gene_target_values)
     # also calculate the mean expression level and variance
     gene_mean_expression = gene_target_values.mean()
@@ -279,15 +287,15 @@ gene_pearsonr_df = pd.DataFrame.from_dict(gene_pearsonr_values, orient='index')
 fig, ax = plt.subplots(ncols=2, figsize=(10, 4), gridspec_kw={'wspace': 0.4})
 sns.kdeplot(data=gene_pearsonr_df, x='mean', y='pearsonr', 
             ax=ax[0], fill=True, cmap='Blues', levels=20, thresh=0.05)
-ax[0].set_xlabel('Mean Expression Level (log counts)')
+ax[0].set_xlabel('Mean Expression Level (log rpkm)')
 ax[0].set_ylabel('PearsonR across Cell Types')
 ax[0].set_title('All Genes')
 sns.kdeplot(data=gene_pearsonr_df[gene_pearsonr_df['mean'] >= 1], x='mean', y='pearsonr', 
             ax=ax[1], fill=True, cmap='Oranges', levels=20, thresh=0.05)
-ax[1].set_xlabel('Mean of Expression Level (log counts)')
+ax[1].set_xlabel('Mean of Expression Level (log rpkm)')
 ax[1].set_ylabel('PearsonR across Cell Types')
 ax[1].set_title('Genes with Mean Expression >= 1')
-fig.savefig('figures/celltype_head/Gene_level_PearsonR_vs_mean_expression_logcounts.pdf')
+fig.savefig('figures/celltype_head/Gene_level_PearsonR_vs_mean_expression_logrpkm.pdf')
 # kde on pearsonr only
 fig, ax = plt.subplots(figsize=(6, 4))
 gene_pearsonr_df['Expression Level Group'] = pd.cut(gene_pearsonr_df['mean'], bins=[-np.inf, 1, 3, 5, np.inf], labels=['Low (<1)', 'Medium (1-3)', 'High (3-5)', 'Very High (>5)'])
@@ -303,7 +311,7 @@ ax.set_xlabel('PearsonR across Cell Types')
 # add text on average pearsonr
 mean_pearsonr = gene_pearsonr_df['pearsonr'].mean()
 ax.text(0.02, 0.95, f'Average PearsonR: {mean_pearsonr:.4f}', transform=ax.transAxes, fontsize=10, verticalalignment='top', color='black', fontweight='bold')
-ax.text(0.02, 0.90, 'Avg Expression Level:', transform=ax.transAxes, fontsize=10, verticalalignment='top', color='gray', fontweight='bold')
+ax.text(0.02, 0.90, 'Avg Expression Level (log rpkm):', transform=ax.transAxes, fontsize=10, verticalalignment='top', color='gray', fontweight='bold')
 # for each expression level group, add average pearsonr with matching colors
 for i, (group, group_df) in enumerate(gene_pearsonr_df.groupby('Expression Level Group')):
     group_mean_pearsonr = group_df['pearsonr'].mean()
