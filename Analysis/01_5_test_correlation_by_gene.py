@@ -40,117 +40,11 @@ from sklearn.metrics import explained_variance_score
 from sklearn.preprocessing import quantile_transform
 from tqdm import tqdm
 from omegaconf import OmegaConf
-import gzip
 
-
-class Exon:
-    """Simple exon class."""
-    def __init__(self, start, end):
-        self.start = start
-        self.end = end
-
-
-class Transcript:
-    """Simple transcript class."""
-    def __init__(self, transcript_id):
-        self.transcript_id = transcript_id
-        self.exons = []
-
-
-class Gene:
-    """Simple gene class."""
-    def __init__(self, gene_id, chrom, strand):
-        self.gene_id = gene_id
-        self.chrom = chrom
-        self.strand = strand
-        self.transcripts = {}
-        self._start = float('inf')
-        self._end = 0
-
-    def add_transcript(self, transcript_id):
-        if transcript_id not in self.transcripts:
-            self.transcripts[transcript_id] = Transcript(transcript_id)
-        return self.transcripts[transcript_id]
-
-    def update_span(self, start, end):
-        self._start = min(self._start, start)
-        self._end = max(self._end, end)
-
-    def span(self):
-        return (self._start, self._end)
-
-
-class GTF:
-    """Simple GTF parser."""
-    def __init__(self, gtf_file):
-        self.genes = {}
-        self._parse_gtf(gtf_file)
-
-    def _parse_gtf(self, gtf_file):
-        """Parse GTF file and extract gene/transcript/exon information."""
-        print(f"Parsing GTF file: {gtf_file}")
-
-        # Handle gzipped files
-        if gtf_file.endswith('.gz'):
-            f = gzip.open(gtf_file, 'rt')
-        else:
-            f = open(gtf_file, 'r')
-
-        for line in f:
-            if line.startswith('#'):
-                continue
-
-            fields = line.strip().split('\t')
-            if len(fields) < 9:
-                continue
-
-            chrom = fields[0]
-            feature = fields[2]
-            start = int(fields[3])
-            end = int(fields[4])
-            strand = fields[6]
-            attributes = fields[8]
-
-            # Parse attributes
-            attr_dict = {}
-            for attr in attributes.split(';'):
-                attr = attr.strip()
-                if not attr:
-                    continue
-                # Handle both "key value" and "key=value" formats
-                if ' "' in attr:
-                    key, value = attr.split(' "', 1)
-                    value = value.rstrip('"')
-                elif '=' in attr:
-                    key, value = attr.split('=', 1)
-                    value = value.strip('"')
-                else:
-                    continue
-                attr_dict[key] = value
-
-            gene_id = attr_dict.get('gene_id', attr_dict.get('gene', None))
-            if not gene_id:
-                continue
-
-            # Create gene if needed
-            if gene_id not in self.genes:
-                self.genes[gene_id] = Gene(gene_id, chrom, strand)
-
-            gene = self.genes[gene_id]
-            gene.update_span(start, end)
-
-            # Handle transcripts and exons
-            if feature in ['transcript', 'exon']:
-                transcript_id = attr_dict.get('transcript_id', attr_dict.get('transcript', None))
-                if transcript_id:
-                    transcript = gene.add_transcript(transcript_id)
-
-                    if feature == 'exon':
-                        exon = Exon(start, end)
-                        transcript.exons.append(exon)
-
-        f.close()
-        print(f"Parsed {len(self.genes)} genes")
+# Import pygene for GTF parsing
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pygene
 
 
 def untransform_predictions(data, label_meta=None, scale=1.0, clip_soft=48.0, sum_stat="sum_three_quarter"):
@@ -270,89 +164,114 @@ def apply_transform(data, transform_type="none"):
     return data
 
 
-def make_genes_bed(genes_gtf_file, out_dir, use_span=False):
-    """
-    Make a BED file from GTF file with non-overlapping gene regions.
+def make_genes_exon(genes_bed_file: str, genes_gtf_file: str, out_dir: str):
+    """Make a BED file with each genes' exons, excluding exons overlapping
+      across genes.
 
     Args:
-        genes_gtf_file: Input GTF file path
-        out_dir: Output directory for BED file
-        use_span: If True, use gene span; if False, use exons only
-
-    Returns:
-        Path to output BED file
+      genes_bed_file (str): Output BED file of genes.
+      genes_gtf_file (str): Input GTF file of genes.
+      out_dir (str): Output directory for temporary files.
     """
-    genes_bed_file = f"{out_dir}/genes.bed"
-    agenes_bed_file = f"{out_dir}/genes_all.bed"
+    # read genes
+    genes_gtf = pygene.GTF(genes_gtf_file)
 
-    # Read genes from GTF
-    print(f"Reading genes from {genes_gtf_file}...")
-    genes_gtf = GTF(genes_gtf_file)
+    # write gene exons
+    agenes_bed_file = "%s/genes_all.bed" % out_dir
+    agenes_bed_out = open(agenes_bed_file, "w")
+    for gene_id, gene in genes_gtf.genes.items():
+        # collect exons
+        gene_intervals = IntervalTree()
+        for tx_id, tx in gene.transcripts.items():
+            for exon in tx.exons:
+                gene_intervals[exon.start - 1 : exon.end] = True
 
-    # Write all genes
-    with open(agenes_bed_file, "w") as agenes_bed_out:
-        for gene_id, gene in genes_gtf.genes.items():
-            if use_span:
-                # Use gene span
-                start, end = gene.span()
-                cols = [gene.chrom, str(start - 1), str(end), gene_id, ".", gene.strand]
-                print("\t".join(cols), file=agenes_bed_out)
-            else:
-                # Use exons
-                gene_intervals = IntervalTree()
-                for _tx_id, tx in gene.transcripts.items():
-                    for exon in tx.exons:
-                        gene_intervals[exon.start - 1 : exon.end] = True
+        # union
+        gene_intervals.merge_overlaps()
 
-                # Union overlapping intervals
-                gene_intervals.merge_overlaps()
+        # write
+        for interval in sorted(gene_intervals):
+            cols = [
+                gene.chrom,
+                str(interval.begin),
+                str(interval.end),
+                gene_id,
+                ".",
+                gene.strand,
+            ]
+            print("\t".join(cols), file=agenes_bed_out)
+    agenes_bed_out.close()
 
-                # Write each interval
-                for interval in sorted(gene_intervals):
-                    cols = [
-                        gene.chrom,
-                        str(interval.begin),
-                        str(interval.end),
-                        gene_id,
-                        ".",
-                        gene.strand,
-                    ]
-                    print("\t".join(cols), file=agenes_bed_out)
-
-    # Find overlapping genes/exons
+    # find overlapping exons
     genes1_bt = pybedtools.BedTool(agenes_bed_file)
     genes2_bt = pybedtools.BedTool(agenes_bed_file)
-
-    overlapping_items = set()
+    overlapping_exons = set()
     for overlap in genes1_bt.intersect(genes2_bt, s=True, wo=True):
         gene1_id = overlap[3]
+        gene1_start = int(overlap[1])
+        gene1_end = int(overlap[2])
+        overlapping_exons.add((gene1_id, gene1_start, gene1_end))
+
         gene2_id = overlap[9]
+        gene2_start = int(overlap[7])
+        gene2_end = int(overlap[8])
+        overlapping_exons.add((gene2_id, gene2_start, gene2_end))
+
+    # filter for nonoverlapping exons
+    genes_bed_out = open(genes_bed_file, "w")
+    for line in open(agenes_bed_file):
+        a = line.split()
+        start = int(a[1])
+        end = int(a[2])
+        gene_id = a[-1]
+        if (gene_id, start, end) not in overlapping_exons:
+            print(line, end="", file=genes_bed_out)
+    genes_bed_out.close()
+
+
+def make_genes_span(
+    genes_bed_file: str, genes_gtf_file: str, out_dir: str, stranded: bool = True
+):
+    """Make a BED file with the span of each gene.
+
+    Args:
+      genes_bed_file (str): Output BED file of genes.
+      genes_gtf_file (str): Input GTF file of genes.
+      out_dir (str): Output directory for temporary files.
+      stranded (bool): Perform stranded intersection.
+    """
+    # read genes
+    genes_gtf = pygene.GTF(genes_gtf_file)
+
+    # write all gene spans
+    agenes_bed_file = "%s/genes_all.bed" % out_dir
+    agenes_bed_out = open(agenes_bed_file, "w")
+    for gene_id, gene in genes_gtf.genes.items():
+        start, end = gene.span()
+        cols = [gene.chrom, str(start - 1), str(end), gene_id, ".", gene.strand]
+        print("\t".join(cols), file=agenes_bed_out)
+    agenes_bed_out.close()
+
+    # find overlapping genes
+    genes1_bt = pybedtools.BedTool(agenes_bed_file)
+    genes2_bt = pybedtools.BedTool(agenes_bed_file)
+    overlapping_genes = set()
+    for overlap in genes1_bt.intersect(genes2_bt, s=stranded, wo=True):
+        gene1_id = overlap[3]
+        gene2_id = overlap[7]
         if gene1_id != gene2_id:
-            if use_span:
-                overlapping_items.add(gene1_id)
-            else:
-                gene1_start = int(overlap[1])
-                gene1_end = int(overlap[2])
-                overlapping_items.add((gene1_id, gene1_start, gene1_end))
+            overlapping_genes.add(gene1_id)
+            overlapping_genes.add(gene2_id)
 
-    # Filter for non-overlapping items
-    with open(genes_bed_file, "w") as genes_bed_out:
-        for line in open(agenes_bed_file):
-            a = line.split()
-            gene_id = a[3]
-            if use_span:
-                if gene_id not in overlapping_items:
-                    print(line, end="", file=genes_bed_out)
-            else:
-                start = int(a[1])
-                end = int(a[2])
-                if (gene_id, start, end) not in overlapping_items:
-                    print(line, end="", file=genes_bed_out)
-
-    print(f"Created gene BED file: {genes_bed_file}")
-    return genes_bed_file
-
-
+    # filter for nonoverlapping genes
+    genes_bed_out = open(genes_bed_file, "w")
+    for line in open(agenes_bed_file):
+        gene_id = line.split()[-1]
+        if gene_id not in overlapping_genes:
+            print(line, end="", file=genes_bed_out)
+    genes_bed_out.close()
+    
+    
 def aggregate_genes_from_predictions(
     predictions, targets, label_meta, sequences_bed, genes_bed_file, split, pool_width, filter_to_full_length_gene=True
 ):
@@ -502,13 +421,16 @@ def aggregate_genes_from_predictions(
                 gene_corr_gi[ti] = np.nan
         gene_within.append(gene_corr_gi)
 
-        # Mean coverage
+        # Mean coverage per base pair
         gene_preds_gi = gene_preds_gi.mean(axis=0) / float(pool_width)
         gene_targets_gi = gene_targets_gi.mean(axis=0) / float(pool_width)
 
-        # Scale by gene length
-        gene_preds_gi *= gene_lengths[gene_id]
-        gene_targets_gi *= gene_lengths[gene_id]
+        # Scale by gene length (is it really necessary in borzoi script?)
+        # gene_preds_gi *= gene_lengths[gene_id]
+        # gene_targets_gi *= gene_lengths[gene_id]
+        # scale to RPKM
+        gene_preds_gi *= 1e3
+        gene_targets_gi *= 1e3
 
         gene_preds.append(gene_preds_gi)
         gene_targets.append(gene_targets_gi)
@@ -558,8 +480,11 @@ def main(exp_name, chk, splits, res_base, log_base, data_base, genes_gtf, use_sp
 
     # Create gene BED file
     print("Creating gene BED file...")
-    # genes_bed_file = make_genes_bed(genes_gtf, gene_out_dir, use_span=use_span)
-    genes_bed_file = f"{gene_out_dir}/genes.bed" # for debug only
+    genes_bed_file = f"{gene_out_dir}/genes.bed"
+    if use_span:
+        make_genes_span(genes_bed_file, genes_gtf, gene_out_dir)
+    else:
+        make_genes_exon(genes_bed_file, genes_gtf, gene_out_dir)
     
     # Process each split
     for split in splits:

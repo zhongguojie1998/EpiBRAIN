@@ -207,6 +207,8 @@ def aggregate_predictions_in_regions(bed_regions, coords, labels, preds, aggrega
         overlaps_df = overlaps.df
     else:
         overlaps_df = pd.DataFrame(columns=['region_idx', 'bin_idx'])
+    # drop the overlaps_df where no bin is found (Start_b and End_b are -1)
+    overlaps_df = overlaps_df[(overlaps_df['Start_b'] != -1) & (overlaps_df['End_b'] != -1)]
 
     # Initialize result arrays
     aggregated_labels = np.full((n_regions, n_celltypes), np.nan)
@@ -296,7 +298,7 @@ def untransform_predictions(data, label_meta):
 @click.option("--trials", type=str, default=None, help="Comma-separated list of trial names to export (default: all trials)")
 @click.option("--coord_file", type=str, default=None, help="Coordinate file for predictions (optional, defaults to Data/{exp_name}/sequences.bed)")
 @click.option("--bin_size", type=int, default=32, help="Bin size in bp (default: 32)")
-@click.option("--aggregation", type=str, default="sum", help="Aggregation method: mean, sum, or max")
+@click.option("--aggregation", type=str, default="mean", help="Aggregation method: mean, sum, or max")
 @click.option("--n_processes", type=int, default=None, help="Number of processes to use (default: CPU count)")
 def main(exp_name, chk, splits, res_base, trials, log_base, bed_file, coord_file, bin_size, aggregation, n_processes):
     LOG_BASE = os.path.abspath(f"{log_base}/{exp_name}/")

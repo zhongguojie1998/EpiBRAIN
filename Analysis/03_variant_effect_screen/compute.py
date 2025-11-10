@@ -260,7 +260,7 @@ def vep_score(pred_mut, pred_wt, score_name):
 @click.option("--config_path", type=str, help="If provided, build the model in runtime, the model_path should be pointed to a chk")
 @click.option("--device", default="cpu")
 @click.option("--batch_size", type=int, default=32)
-@click.option("--save_interval", type=int, default=20000, help="Save intermediate results every N samples")
+@click.option("--save_interval", type=int, default=2000, help="Save intermediate results every N samples")
 @click.option("-p", "--precision", type=click.Choice(["float32", "float64"]), default="float32", help="Numerical precision (float32 for speed, float64 for accuracy)")
 @click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
 @click.option("-s", "--score_names", multiple=True, help="Score names to compute (will read from HDF5 if not provided)")

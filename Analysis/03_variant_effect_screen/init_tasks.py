@@ -4,9 +4,11 @@ from pathlib import Path
 import click
 import h5py
 import pandas as pd
+from joblib import Parallel, delayed
 from tqdm import tqdm
 
 REQUIRED_COLS = ["rsid", "chr", "pos", "ref", "alt", "index_key"]
+REQUIRED_COLS_ALT = {'rsid': 'variant_id'}
 
 
 def load_enriched_sumstats(csv_path: str):
@@ -56,16 +58,39 @@ def load_enriched_sumstats(csv_path: str):
             df["index_key"] = df["chr"] + ":" + df["pos"].astype("str") + ":" + df["ref"] + ":" + df["alt"]
 
     # Validate required columns
-
-    missing_cols = [col for col in REQUIRED_COLS if col not in df.columns]
+    missing_cols = []
+    for col in REQUIRED_COLS:
+        if col not in df.columns:
+            if col in REQUIRED_COLS_ALT and REQUIRED_COLS_ALT[col] in df.columns:
+                df.rename({REQUIRED_COLS_ALT[col]: col}, axis=1, inplace=True)
+            else:
+                missing_cols.append(col)
     if missing_cols:
         raise ValueError(f"Missing required columns in enriched file: {missing_cols}")
 
     return df
 
 
-def load_enriched_sumstats_from_filelist(filelist_path):
-    """Load enriched summary statistics from multiple files listed in filelist TSV"""
+def _load_single_file(file_path, exp_name):
+    """Helper function to load a single file for parallel processing"""
+    if not os.path.exists(file_path):
+        print(f"Warning: File not found, skipping: {file_path}")
+        return None, None, None
+
+    try:
+        df = load_enriched_sumstats(file_path)
+        return exp_name, df, None
+    except Exception as e:
+        return exp_name, None, str(e)
+
+
+def load_enriched_sumstats_from_filelist(filelist_path, n_jobs=36):
+    """Load enriched summary statistics from multiple files listed in filelist TSV
+
+    Args:
+        filelist_path: Path to the filelist TSV file
+        n_jobs: Number of parallel jobs (default: -1, uses all available cores)
+    """
     if not os.path.exists(filelist_path):
         raise FileNotFoundError(f"Filelist not found: {filelist_path}")
 
@@ -82,24 +107,23 @@ def load_enriched_sumstats_from_filelist(filelist_path):
         axis=1,
     )
 
-    print(f"Loading {len(filelist_df)} files from filelist...")
+    print(f"Loading {len(filelist_df)} files from filelist using {n_jobs if n_jobs > 0 else 'all'} parallel jobs...")
 
+    # Load files in parallel
+    results = Parallel(n_jobs=n_jobs, verbose=10)(
+        delayed(_load_single_file)(row["file_path"], row["experiment_name"])
+        for _, row in filelist_df.iterrows()
+    )
+
+    # Process results
     df_dict = {}
-    for _, row in tqdm(filelist_df.iterrows(), desc="Loading files", total=len(filelist_df)):
-        file_path = row["file_path"]
-        exp_name = row["experiment_name"]
-
-        if not os.path.exists(file_path):
-            print(f"Warning: File not found, skipping: {file_path}")
+    for exp_name, df, error in results:
+        if error is not None:
+            print(f"Error loading {exp_name}: {error}")
             continue
-
-        try:
-            df = load_enriched_sumstats(file_path)
+        if df is not None:
             df_dict[exp_name] = df
-            print(f"  Loaded {len(df)} variants from {file_path} as experiment '{exp_name}'")
-        except Exception as e:
-            print(f"Error loading {file_path}: {e}")
-            continue
+            print(f"  Loaded {len(df)} variants from experiment '{exp_name}'")
 
     if not df_dict:
         raise ValueError("No valid files could be loaded from filelist")
@@ -128,14 +152,14 @@ def init_hdf5_structure(h5_path, label_meta_path, score_names):
         # Main variants table (compressed)
         variants_grp = f.create_group("variants")
         variants_grp.create_dataset(
-            "index_key", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip"
+            "index_key", (0,), maxshape=(None,), dtype=h5py.string_dtype(), chunks=True, compression="gzip"
         )
-        variants_grp.create_dataset("rsid", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip")
-        variants_grp.create_dataset("chr", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip")
-        variants_grp.create_dataset("pos", (0,), maxshape=(None,), dtype="i8", compression="gzip")
-        variants_grp.create_dataset("ref", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip")
-        variants_grp.create_dataset("alt", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip")
-        variants_grp.create_dataset("finished", (0,), maxshape=(None,), dtype="bool", compression="gzip")
+        variants_grp.create_dataset("rsid", (0,), maxshape=(None,), dtype=h5py.string_dtype(), chunks=True, compression="gzip")
+        variants_grp.create_dataset("chr", (0,), maxshape=(None,), dtype=h5py.string_dtype(), chunks=True, compression="gzip")
+        variants_grp.create_dataset("pos", (0,), maxshape=(None,), dtype="i8", chunks=True, compression="gzip")
+        variants_grp.create_dataset("ref", (0,), maxshape=(None,), dtype=h5py.string_dtype(), chunks=True, compression="gzip")
+        variants_grp.create_dataset("alt", (0,), maxshape=(None,), dtype=h5py.string_dtype(), chunks=True, compression="gzip")
+        variants_grp.create_dataset("finished", (0,), maxshape=(None,), dtype="bool", chunks=True, compression="gzip")
 
         # Results table (compressed) - create datasets for each score type
         results_grp = f.create_group("results")

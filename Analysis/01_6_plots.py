@@ -4,6 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+import gzip
+from scipy.stats import pearsonr
 from dotenv import load_dotenv
 load_dotenv()
 PWD = f'{os.environ["workingHOME"]}/BICAN'
@@ -16,6 +18,7 @@ bin_level_results = pd.read_csv('Res/full_finetune_original_loss_celltype_head_d
 bin_level_results_orig = pd.read_csv('Res/full_finetune_original_loss/analysis_20/raw_data/Test_metric.csv', index_col=0)
 # get the number of cells from meta data
 cell_type_meta = pd.read_csv('Data/data_config/basal_ganglia_miniatlas_drop_celltype_v1.csv', index_col=0)
+cell_type_meta.reset_index(inplace=True, drop=True)
 # annotate the bin level results with cell type information
 bin_level_results = bin_level_results.merge(cell_type_meta, left_on='trial', right_on='exp')
 bin_level_results_orig = bin_level_results_orig.merge(cell_type_meta, left_on='trial', right_on='exp')
@@ -109,8 +112,8 @@ for res, use_celltype_head in zip([gene_level_results, gene_level_results_orig],
 
 
 # %% get gene level raw counts
-gene_pred_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_50/gene_level/raw_data/Test_gene_preds_raw.tsv', index_col=0, sep='\t')
-gene_target_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_50/gene_level/raw_data/Test_gene_targets_raw.tsv', index_col=0, sep='\t')
+gene_pred_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_preds_raw.tsv', index_col=0, sep='\t')
+gene_target_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_targets_raw.tsv', index_col=0, sep='\t')
 # filter to RNA tracks
 rna_tracks = gene_pred_raw.columns[gene_pred_raw.columns.str.contains('RNA')]
 gene_pred_rna = gene_pred_raw[rna_tracks]
@@ -127,6 +130,57 @@ for ti in range(gene_target_rna.shape[1]):
 # log transform
 gene_pred_rna_log = np.log1p(gene_pred_rna)
 gene_target_rna_log = np.log1p(gene_target_rna)
+# remove genes that low expressed in all cell types (average log count in target < 0.1)
+mean_log_counts = gene_target_rna_log.mean(axis=1)
+genes_to_keep = mean_log_counts[mean_log_counts >= 1].index
+gene_pred_rna_log = gene_pred_rna_log.loc[genes_to_keep]
+gene_target_rna_log = gene_target_rna_log.loc[genes_to_keep]
+# %% pick variable genes or differentially expressed genes
+variable_genes = pd.read_csv('Data/source/DiffExpress/MiniAtlas_RNA_merged_dual_filt_clean_corrected_250529.var.feature', header=None)[0].tolist()
+diffexp = pd.read_csv('Data/source/DiffExpress/subclass_corrected_edgeR.dds')
+def transform_gene_name_to_ensg(gene_names):
+    # transform variable genes to ENSG using gtf file
+    gtf_file = 'Data/source/gencode.v48.annotation.gtf.gz'
+    gene_ensgs = {}
+    with gzip.open(gtf_file, 'rt') as f:
+        for line in f:
+            if line.startswith('#'):
+                continue
+            fields = line.strip().split('\t')
+            if fields[2] == 'gene':
+                info_fields = fields[8].split('; ')
+                gene_name = ''
+                gene_id = ''
+                for info in info_fields:
+                    if info.startswith('gene_name'):
+                        gene_name = info.split(' ')[1].strip('"')
+                    elif info.startswith('gene_id'):
+                        gene_id = info.split(' ')[1].strip('"')
+                if gene_name in gene_names:
+                    gene_ensgs[gene_name] = gene_id
+                elif gene_id in gene_names:
+                    gene_ensgs[gene_id] = gene_id
+    return gene_ensgs
+# filter to variable genes
+variable_genes_ensg_dict = transform_gene_name_to_ensg(variable_genes)
+diffexp_genes_ensg_dict = transform_gene_name_to_ensg(diffexp['gene'].tolist())
+# %% get variable genes ensg and diffexp genes ensg
+genes_to_use = 'all'  # options: 'variable' or 'diffexp' or 'all'
+if genes_to_use == 'variable':
+    variable_genes_ensg = list(variable_genes_ensg_dict.values())
+    gene_pred_rna_log = gene_pred_rna_log[gene_pred_rna_log.index.isin(variable_genes_ensg)]
+    gene_target_rna_log = gene_target_rna_log[gene_target_rna_log.index.isin(variable_genes_ensg)]
+elif genes_to_use == 'diffexp':
+    diffexp_genes_ensg = list(diffexp_genes_ensg_dict.values())
+    gene_pred_rna_log = gene_pred_rna_log[gene_pred_rna_log.index.isin(diffexp_genes_ensg)]
+    gene_target_rna_log = gene_target_rna_log[gene_target_rna_log.index.isin(diffexp_genes_ensg)]
+    diffexp_filtered = diffexp[diffexp['gene'].isin(diffexp_genes_ensg_dict.keys())]
+    # and we filter the tracks to MiniAtlas only
+    miniatlas_tracks = [ct for ct in rna_tracks if 'MiniAtlas' in ct]
+    gene_pred_rna_log = gene_pred_rna_log[miniatlas_tracks]
+    gene_target_rna_log = gene_target_rna_log[miniatlas_tracks]
+    rna_tracks = miniatlas_tracks
+# %% calculate log fc
 # for each gene and cell type, calculate fold change to mean of other cell types
 gene_pred_rna_log_fc = gene_pred_rna_log.copy()
 gene_target_rna_log_fc = gene_target_rna_log.copy()
@@ -134,31 +188,6 @@ for celltype in rna_tracks:
     other_celltypes = [ct for ct in rna_tracks if ct != celltype]
     gene_pred_rna_log_fc[celltype] = gene_pred_rna_log[celltype] - gene_pred_rna_log[other_celltypes].mean(axis=1)
     gene_target_rna_log_fc[celltype] = gene_target_rna_log[celltype] - gene_target_rna_log[other_celltypes].mean(axis=1)
-# %% pick variable genes
-variable_genes = pd.read_csv('Data/source/DiffExpress/MiniAtlas_RNA_merged_dual_filt_clean_corrected_250529.var.feature', header=None)[0].tolist()
-# transform variable genes to ENSG using gtf file
-gtf_file = 'Data/source/gencode.v48.annotation.gtf.gz'
-import gzip
-variable_genes_ensg = set()
-with gzip.open(gtf_file, 'rt') as f:
-    for line in f:
-        if line.startswith('#'):
-            continue
-        fields = line.strip().split('\t')
-        if fields[2] == 'gene':
-            info_fields = fields[8].split('; ')
-            gene_name = ''
-            gene_id = ''
-            for info in info_fields:
-                if info.startswith('gene_name'):
-                    gene_name = info.split(' ')[1].strip('"')
-                elif info.startswith('gene_id'):
-                    gene_id = info.split(' ')[1].strip('"')
-            if gene_name in variable_genes:
-                variable_genes_ensg.add(gene_id)
-# filter to variable genes
-gene_pred_rna_log = gene_pred_rna_log[gene_pred_rna_log.index.isin(variable_genes_ensg)]
-gene_target_rna_log = gene_target_rna_log[gene_target_rna_log.index.isin(variable_genes_ensg)]
 # %% quantile normalize
 from qnorm import quantile_normalize
 gene_pred_rna_quantile = pd.DataFrame(
@@ -174,31 +203,25 @@ gene_target_rna_quantile = pd.DataFrame(
 # substract mean
 gene_pred_rna_quantile_centered = gene_pred_rna_quantile.sub(gene_pred_rna_quantile.mean(axis=1), axis=0)
 gene_target_rna_quantile_centered = gene_target_rna_quantile.sub(gene_target_rna_quantile.mean(axis=1), axis=0)
-# %% visualize some of the genes to check why
-celltype = gene_pred_rna_log.columns[0]
-fig, ax = plt.subplots(nrows=3, figsize=(6, 12))
-sns.scatterplot(x=gene_pred_rna_log[celltype], y=gene_target_rna_log[celltype], ax=ax[0])
-ax[0].set_xlabel('Predicted log1p RNA counts')
-ax[0].set_ylabel('Target log1p RNA counts')
-ax[0].set_title(f'Scatter plot of predicted vs target RNA counts ({celltype})')
-sns.scatterplot(x=gene_pred_rna_quantile[celltype], y=gene_target_rna_quantile[celltype], ax=ax[1])
-ax[1].set_xlabel('Predicted quantile normalized log1p RNA counts')
-ax[1].set_ylabel('Target quantile normalized log1p RNA counts')
-ax[1].set_title(f'Scatter plot of predicted vs target RNA counts ({celltype})')
-sns.scatterplot(x=gene_pred_rna_log_fc[celltype], y=gene_target_rna_log_fc[celltype], ax=ax[2])
-ax[2].set_xlabel('Predicted quantile normalized log1p RNA counts')
-ax[2].set_ylabel('Target quantile normalized log1p RNA counts')
-ax[2].set_title(f'Scatter plot of predicted vs target RNA counts ({celltype})')
 
-# %% load differential expression meta data
-diffexp = pd.read_csv('Data/source/DiffExpress/subclass_corrected_edgeR.dds')
 # %% pearson correlation for each track
-from scipy.stats import pearsonr
+transform_to_use = 'quantile_centered'  # options: 'log_fc' or 'quantile_centered'
 pearsonr_values = {}
 for track in rna_tracks:
-    pred_values = gene_pred_rna_log_fc[track]
-    target_values = gene_target_rna_log_fc[track]
-    corr, _ = pearsonr(pred_values, target_values)
+    if transform_to_use == 'quantile_centered':
+        gene_pred_track = gene_pred_rna_quantile_centered[track]
+        gene_target_track = gene_target_rna_quantile_centered[track]
+    else:
+        gene_pred_track = gene_pred_rna_log_fc[track]    
+        gene_target_track = gene_target_rna_log_fc[track]
+    if genes_to_use == 'diffexp':
+        # filter to diffexp genes for that cell type only
+        celltype_name = track.replace('MiniAtlas-', '').split('_')[0]
+        diff_genes = diffexp_filtered[diffexp_filtered['celltype'] == celltype_name]
+        diff_genes_ensg = [diffexp_genes_ensg_dict[gene] for gene in diff_genes['gene'] if gene in diffexp_genes_ensg_dict]
+        gene_pred_track = gene_pred_track[gene_pred_track.index.isin(diff_genes_ensg)]
+        gene_target_track = gene_target_track[gene_target_track.index.isin(diff_genes_ensg)]
+    corr, _ = pearsonr(gene_pred_track, gene_target_track)
     pearsonr_values[track] = corr
 # convert to dataframe
 pearsonr_df = pd.DataFrame.from_dict(pearsonr_values, orient='index', columns=['PearsonR'])
@@ -222,74 +245,100 @@ for ct, group in pearsonr_df.groupby('cell_type_group'):
     pearsonr_df.loc[pearsonr_df['cell_type_group'] == ct, 'cell_type_group: avg'] = cell_type_label
 sns.histplot(data=pearsonr_df, x='PearsonR', hue='cell_type_group: avg', ax=ax, fill=False, bins=20, alpha=1)
 
+# %% visualize one track
+track_to_visualize = 'MiniAtlas-PV-CHC_RNAminus'
+fig, ax = plt.subplots(figsize=(6, 6))
+ax.scatter(x=gene_pred_rna_log_fc[track_to_visualize], y=gene_target_rna_log_fc[track_to_visualize], s=1, alpha=0.5)
+ax.set_xlabel('Predicted LogFC')
+ax.set_ylabel('True LogFC')
+ax.set_title(f'Gene LogFC Prediction for {track_to_visualize}')
 
-
-# %% plot the cross cell type pearsonr with regard to relative variance
+# %% plot the cross cell type pearsonr in atac peaks with regard to relative variance
 import pickle
-with open('Res/full_finetune_original_loss/analysis_20/raw_data/Test_metric_across_celltypes_none.pkl', 'rb') as f:
-    cross_cell_type_data = pickle.load(f)
-# %% plot
-from scipy.stats import gaussian_kde
+with open('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20_bed_merged_all_peaks/raw_data/Test_aggregated_label_bed.pkl', 'rb') as f:
+    cross_cell_type_label = pickle.load(f)
+with open('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20_bed_merged_all_peaks/raw_data/Test_aggregated_pred_bed.pkl', 'rb') as f:
+    cross_cell_type_pred = pickle.load(f)
+# drop nan lines
+valid_indices = ~np.isnan(cross_cell_type_label).any(axis=1) & ~np.isnan(cross_cell_type_pred).any(axis=1)
+cross_cell_type_label = cross_cell_type_label[valid_indices]
+cross_cell_type_pred = cross_cell_type_pred[valid_indices]
+# %% calculate pearsonr across cell types for each modality for each peak, and filter to MiniAtlas only
+cross_cell_type_data = {}
+for mod in ['ATAC', 'K27Ac', 'K27Me3']:
+    dims = cell_type_meta.index[(cell_type_meta['modality'] == mod) & (cell_type_meta['atlas_name'] == 'MiniAtlas')].tolist()
+    labels = cross_cell_type_label[:, dims]
+    preds = cross_cell_type_pred[:, dims]
+    # log to get log_cpm
+    labels = np.log1p(labels)
+    preds = np.log1p(preds)
+    # calculate mean and variance for each peak
+    label_means = np.mean(labels, axis=1)
+    label_vars = np.var(labels, axis=1)
+    preds_means = np.mean(preds, axis=1)
+    preds_vars = np.var(preds, axis=1)
 
-fill_color = {'ATAC': 'Blues', 'K27Ac': 'Oranges', 'K27Me3': 'Greens', 'K9Me3': 'Purples'}
-for mod in ['ATAC', 'K27Ac', 'K27Me3', 'K9Me3']:
-    data = cross_cell_type_data[mod]
-    # calculate relative variance for each bin
-    relative_variances = np.array(data['label_var']) / np.array(data['label_mean'])
-    pearsonr_values = np.array(data['pearsonr'])
+    # Vectorized Pearson correlation calculation
+    # Center the data
+    labels_centered = labels - label_means[:, np.newaxis]
+    preds_centered = preds - preds_means[:, np.newaxis]
 
-    # Remove any NaN or Inf values and filter relative variance <= 10
-    valid_mask = np.isfinite(relative_variances) & np.isfinite(pearsonr_values) & (relative_variances <= 10)
-    relative_variances = relative_variances[valid_mask]
-    pearsonr_values = pearsonr_values[valid_mask]
+    # Compute numerator (covariance)
+    covariance = (labels_centered * preds_centered).sum(axis=1)
 
-    # Downsample if dataset is large (for speed)
-    max_points = 10000
-    if len(relative_variances) > max_points:
-        sample_idx = np.random.choice(len(relative_variances), max_points, replace=False)
-        relative_variances_kde = relative_variances[sample_idx]
-        pearsonr_values_kde = pearsonr_values[sample_idx]
-    else:
-        relative_variances_kde = relative_variances
-        pearsonr_values_kde = pearsonr_values
+    # Compute denominators (standard deviations)
+    labels_std = np.sqrt((labels_centered ** 2).sum(axis=1))
+    preds_std = np.sqrt((preds_centered ** 2).sum(axis=1))
 
-    fig, ax = plt.subplots(figsize=(6, 4))
+    # Pearson correlation
+    pearsonr_array = covariance / (labels_std * preds_std)
 
-    # Fast KDE with scipy using Scott's bandwidth (automatic and fast)
-    values = np.vstack([relative_variances_kde, pearsonr_values_kde])
-    kernel = gaussian_kde(values, bw_method='scott')
-
-    # Create coarser evaluation grid for speed (50x50 instead of 100x100)
-    x_min, x_max = relative_variances.min(), relative_variances.max()
-    y_min, y_max = pearsonr_values.min(), pearsonr_values.max()
-
-    # Add margins
-    x_margin = (x_max - x_min) * 0.1
-    y_margin = (y_max - y_min) * 0.1
-
-    xx, yy = np.mgrid[x_min-x_margin:x_max+x_margin:50j,
-                      y_min-y_margin:y_max+y_margin:50j]
-    positions = np.vstack([xx.ravel(), yy.ravel()])
-
-    # Evaluate KDE on grid
-    density = np.reshape(kernel(positions).T, xx.shape)
-
-    # Plot contours (contour is faster than contourf)
-    contour = ax.contour(xx, yy, density, levels=8, cmap=fill_color[mod], linewidths=1.5)
-
-    # Add light scatter of downsampled points (much faster)
-    if len(relative_variances) > 5000:
-        scatter_idx = np.random.choice(len(relative_variances), 5000, replace=False)
-        ax.scatter(relative_variances[scatter_idx], pearsonr_values[scatter_idx],
-                   s=0.5, alpha=0.2, c='gray', rasterized=True)
-    else:
-        ax.scatter(relative_variances, pearsonr_values, s=0.5, alpha=0.2, c='gray', rasterized=True)
-
-    # Add colorbar
-    cb = plt.colorbar(contour, ax=ax)
-    cb.set_label('Density')
-
-    ax.set_xlabel('Relative Variance (Variance / Mean)')
+    cross_cell_type_data[mod] = {
+        'label_mean': label_means,
+        'label_var': label_vars,
+        'label_coeff_var': label_vars / label_means,
+        'pearsonr': pearsonr_array
+    }
+# %% plot scatter plots
+data_together = None
+for mod, cmap in zip(['ATAC', 'K27Ac', 'K27Me3'], ['Blues', 'Oranges', 'Greens']):
+    data = pd.DataFrame(cross_cell_type_data[mod])
+    fig, ax = plt.subplots(figsize=(4, 4))
+    # histogram plot
+    # sns.histplot(data['pearsonr'], bins=30, kde=False, ax=ax, color='blue', alpha=0.5)
+    # draw kde plot
+    sns.kdeplot(x=data['label_coeff_var'], y=data['pearsonr'], ax=ax, fill=True, cmap=cmap, levels=10, thresh=0.05)
+    ax.set_xlabel('Coefficient Variance across Cell Types')
     ax.set_ylabel('PearsonR across Cell Types')
-    ax.set_title(f'Cross Cell Type PearsonR vs Relative Variance ({mod})')
+    ax.set_title(f'MiniAtlas Cross Cell Types ({mod})')
+    fig.savefig('figures/celltype_head/MiniAtlas_cross_cell_type_pearsonr_vs_coeff_var_' + mod + '.pdf')
+    # filter the data to coeff var > 0.5 and do 1-d kde plot
+    data_filtered = data[data['label_coeff_var'] > 0.5]
+    data_filtered['modality'] = mod
+    if data_together is None:
+        data_together = data_filtered
+    else:
+        data_together = pd.concat([data_together, data_filtered], axis=0)
+# %% plot together
+fig, ax = plt.subplots(figsize=(6, 4))
+data_together = data_together[data_together['label_coeff_var'] > 1]
+# Create palette matching the cmaps from line 304
+palette = {'ATAC': sns.color_palette('Blues', n_colors=10)[6],
+           'K27Ac': sns.color_palette('Oranges', n_colors=10)[6],
+           'K27Me3': sns.color_palette('Greens', n_colors=10)[6]}
+sns.histplot(data_together, x='pearsonr', hue='modality', kde=True, bins=30, ax=ax, palette=palette, fill=True, alpha=0.5)
+ax.set_xlabel('PearsonR across Cell Types (Coeff Var > 1)')
+
+# Calculate and display average for each modality
+y_text_pos = 0.95
+for i, (mod, color) in enumerate(zip(['ATAC', 'K27Ac', 'K27Me3'],
+                                      [palette['ATAC'], palette['K27Ac'], palette['K27Me3']])):
+    mod_data = data_together[data_together['modality'] == mod]
+    mean_val = mod_data['pearsonr'].mean()
+    ax.text(0.02, y_text_pos - i*0.08, f'{mod}: μ = {mean_val:.3f}',
+            transform=ax.transAxes, fontsize=10, verticalalignment='top',
+            color=color, fontweight='bold')
+
+fig.savefig('figures/celltype_head/MiniAtlas_cross_cell_type_pearsonr_kde_coeff_var_all_modalities.pdf')
+
 # %%
