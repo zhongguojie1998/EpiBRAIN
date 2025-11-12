@@ -141,65 +141,31 @@ def gradients_input_attribution_diff(
     # Untransform predictions using label_meta (reverse of training preprocessing)
     # Following the logic from 01_5_test_correlation_by_gene.py
     if not no_untransform and label_meta_row_pos is not None:
-        # Untransform positive trial
+        # Get transformation parameters
         trial_scale = label_meta_row_pos.get('scale', 1.0)
         trial_clip_soft = label_meta_row_pos.get('clip_soft', 48.0)
         trial_sum_stat = label_meta_row_pos.get('sum_stat', 'sum_three_quarter')
 
-        # Step 1: Undo scale
+        # Step 1: Undo scale (vectorized across all dimensions)
         if trial_scale != 1.0:
-            preds[:, :, target_pos_dim] = preds[:, :, target_pos_dim] / trial_scale
+            preds = preds / trial_scale
 
-        # Step 2: Undo soft clip
+        # Step 2: Undo soft clip (vectorized across all dimensions)
         if trial_clip_soft is not None:
-            clip_mask = preds[:, :, target_pos_dim] > trial_clip_soft
-            preds[:, :, target_pos_dim] = torch.where(
+            clip_mask = preds > trial_clip_soft
+            preds = torch.where(
                 clip_mask,
-                (trial_clip_soft - 1) + (preds[:, :, target_pos_dim] - (trial_clip_soft - 1)) ** 2,
-                preds[:, :, target_pos_dim]
+                (trial_clip_soft - 1) + (preds - (trial_clip_soft - 1)) ** 2,
+                preds
             )
 
-        # Step 3: Undo power transform based on sum_stat
+        # Step 3: Undo power transform based on sum_stat (vectorized across all dimensions)
         if trial_sum_stat == "sum_three_quarter":
-            preds[:, :, target_pos_dim] = preds[:, :, target_pos_dim] ** (4.0 / 3.0)
+            preds = preds ** (4.0 / 3.0)
         elif trial_sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
-            preds[:, :, target_pos_dim] = (preds[:, :, target_pos_dim] + 1) ** 2 - 1
-        elif trial_sum_stat in ['sum', 'mean', "avg"]:
-            pass
-        else:
+            preds = (preds + 1) ** 2 - 1
+        elif trial_sum_stat not in ['sum', 'mean', "avg"]:
             raise ValueError(f"Unknown sum_stat: {trial_sum_stat}")
-
-        # Untransform negative trials
-        if label_meta_rows_neg is not None:
-            for i, neg_dim in enumerate(target_neg_dims):
-                if i < len(label_meta_rows_neg):
-                    neg_row = label_meta_rows_neg[i]
-                    neg_scale = neg_row.get('scale', 1.0)
-                    neg_clip_soft = neg_row.get('clip_soft', 48.0)
-                    neg_sum_stat = neg_row.get('sum_stat', 'sum_three_quarter')
-
-                    # Step 1: Undo scale
-                    if neg_scale != 1.0:
-                        preds[:, :, neg_dim] = preds[:, :, neg_dim] / neg_scale
-
-                    # Step 2: Undo soft clip
-                    if neg_clip_soft is not None:
-                        clip_mask = preds[:, :, neg_dim] > neg_clip_soft
-                        preds[:, :, neg_dim] = torch.where(
-                            clip_mask,
-                            (neg_clip_soft - 1) + (preds[:, :, neg_dim] - (neg_clip_soft - 1)) ** 2,
-                            preds[:, :, neg_dim]
-                        )
-
-                    # Step 3: Undo power transform based on sum_stat
-                    if neg_sum_stat == "sum_three_quarter":
-                        preds[:, :, neg_dim] = preds[:, :, neg_dim] ** (4.0 / 3.0)
-                    elif neg_sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
-                        preds[:, :, neg_dim] = (preds[:, :, neg_dim] + 1) ** 2 - 1
-                    elif neg_sum_stat in ['sum', 'mean', "avg"]:
-                        pass
-                    else:
-                        raise ValueError(f"Unknown sum_stat: {neg_sum_stat}")
 
     # Select bins of interest
     preds_slice = preds[:, bin_range, :]  # [batch, len(bin_range), dim]
