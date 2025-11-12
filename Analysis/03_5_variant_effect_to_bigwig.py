@@ -62,7 +62,7 @@ def create_bigwig_track(bw_file, chrom, start, end, values, pool_width):
 @click.option("--pool_width", type=int, default=32, help="Width of each prediction bin in bp (default: 32)")
 @click.option("--track_index", type=int, default=None, help="Track/trial index to use (default: output all tracks separately)")
 @click.option("--track_name", type=str, default=None, help="Track/trial name to use (requires --label_meta)")
-@click.option("--label_meta", type=str, default=None, help="Path to label metadata CSV (for track_name lookup)")
+@click.option("--label_meta", type=str, required=True, help="Path to label metadata CSV (required for mapping row indices to dim values)")
 def main(input_h5, output_prefix, chrom, pool_width, track_index, track_name, label_meta):
     """
     Convert variant effect h5 file to BigWig format.
@@ -131,44 +131,49 @@ def main(input_h5, output_prefix, chrom, pool_width, track_index, track_name, la
     print(f"  Context: {chrom}:{context_start}-{context_end}")
     print(f"  Shape: {label.shape} (n_bins={label.shape[0]}, n_trials={label.shape[1]})")
 
+    # Load label metadata to map between row indices and dim values
+    import pandas as pd
+
+    if label_meta is None:
+        print("Error: --label_meta is required")
+        sys.exit(1)
+
+    meta_df = pd.read_csv(label_meta)
+
     # Determine which track(s) to use
-    track_indices = []
-    track_names_list = []
+    # Store tuples of (row_idx, dim_value, track_name)
+    track_info = []
 
     if track_name is not None:
-        if label_meta is None:
-            print("Error: --label_meta required when using --track_name")
-            sys.exit(1)
-
-        import pandas as pd
-        meta_df = pd.read_csv(label_meta)
         matching_rows = meta_df[meta_df['trial'] == track_name]
 
         if len(matching_rows) == 0:
             print(f"Error: Track name '{track_name}' not found in label metadata")
             sys.exit(1)
 
-        track_index = matching_rows.iloc[0]['dim']
-        track_indices = [track_index]
-        track_names_list = [track_name]
-        print(f"  Using track '{track_name}' (index {track_index})")
+        row_idx = matching_rows.index[0]
+        dim_value = matching_rows.iloc[0]['dim']
+        track_info = [(row_idx, dim_value, track_name)]
+        print(f"  Using track '{track_name}' (row_idx={row_idx}, dim={dim_value})")
 
     elif track_index is not None:
-        track_indices = [track_index]
-        track_names_list = [f"track{track_index}"]
-        print(f"  Using track index: {track_index}")
+        # When track_index is specified, interpret it as row index
+        if track_index >= len(meta_df):
+            print(f"Error: Track index {track_index} out of range (max: {len(meta_df)-1})")
+            sys.exit(1)
+        row_idx = track_index
+        dim_value = meta_df.iloc[row_idx]['dim']
+        track_name_str = meta_df.iloc[row_idx]['trial']
+        track_info = [(row_idx, dim_value, track_name_str)]
+        print(f"  Using track index: {track_index} ('{track_name_str}', dim={dim_value})")
 
     else:
         # Default: output all tracks separately
-        track_indices = list(range(label.shape[1]))
-        track_names_list = [f"track{i}" for i in track_indices]
-        print(f"  Processing all {label.shape[1]} tracks separately")
-
-        # If label_meta is provided, use actual track names
-        if label_meta is not None:
-            import pandas as pd
-            meta_df = pd.read_csv(label_meta)
-            track_names_list = [meta_df.iloc[i]['trial'] for i in track_indices]
+        for row_idx in range(len(meta_df)):
+            dim_value = meta_df.iloc[row_idx]['dim']
+            track_name_str = meta_df.iloc[row_idx]['trial']
+            track_info.append((row_idx, dim_value, track_name_str))
+        print(f"  Processing all {len(track_info)} tracks separately")
 
     # Create output directory if needed
     output_dir = os.path.dirname(output_prefix)
@@ -177,13 +182,14 @@ def main(input_h5, output_prefix, chrom, pool_width, track_index, track_name, la
 
     # Process each track
     total_files = 0
-    for idx, track_name_str in zip(track_indices, track_names_list):
-        print(f"\nProcessing {track_name_str} (index {idx})...")
+    for row_idx, dim_value, track_name_str in track_info:
+        print(f"\nProcessing {track_name_str} (row_idx={row_idx}, dim={dim_value})...")
 
-        label_data = label[:, idx]
-        pred_ref_data = pred_ref[:, idx]
-        pred_alt_data = pred_alt[:, idx]
-        diff_data = pred_alt_data - pred_ref_data
+        label_data = label[:, row_idx]
+        pred_ref_data = pred_ref[:, dim_value]
+        pred_alt_data = pred_alt[:, dim_value]
+        # do log fold change
+        diff_data = np.log2(pred_alt_data + 1) - np.log2(pred_ref_data + 1)
 
         # Create BigWig files for this track
         tracks = {
@@ -203,7 +209,7 @@ def main(input_h5, output_prefix, chrom, pool_width, track_index, track_name, la
             # Print statistics
             print(f"  {data_type}: min={track_data.min():.4f}, max={track_data.max():.4f}, mean={track_data.mean():.4f}")
 
-    print(f"\nDone! Created {total_files} BigWig files (4 per track × {len(track_indices)} tracks)")
+    print(f"\nDone! Created {total_files} BigWig files (4 per track × {len(track_info)} tracks)")
 
 
 if __name__ == "__main__":

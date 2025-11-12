@@ -2,6 +2,9 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
+mpl.rcParams['pdf.fonttype'] = 42
+mpl.rcParams['ps.fonttype'] = 42
 import seaborn as sns
 import os
 import gzip
@@ -64,7 +67,7 @@ for res in [bin_level_results, bin_level_results_orig]:
         mean_value = group['PearsonR'].mean()
         max_value = group['PearsonR'].max()
         ax.text(x=list(res['modality'].unique()).index(modality) + 
-                (0.2 if atlas_name == 'MiniAtlas' else -0.2), 
+                (0.2 if atlas_name == 'MiniAtlas' else -0.), 
                 y=max_value * 1.05, s=f'{mean_value:.2f}', 
                 ha='center', va='bottom', fontsize=8, color='black')
     plt.legend(title='Atlas Name', loc='lower left')
@@ -83,7 +86,7 @@ for res in [bin_level_results, bin_level_results_orig]:
 # %% Section 2
 # ================================================================================
 # load gene level metrics
-gene_level_results = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_metrics.csv', index_col=0)
+gene_level_results = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_metrics_length.csv', index_col=0)
 gene_level_results = gene_level_results.merge(cell_type_meta, left_on='trial', right_on='exp')
 gene_level_results['modality'] = gene_level_results['modality_x'].replace(
     {'RNA': 'RNA', 'RNAplus': 'RNA', 'RNAminus': 'RNA', 'K27Ac': 'H3K27ac', 'K27Me3': 'H3K27me3', 'K9Me3': 'H3K9me3'})
@@ -92,30 +95,35 @@ gene_level_results_orig = gene_level_results_orig.merge(cell_type_meta, left_on=
 gene_level_results_orig['modality'] = gene_level_results_orig['modality_x'].replace(
     {'RNA': 'RNA', 'RNAplus': 'RNA', 'RNAminus': 'RNA', 'K27Ac': 'H3K27ac', 'K27Me3': 'H3K27me3', 'K9Me3': 'H3K9me3'})
 
-# %% plot modality metrics box plots between atlases
+# %% plot modality metrics bar plots by cell type
 for res, use_celltype_head in zip([gene_level_results, gene_level_results_orig], [True, False]):
     fig, ax = plt.subplots(figsize=(6, 4))
     res = res[res['modality'] == 'RNA']
-    # calculate the average PearsonR for each modality and annotate on the legend
-    modality_groups = res.groupby('modality')
-    for modality, group in modality_groups:
-        mean_value = group['pearsonr_log'].mean()
-        modality_label = f'{modality} (avg: {mean_value:.4f})'
-        # rename in the dataframe
-        res.loc[res['modality'] == modality, 'modality: avg'] = modality_label
-    for atlas_name, group in res.groupby('atlas_name'):
-        mean_value = group['pearsonr_log'].mean()
-        atlas_label = f'{atlas_name} (avg: {mean_value:.4f})'
-        # rename in the dataframe
-        res.loc[res['atlas_name'] == atlas_name, 'atlas_name: avg'] = atlas_label
-    sns.histplot(data=res, x='pearsonr_log', hue='atlas_name: avg', ax=ax, fill=True, alpha=1, bins=20)
+    # calculate the average PearsonR for each cell type
+    celltype_groups = res.groupby('celltype')['pearsonr_log'].mean().reset_index()
+    celltype_groups = celltype_groups.sort_values('pearsonr_log', ascending=False)
+    celltype_groups['celltype'] = celltype_groups['celltype'].str.replace('BasalGanglia-', '').str.replace('_RNAminus', '').str.replace('_RNAplus', '')
+
+    # create barplot
+    sns.barplot(data=celltype_groups, x='celltype', y='pearsonr_log', ax=ax, color='steelblue')
+
+    # rotate x-axis labels for better readability
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
+    ax.set_xlabel('Cell Type')
+    ax.set_ylabel('Mean PearsonR')
+    ax.set_yticks(np.arange(0, 1.1, 0.1))
+    # add text showing overall average
+    avg_pearsonr = celltype_groups['pearsonr_log'].mean()
+    ax.text(0.02, 0.98, f'Overall Average: {avg_pearsonr:.4f}',
+            transform=ax.transAxes, fontsize=10, verticalalignment='top')
+
     if use_celltype_head:
-        ax.set_title('Histogram plot of PearsonR on Test dataset')
+        ax.set_title('Gene-level PearsonR by Cell Type (RNA)')
     else:
-        ax.set_title('Histogram plot of PearsonR on Test dataset (No cell type head)')
+        ax.set_title('Gene-level PearsonR by Cell Type (RNA, No cell type head)')
     fig.tight_layout()
     save_dir = 'figures/' + ('celltype_head/' if use_celltype_head else 'original/')
-    fig.savefig(save_dir + 'Gene_level_PearsonR_histogram_RNA_by_atlas.pdf')
+    fig.savefig(save_dir + 'Gene_level_PearsonR_barplot_RNA_by_celltype.pdf')
 
 
 # %% get gene level raw counts
@@ -261,11 +269,8 @@ gene_target_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim
 rna_tracks = gene_pred_raw.columns[gene_pred_raw.columns.str.contains('RNA')]
 basalganglia_tracks = [c for c in rna_tracks if 'BasalGanglia' in c]
 miniatlas_tracks = [c for c in rna_tracks if 'MiniAtlas' in c]
-gene_pred_rna = gene_pred_raw[rna_tracks]
-gene_target_rna = gene_target_raw[rna_tracks]
-# add pseudo coverage
-gene_target_rna = add_pseudo_coverage(gene_target_rna, pseudo_qtl=0.05)
-gene_pred_rna = add_pseudo_coverage(gene_pred_rna, pseudo_qtl=0.05)
+gene_pred_rna = gene_pred_raw[basalganglia_tracks]
+gene_target_rna = gene_target_raw[basalganglia_tracks]
 # log transform
 gene_pred_rna_log = np.log1p(gene_pred_rna)
 gene_target_rna_log = np.log1p(gene_target_rna)
@@ -310,8 +315,8 @@ sns.kdeplot(data=gene_pearsonr_df, x='pearsonr', ax=ax, hue='Expression Level Gr
 ax.set_xlabel('PearsonR across Cell Types')
 # add text on average pearsonr
 mean_pearsonr = gene_pearsonr_df['pearsonr'].mean()
-ax.text(0.02, 0.95, f'Average PearsonR: {mean_pearsonr:.4f}', transform=ax.transAxes, fontsize=10, verticalalignment='top', color='black', fontweight='bold')
-ax.text(0.02, 0.90, 'Avg Expression Level (log rpkm):', transform=ax.transAxes, fontsize=10, verticalalignment='top', color='gray', fontweight='bold')
+ax.text(0.02, 0.95, f'Average PearsonR: {mean_pearsonr:.4f}', transform=ax.transAxes, fontsize=10, verticalalignment='top', color='black')
+ax.text(0.02, 0.90, 'Avg Expression Level (log rpkm):', transform=ax.transAxes, fontsize=10, verticalalignment='top', color='gray')
 # for each expression level group, add average pearsonr with matching colors
 for i, (group, group_df) in enumerate(gene_pearsonr_df.groupby('Expression Level Group')):
     group_mean_pearsonr = group_df['pearsonr'].mean()
@@ -504,3 +509,155 @@ for mod, group in modality_groups:
 sns.kdeplot(data=pearsonr_df, x='PearsonR', hue='modality: avg', ax=ax, fill=True, alpha=0.5)
 ax.set_xlabel('PearsonR across Cell Types (Centered)')
 fig.savefig('figures/celltype_head/MiniAtlas_cross_cell_type_pearsonr_kde_log_centered_all_modalities.pdf')
+
+
+
+
+# %% Section 4 
+# ================================================================================
+# plot the cross cell type pearsonr in atac peaks with regard to relative variance in basal ganglia
+import pickle
+with open('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20_bed_Subclass.filtered.peaks/raw_data/Test_aggregated_label_bed.pkl', 'rb') as f:
+    cross_cell_type_label = pickle.load(f)
+with open('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20_bed_Subclass.filtered.peaks/raw_data/Test_aggregated_pred_bed.pkl', 'rb') as f:
+    cross_cell_type_pred = pickle.load(f)
+# read the peak bed
+peak_bed = pd.read_csv('Data/source/ATAC_peak/Subclass.filtered.peaks.bed', sep='\t', header=None)
+# drop nan lines
+valid_indices = ~np.isnan(cross_cell_type_label).any(axis=1) & ~np.isnan(cross_cell_type_pred).any(axis=1)
+cross_cell_type_label = cross_cell_type_label[valid_indices]
+cross_cell_type_pred = cross_cell_type_pred[valid_indices]
+peak_bed = peak_bed.iloc[valid_indices, :].reset_index(drop=True)
+# %% calculate pearsonr across cell types for each modality for each peak, and filter to MiniAtlas only
+cross_cell_type_data = {}
+for mod in ['ATAC', 'K27Ac', 'K27Me3', 'K9Me3']:
+    dims = cell_type_meta.index[(cell_type_meta['modality'] == mod) & (cell_type_meta['atlas_name'] == 'BasalGanglia')].tolist()
+    labels = cross_cell_type_label[:, dims]
+    preds = cross_cell_type_pred[:, dims]
+    # log to get log_cpm
+    if mod == 'ATAC':
+        labels *= 2000  # rpkm
+        preds *= 2000
+    else:
+        labels *= 10
+        preds *= 10
+    labels = np.log1p(labels) # cpm
+    preds = np.log1p(preds)
+    # calculate mean and variance for each peak
+    label_means = np.mean(labels, axis=1)
+    label_vars = np.var(labels, axis=1)
+    preds_means = np.mean(preds, axis=1)
+    preds_vars = np.var(preds, axis=1)
+
+    # Vectorized Pearson correlation calculation
+    # Center the data
+    labels_centered = labels - label_means[:, np.newaxis]
+    preds_centered = preds - preds_means[:, np.newaxis]
+
+    # Compute numerator (covariance)
+    covariance = (labels_centered * preds_centered).sum(axis=1)
+
+    # Compute denominators (standard deviations)
+    labels_std = np.sqrt((labels_centered ** 2).sum(axis=1))
+    preds_std = np.sqrt((preds_centered ** 2).sum(axis=1))
+
+    # Pearson correlation
+    pearsonr_array = covariance / (labels_std * preds_std)
+
+    cross_cell_type_data[mod] = {
+        'label_mean': label_means,
+        'label_var': label_vars,
+        'label_coeff_var': label_vars / label_means,
+        'pearsonr': pearsonr_array,
+    }
+# %% plot scatter plots
+data_together = None
+for mod, cmap in zip(['ATAC', 'K27Ac', 'K27Me3', 'K9Me3'], ['Blues', 'Oranges', 'Greens', 'Purples']):
+    data = pd.DataFrame(cross_cell_type_data[mod])
+    fig, ax = plt.subplots(figsize=(4, 4))
+    # draw kde plot
+    sns.kdeplot(x=data['label_coeff_var'], y=data['pearsonr'], 
+                ax=ax, fill=True, cmap=cmap, levels=20, thresh=0.05)
+    ax.set_xlabel('Coefficient Variance across Cell Types')
+    ax.set_ylabel('PearsonR across Cell Types')
+    ax.set_title(f'BasalGanglia {mod}')
+    fig.tight_layout()
+    fig.savefig('figures/celltype_head/BasalGanglia_cross_cell_type_pearsonr_vs_coeff_var_' + mod + '.pdf')
+    # add modality column for later combined plotting
+    data['modality'] = mod
+    if data_together is None:
+        data_together = data
+    else:
+        data_together = pd.concat([data_together, data], axis=0)
+    fig.tight_layout()
+    fig.savefig('figures/celltype_head/BasalGanglia_cross_cell_type_pearsonr_vs_coeff_var_' + mod + '.pdf')
+    # add modality column for later combined plotting
+    data['modality'] = mod
+    if data_together is None:
+        data_together = data
+    else:
+        data_together = pd.concat([data_together, data], axis=0)
+# %% plot together
+fig, ax = plt.subplots(figsize=(6, 4))
+data_toplot = data_together[(data_together['label_coeff_var'] > 1) | ((data_together['modality'] == 'ATAC') & (data_together['label_coeff_var'] > 0.5))]
+# Create palette matching the cmaps from line 304
+palette = {'ATAC': sns.color_palette('Blues', n_colors=10)[6],
+           'K27Ac': sns.color_palette('Oranges', n_colors=10)[6],
+           'K27Me3': sns.color_palette('Greens', n_colors=10)[6],
+           'K9Me3': sns.color_palette('Purples', n_colors=10)[6]}
+# plot histogram with kde
+sns.kdeplot(data_toplot, x='pearsonr', hue='modality', ax=ax, palette=palette, fill=True, alpha=0.5, common_norm=False)
+ax.set_xlabel('PearsonR across Cell Types (Coeff Var > 1)')
+
+# Calculate and display average for each modality
+y_text_pos = 0.95
+for i, (mod, color) in enumerate(zip(['ATAC', 'K27Ac', 'K27Me3', 'K9Me3'],
+                                      [palette['ATAC'], palette['K27Ac'], palette['K27Me3'], palette['K9Me3']])):
+    mod_data = data_toplot[data_toplot['modality'] == mod]
+    mean_val = mod_data['pearsonr'].mean()
+    ax.text(0.02, y_text_pos - i*0.08, f'{mod}: μ = {mean_val:.3f} (n={len(mod_data)})',
+            transform=ax.transAxes, fontsize=10, verticalalignment='top',
+            color=color, fontweight='bold')
+
+fig.savefig('figures/celltype_head/BasalGanglia_cross_cell_type_pearsonr_kde_coeff_var_all_modalities.pdf')
+
+# %% peaks minus average then pearsonr
+cross_cell_type_label_centered = cross_cell_type_label[:, cell_type_meta.index[(cell_type_meta['atlas_name'] == 'BasalGanglia')].tolist()]
+cross_cell_type_pred_centered = cross_cell_type_pred[:, cell_type_meta.index[(cell_type_meta['atlas_name'] == 'BasalGanglia')].tolist()]
+# log transform
+cross_cell_type_pred_centered = np.log1p(cross_cell_type_pred_centered)
+cross_cell_type_label_centered = np.log1p(cross_cell_type_label_centered)
+# substract mean
+cross_cell_type_pred_centered = cross_cell_type_pred_centered - cross_cell_type_pred_centered.mean(axis=1, keepdims=True)
+cross_cell_type_label_centered = cross_cell_type_label_centered - cross_cell_type_label_centered.mean(axis=1, keepdims=True)
+cell_type_meta_miniatlas = cell_type_meta[cell_type_meta['atlas_name'] == 'BasalGanglia'].reset_index(drop=True)
+# recalculate pearsonr
+valid_indices = ~np.isnan(cross_cell_type_label_centered).any(axis=1) & ~np.isnan(cross_cell_type_pred_centered).any(axis=1)
+cross_cell_type_label_centered = cross_cell_type_label_centered[valid_indices]
+cross_cell_type_pred_centered = cross_cell_type_pred_centered[valid_indices]
+# for each track, do pearsonr
+pearsonr_values = {}
+for track in cell_type_meta_miniatlas['exp']:
+    gene_pred_track = cross_cell_type_pred_centered[:, cell_type_meta_miniatlas.index[cell_type_meta_miniatlas['exp'] == track][0]]
+    gene_target_track = cross_cell_type_label_centered[:, cell_type_meta_miniatlas.index[cell_type_meta_miniatlas['exp'] == track][0]]
+    corr, _ = pearsonr(gene_pred_track, gene_target_track)
+    pearsonr_values[track] = corr
+# convert to dataframe
+pearsonr_df = pd.DataFrame.from_dict(pearsonr_values, orient='index', columns=['PearsonR'])
+pearsonr_df = pearsonr_df.merge(cell_type_meta_miniatlas, left_index=True, right_on='exp')
+# drop RNA modalities
+pearsonr_df = pearsonr_df[(pearsonr_df['modality'] != 'RNAminus') & (pearsonr_df['modality'] != 'RNAplus')]
+# %% plot the distribution
+fig, ax = plt.subplots(figsize=(6, 4))
+# calculate the average PearsonR for each modality and annotate on the legend
+modality_groups = pearsonr_df.groupby('modality')
+for mod, group in modality_groups:
+    mean_value = group['PearsonR'].mean()
+    modality_label = f'{mod} (avg: {mean_value:.4f})'
+    # rename in the dataframe
+    pearsonr_df.loc[pearsonr_df['modality'] == mod, 'modality: avg'] = modality_label
+sns.kdeplot(data=pearsonr_df, x='PearsonR', hue='modality: avg', ax=ax, fill=True, alpha=0.5, common_norm=False)
+ax.set_xlabel('PearsonR across Cell Types (Centered)')
+fig.savefig('figures/celltype_head/BasalGanglia_cross_cell_type_pearsonr_kde_log_centered_all_modalities.pdf')
+
+# %%

@@ -101,7 +101,8 @@ def process_single_variant(variant_info, variant_dir, output_dir, pool_width, tr
             label_data = label[:, idx]
             pred_ref_data = pred_ref[:, idx]
             pred_alt_data = pred_alt[:, idx]
-            diff_data = pred_alt_data - pred_ref_data
+            # do log fold change
+            diff_data = np.log2(pred_alt_data + 1) - np.log2(pred_ref_data + 1)
 
             # Create BigWig files for this track
             tracks = {
