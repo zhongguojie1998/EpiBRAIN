@@ -592,8 +592,9 @@ def main(
         )
         # Check if output files exist
         if no_plot:
-            # When plotting is skipped, only check for raw data files
+            # When plotting is skipped, check for raw data files including .pt file
             output_files_exist = (
+                os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/interp_diff_gradient_input/{name_base}_grad_input.pt") and
                 os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_mseqs_unmap.npy") and
                 os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_label.h5")
             )
@@ -602,6 +603,7 @@ def main(
             output_file = f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp_diff_gradient_input/{name_base}_grad_input.png"
             output_files_exist = (
                 os.path.exists(output_file) and
+                os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/interp_diff_gradient_input/{name_base}_grad_input.pt") and
                 os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_mseqs_unmap.npy") and
                 os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_label.h5")
             )
