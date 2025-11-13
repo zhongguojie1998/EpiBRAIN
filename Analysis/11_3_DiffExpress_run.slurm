@@ -43,16 +43,16 @@ echo "Experiment: ${EXP_NAME}"
 echo "Checkpoint: ${CHK_NUM}"
 
 # Run the motif bed interpretation script
-/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/02_motif_bed_diff_interpretation.py \
+/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python Analysis/02_motif_bed_diff_interpretation_gradient_input.py \
     --region_bed "$BED_FILE" \
     --exp_name "$EXP_NAME" \
     --chk "$CHK_NUM" \
-    --baseline random \
     --log_base ./logs \
     --chk_base ./Chk \
     --res_base ./Res \
     --processor gpu \
     --save_raw \
+    --no_plot \
     --num_processes 1
 
 date
