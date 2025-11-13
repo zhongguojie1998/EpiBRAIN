@@ -138,6 +138,14 @@ def gradients_input_attribution_diff(
     output_dict = model(seq_input)
     preds = output_dict[output_key]  # [batch, N_bins, dim]
 
+    
+    # Select bins of interest
+    preds_slice = preds[:, bin_range, :]  # [batch, len(bin_range), dim]
+
+    # Get positive and negative predictions
+    preds_pos = preds_slice[:, :, target_pos_dim]  # [batch, len(bin_range)]
+    preds_neg = preds_slice[:, :, target_neg_dims]  # [batch, len(bin_range), len(neg_dims)]
+    
     # Untransform predictions using label_meta (reverse of training preprocessing)
     # Following the logic from 01_5_test_correlation_by_gene.py
     if not no_untransform and label_meta_row_pos is not None:
@@ -148,31 +156,33 @@ def gradients_input_attribution_diff(
 
         # Step 1: Undo scale (vectorized across all dimensions)
         if trial_scale != 1.0:
-            preds = preds / trial_scale
+            preds_pos = preds_pos / trial_scale
+            preds_neg = preds_neg / trial_scale
 
         # Step 2: Undo soft clip (vectorized across all dimensions)
         if trial_clip_soft is not None:
-            clip_mask = preds > trial_clip_soft
-            preds = torch.where(
+            clip_mask = preds_pos > trial_clip_soft
+            preds_pos = torch.where(
                 clip_mask,
-                (trial_clip_soft - 1) + (preds - (trial_clip_soft - 1)) ** 2,
-                preds
+                (trial_clip_soft - 1) + (preds_pos - (trial_clip_soft - 1)) ** 2,
+                preds_pos
+            )
+            clip_mask = preds_neg > trial_clip_soft
+            preds_neg = torch.where(
+                clip_mask,
+                (trial_clip_soft - 1) + (preds_neg - (trial_clip_soft - 1)) ** 2,
+                preds_neg
             )
 
         # Step 3: Undo power transform based on sum_stat (vectorized across all dimensions)
         if trial_sum_stat == "sum_three_quarter":
-            preds = preds ** (4.0 / 3.0)
+            preds_pos = preds_pos ** (4.0 / 3.0)
+            preds_neg = preds_neg ** (4.0 / 3.0)
         elif trial_sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
-            preds = (preds + 1) ** 2 - 1
+            preds_pos = (preds_pos + 1) ** 2 - 1
+            preds_neg = (preds_neg + 1) ** 2 - 1
         elif trial_sum_stat not in ['sum', 'mean', "avg"]:
             raise ValueError(f"Unknown sum_stat: {trial_sum_stat}")
-
-    # Select bins of interest
-    preds_slice = preds[:, bin_range, :]  # [batch, len(bin_range), dim]
-
-    # Get positive and negative predictions
-    preds_pos = preds_slice[:, :, target_pos_dim]  # [batch, len(bin_range)]
-    preds_neg = preds_slice[:, :, target_neg_dims]  # [batch, len(bin_range), len(neg_dims)]
 
     # Aggregate over bins
     if use_mean:
@@ -231,6 +241,7 @@ def process_region_chunk(args):
         use_mean,
         subtract_avg,
         input_gate,
+        no_plot,
     ) = args
 
     # Set torch threads for CPU
@@ -425,78 +436,79 @@ def process_region_chunk(args):
             else:
                 nan_occur = False
 
-        if nan_occur:
-            logger.warning(f"NAN occur in {identifier}. Skip plotting")
-        else:
-            # Sum over nucleotide dimension (already multiplied by input in gradient computation)
-            # [batch, N, 4] -> [batch, N] -> [N] -> [bin_num, window_size] -> [bin_num]
-            with torch.no_grad():
-                # Calculate trim based on the tokenizer's context extension
-                trim = (
-                    myconfig.data.context_length // myconfig.data.preprocess.window_size
-                    - myconfig.data.preprocess.n_window
-                ) // 2
+        if not no_plot:
+            if nan_occur:
+                logger.warning(f"NAN occur in {identifier}. Skip plotting")
+            else:
+                # Sum over nucleotide dimension (already multiplied by input in gradient computation)
+                # [batch, N, 4] -> [batch, N] -> [N] -> [bin_num, window_size] -> [bin_num]
+                with torch.no_grad():
+                    # Calculate trim based on the tokenizer's context extension
+                    trim = (
+                        myconfig.data.context_length // myconfig.data.preprocess.window_size
+                        - myconfig.data.preprocess.n_window
+                    ) // 2
 
-                signal = attribution_cpu.sum(dim=-1).mean(dim=0)
-                signal = signal.reshape(-1, myconfig.data.preprocess.window_size)[trim:-trim]
-                signal = signal.mean(dim=-1).detach()
+                    signal = attribution_cpu.sum(dim=-1).mean(dim=0)
+                    signal = signal.reshape(-1, myconfig.data.preprocess.window_size)[trim:-trim]
+                    signal = signal.mean(dim=-1).detach()
 
-            plot_data.append(signal)
-            plot_title.append(f"Importance Score (Gradient×Input Diff)")
+                plot_data.append(signal)
+                plot_title.append(f"Importance Score (Gradient×Input Diff)")
 
-        # plot
-        n = len(plot_data) + 1
-        height_ratios = [1] * len(plot_data) + [0.1]
-        fig, axes = plt.subplots(
-            nrows=n, ncols=1, figsize=(8, n * 1.5), sharex=True, gridspec_kw={"height_ratios": height_ratios}
-        )
+            # plot
+            n = len(plot_data) + 1
+            height_ratios = [1] * len(plot_data) + [0.1]
+            fig, axes = plt.subplots(
+                nrows=n, ncols=1, figsize=(8, n * 1.5), sharex=True, gridspec_kw={"height_ratios": height_ratios}
+            )
 
-        trim = (
-            myconfig.data.context_length // myconfig.data.preprocess.window_size
-            - myconfig.data.preprocess.n_window
-        ) // 2
-        x = np.arange(real_start, real_end).reshape(-1, myconfig.data.preprocess.window_size)[trim:-trim, 0]
+            trim = (
+                myconfig.data.context_length // myconfig.data.preprocess.window_size
+                - myconfig.data.preprocess.n_window
+            ) // 2
+            x = np.arange(real_start, real_end).reshape(-1, myconfig.data.preprocess.window_size)[trim:-trim, 0]
 
-        for i, ax in enumerate(axes[:-1]):
-            ax.plot(x, plot_data[i])
-            ax.set_title(plot_title[i])
+            for i, ax in enumerate(axes[:-1]):
+                ax.plot(x, plot_data[i])
+                ax.set_title(plot_title[i])
+                ax.set_ylabel(None)
+                ax.set_xlabel(None)
+
+            ax = axes[-1]
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+            ax.set_ylim(0, 1)
+            ax.set_yticks([])
             ax.set_ylabel(None)
             ax.set_xlabel(None)
 
-        ax = axes[-1]
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        ax.set_ylim(0, 1)
-        ax.set_yticks([])
-        ax.set_ylabel(None)
-        ax.set_xlabel(None)
+            linewidth = 1.5
+            rec_width = 1
+            ax.hlines(0.5, x.min(), x.max(), color="black", linewidth=linewidth)
+            ax.set_title(f"Chromosome {chr_name[3:]}")
 
-        linewidth = 1.5
-        rec_width = 1
-        ax.hlines(0.5, x.min(), x.max(), color="black", linewidth=linewidth)
-        ax.set_title(f"Chromosome {chr_name[3:]}")
+            rect = Rectangle(
+                (x[bin_range[0]], 0.5 - 0.5 * rec_width),
+                x[bin_range[-1]] - x[bin_range[0]],
+                rec_width,
+                facecolor="lightblue",
+                edgecolor="black",
+                linewidth=linewidth,
+            )
+            ax.add_patch(rect)
 
-        rect = Rectangle(
-            (x[bin_range[0]], 0.5 - 0.5 * rec_width),
-            x[bin_range[-1]] - x[bin_range[0]],
-            rec_width,
-            facecolor="lightblue",
-            edgecolor="black",
-            linewidth=linewidth,
-        )
-        ax.add_patch(rect)
+            plt.tight_layout()
+            plt.savefig(
+                f"{res_base}/{exp_name}/analysis_{chk}/plot/interp_diff_gradient_input/{name_base}_grad_input.png",
+                dpi=300,
+                bbox_inches="tight",
+            )
+            plt.close()
 
-        plt.tight_layout()
-        plt.savefig(
-            f"{res_base}/{exp_name}/analysis_{chk}/plot/interp_diff_gradient_input/{name_base}_grad_input.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-        plt.close()
-
-        # Log total time for this sample
-        sample_total_time = time.time() - sample_start_time
-        logger.info(f"Sample {name_base} interpretation completed in {sample_total_time:.2f}s")
+            # Log total time for this sample
+            sample_total_time = time.time() - sample_start_time
+            logger.info(f"Sample {name_base} interpretation completed in {sample_total_time:.2f}s")
 
         # Clean up variables at the end of each region processing
         del test_seq_onehot, plot_data, plot_title
@@ -529,6 +541,7 @@ def process_region_chunk(args):
 @click.option("--use_mean", is_flag=True, default=True, help="Use mean (vs sum) for bin aggregation")
 @click.option("--no_subtract_avg", is_flag=True, help="Don't subtract mean across nucleotides")
 @click.option("--no_input_gate", is_flag=True, help="Don't multiply by input (just use gradients)")
+@click.option("--no_plot", is_flag=True, help="Skip generating plots")
 def main(
     region_bed,
     exp_name,
@@ -548,6 +561,7 @@ def main(
     use_mean,
     no_subtract_avg,
     no_input_gate,
+    no_plot,
 ):
     LOG_BASE = os.path.abspath(log_base)
     CHK_BASE = os.path.abspath(chk_base)
@@ -577,12 +591,20 @@ def main(
             else f"{chr_name}_{start}_{end}_{gene_name}_{trial_pos_clean}_{trial_neg_clean}"
         )
         # Check if output files exist
-        output_file = f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp_diff_gradient_input/{name_base}_grad_input.png"
-        output_files_exist = (
-            os.path.exists(output_file) and
-            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_mseqs_unmap.npy") and
-            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_label.h5")
-        )
+        if no_plot:
+            # When plotting is skipped, only check for raw data files
+            output_files_exist = (
+                os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_mseqs_unmap.npy") and
+                os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_label.h5")
+            )
+        else:
+            # When plotting is enabled, also check for plot file
+            output_file = f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp_diff_gradient_input/{name_base}_grad_input.png"
+            output_files_exist = (
+                os.path.exists(output_file) and
+                os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_mseqs_unmap.npy") and
+                os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_label.h5")
+            )
         region_df.at[i, 'todo'] = not output_files_exist or force_restart
         if not region_df.at[i, 'todo']:
             logger.info(f"Skip {name_base}, already exists")
@@ -672,6 +694,7 @@ def main(
             use_mean,
             not no_subtract_avg,  # Convert flag to boolean
             not no_input_gate,    # Convert flag to boolean
+            no_plot,
         )
         process_args.append(args)
 
