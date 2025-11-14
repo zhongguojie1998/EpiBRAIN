@@ -117,7 +117,7 @@ def collate_fn(batch):
         msgs.append(err)
 
     if len(wt_list) == 0:
-        return None, None, np.array(task_ids), np.array(msgs), np.array(masks)
+        return None, None, None, None, np.array(task_ids), np.array(msgs), np.array(masks)
     return torch.stack(wt_list), torch.stack(mut_list), torch.stack(wt_rev_list), torch.stack(mut_rev_list), np.array(task_ids), np.array(msgs), np.array(masks)
 
 
