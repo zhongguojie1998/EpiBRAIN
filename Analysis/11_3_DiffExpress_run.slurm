@@ -53,6 +53,7 @@ echo "Checkpoint: ${CHK_NUM}"
     --processor gpu \
     --save_raw \
     --no_plot \
+    --rc \
     --num_processes 1
 
 date
