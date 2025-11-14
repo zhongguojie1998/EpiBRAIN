@@ -21,7 +21,7 @@ os.chdir(ROOT)
 warnings.filterwarnings("ignore")
 
 from data.data_utils import STD_CHR, ModelSeq, annotate_unmap, get_labels
-from data.tokenizer import FastaInterval, str_to_one_hot
+from data.tokenizer import FastaInterval, str_to_one_hot, one_hot_reverse_complement
 from model.model_utils import setup_model
 from utils.config import load_config
 from utils.logging import BaseLogger
@@ -89,7 +89,7 @@ def gradients_input_attribution_diff(
     no_untransform=False,
     use_mean=True,
     subtract_avg=True,
-    input_gate=True,
+    input_gate=False,
 ):
     """
     Compute gradient×input attribution for differential expression.
@@ -110,7 +110,7 @@ def gradients_input_attribution_diff(
         no_untransform: Skip untransforming (if predictions are already in count space)
         use_mean: Use mean aggregation (vs sum) over bins
         subtract_avg: Subtract mean across nucleotides at each position
-        input_gate: Multiply gradients by input (gradient × input)
+        input_gate: Multiply gradients by input (gradient × input), default False
 
     Returns:
         Gradients tensor [batch, length, channels]
@@ -221,6 +221,54 @@ def gradients_input_attribution_diff(
     return grads
 
 
+def swap_rna_strand(trial_name):
+    """
+    Swap RNA strand in trial name (RNAplus <-> RNAminus).
+
+    Args:
+        trial_name: Trial name string (e.g., 'MiniAtlas-ACBGM_RNAplus')
+
+    Returns:
+        Trial name with swapped strand (e.g., 'MiniAtlas-ACBGM_RNAminus')
+    """
+    if 'RNAplus' in trial_name:
+        return trial_name.replace('RNAplus', 'RNAminus')
+    elif 'RNAminus' in trial_name:
+        return trial_name.replace('RNAminus', 'RNAplus')
+    else:
+        # No strand information, return as is
+        return trial_name
+
+
+def unaugment_grads(grads, fwdrc=True):
+    """
+    Undo sequence augmentation for reverse complement.
+
+    Args:
+        grads: Gradient tensor [batch, length, channels]
+        fwdrc: If False, gradients are from reverse complement and need to be transformed back
+
+    Returns:
+        Transformed gradients [batch, length, channels]
+    """
+    if not fwdrc:
+        # Reverse complement: need to reverse and swap nucleotides
+
+        # Reverse the sequence (along length dimension)
+        grads = torch.flip(grads, dims=[1])
+
+        # Swap A and T (indices 0 and 3)
+        grads_copy = grads.clone()
+        grads[:, :, 0] = grads_copy[:, :, 3]
+        grads[:, :, 3] = grads_copy[:, :, 0]
+
+        # Swap C and G (indices 1 and 2)
+        grads[:, :, 1] = grads_copy[:, :, 2]
+        grads[:, :, 2] = grads_copy[:, :, 1]
+
+    return grads
+
+
 def process_region_chunk(args):
     (
         exp_name,
@@ -241,6 +289,7 @@ def process_region_chunk(args):
         use_mean,
         subtract_avg,
         input_gate,
+        rc,
         no_plot,
     ) = args
 
@@ -311,6 +360,31 @@ def process_region_chunk(args):
         if len(trial_neg_dims) == 0:
             logger.warning(f"No valid negative trials found in {trial_neg}, skip")
             continue
+
+        # Prepare reverse complement trial dims (swap RNAplus <-> RNAminus)
+        if rc:
+            # Swap strand for positive trial
+            trial_pos_rev = swap_rna_strand(trial_pos)
+            try:
+                trial_pos_dim_rev = int(label_meta.dim[label_meta['trial'] == trial_pos_rev].values[0])
+                label_meta_row_pos_rev = label_meta[label_meta['trial'] == trial_pos_rev].iloc[0]
+            except:
+                logger.warning(f"{trial_pos_rev} (RC of {trial_pos}) cannot be found in label meta, skip")
+                continue
+
+            # Swap strand for negative trials
+            neg_trials_rev = [swap_rna_strand(t) for t in neg_trials]
+            trial_neg_dims_rev = label_meta.dim[label_meta['trial'].isin(neg_trials_rev)].values
+            label_meta_rows_neg_rev = [label_meta[label_meta['trial'] == t].iloc[0] for t in neg_trials_rev if len(label_meta[label_meta['trial'] == t]) > 0]
+            if len(trial_neg_dims_rev) == 0:
+                logger.warning(f"No valid negative trials found in {neg_trials_rev} (RC of {trial_neg}), skip")
+                continue
+        else:
+            # No RC, set to None
+            trial_pos_dim_rev = None
+            trial_neg_dims_rev = None
+            label_meta_row_pos_rev = None
+            label_meta_rows_neg_rev = None
 
         if not chr_name in STD_CHR:
             continue
@@ -392,30 +466,72 @@ def process_region_chunk(args):
             # Prepare input tensor
             input_tensor = test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device)
 
-            # Calculate gradient×input attribution for differential expression
-            attribution = gradients_input_attribution_diff(
-                model=model,
-                seq_input=input_tensor,
-                output_key=use_head,
-                target_pos_dim=trial_pos_dim,
-                target_neg_dims=trial_neg_dims,
-                bin_range=bin_range,
-                label_meta_row_pos=label_meta_row_pos,
-                label_meta_rows_neg=label_meta_rows_neg,
-                pseudo_count=pseudo_count,
-                no_untransform=no_untransform,
-                use_mean=use_mean,
-                subtract_avg=subtract_avg,
-                input_gate=input_gate,
-            )
+            # Accumulate gradients across forward and (optionally) reverse complement
+            attribution_accumulated = None
+            num_augmentations = 0
 
-            if not torch.isfinite(attribution).all():
+            # Loop over forward and reverse complement
+            for rev_comp in [False, True] if rc else [False]:
+                # Prepare input (reverse complement if needed)
+                if rev_comp:
+                    # one_hot_reverse_complement expects [..., length, 4] format
+                    # input_tensor is [batch, 4, length], so permute before and after
+                    input_tensor_aug = one_hot_reverse_complement(input_tensor.permute(0, 2, 1)).permute(0, 2, 1)
+                    # Use strand-swapped trial dimensions for RC
+                    target_pos_dim_use = trial_pos_dim_rev
+                    target_neg_dims_use = trial_neg_dims_rev
+                    label_meta_row_pos_use = label_meta_row_pos_rev
+                    label_meta_rows_neg_use = label_meta_rows_neg_rev
+                else:
+                    input_tensor_aug = input_tensor
+                    # Use original trial dimensions
+                    target_pos_dim_use = trial_pos_dim
+                    target_neg_dims_use = trial_neg_dims
+                    label_meta_row_pos_use = label_meta_row_pos
+                    label_meta_rows_neg_use = label_meta_rows_neg
+
+                # Calculate gradient attribution for differential expression
+                attribution = gradients_input_attribution_diff(
+                    model=model,
+                    seq_input=input_tensor_aug,
+                    output_key=use_head,
+                    target_pos_dim=target_pos_dim_use,
+                    target_neg_dims=target_neg_dims_use,
+                    bin_range=bin_range,
+                    label_meta_row_pos=label_meta_row_pos_use,
+                    label_meta_rows_neg=label_meta_rows_neg_use,
+                    pseudo_count=pseudo_count,
+                    no_untransform=no_untransform,
+                    use_mean=use_mean,
+                    subtract_avg=subtract_avg,
+                    input_gate=input_gate,
+                )
+
+                # Transform back if reverse complement
+                attribution = unaugment_grads(attribution, fwdrc=(not rev_comp))
+
+                # Accumulate
+                if attribution_accumulated is None:
+                    attribution_accumulated = attribution
+                else:
+                    attribution_accumulated = attribution_accumulated + attribution
+                num_augmentations += 1
+
+                # Clean up
+                del attribution
+                if rev_comp:
+                    del input_tensor_aug
+
+            # Average across augmentations
+            attribution_accumulated = attribution_accumulated / num_augmentations
+
+            if not torch.isfinite(attribution_accumulated).all():
                 logger.warning(f"NAN occur in {identifier}")
                 nan_occur = True
 
             # Move to CPU immediately and clear GPU memory
-            attribution_cpu = attribution.detach().cpu()
-            del attribution
+            attribution_cpu = attribution_accumulated.detach().cpu()
+            del attribution_accumulated
 
             # Clear GPU cache
             if device.startswith('cuda'):
@@ -540,7 +656,8 @@ def process_region_chunk(args):
 @click.option("--no_untransform", is_flag=True, help="Skip untransform (use if predictions already in count space)")
 @click.option("--use_mean", is_flag=True, default=True, help="Use mean (vs sum) for bin aggregation")
 @click.option("--no_subtract_avg", is_flag=True, help="Don't subtract mean across nucleotides")
-@click.option("--no_input_gate", is_flag=True, help="Don't multiply by input (just use gradients)")
+@click.option("--input_gate", is_flag=True, help="Multiply gradients by input (gradient × input)")
+@click.option("--rc", is_flag=True, help="Ensemble forward and reverse complement gradients")
 @click.option("--no_plot", is_flag=True, help="Skip generating plots")
 def main(
     region_bed,
@@ -560,7 +677,8 @@ def main(
     no_untransform,
     use_mean,
     no_subtract_avg,
-    no_input_gate,
+    input_gate,
+    rc,
     no_plot,
 ):
     LOG_BASE = os.path.abspath(log_base)
@@ -695,7 +813,8 @@ def main(
             no_untransform,
             use_mean,
             not no_subtract_avg,  # Convert flag to boolean
-            not no_input_gate,    # Convert flag to boolean
+            input_gate,           # Already a boolean
+            rc,                   # Already a boolean
             no_plot,
         )
         process_args.append(args)
