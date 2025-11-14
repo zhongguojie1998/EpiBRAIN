@@ -48,12 +48,14 @@ Command-line usage:
         --initial_flank_to_add 8 \\
         --sliding_window_size 18 \\
         --flank_size 8 \\
+        --center_bp 524288 \\
         --generate_script
 
 Note:
     - Window size (-w) is automatically set to context_length from config (e.g., 524288)
     - Array shapes are (batch_size, 4, seq_len) as required by modisco v2.x
     - Default parameters are based on borzoi's TFMoDISco usage
+    - Center bp (-c/--center_bp): Extract only center bp from sequences (default: None, use full sequence)
     - Reference: https://github.com/calico/borzoi
 
 MoDISco v2.x parameter mapping (modisco defaults -> borzoi values):
@@ -151,7 +153,7 @@ def parse_celltype_from_filename(filename):
     return celltype
 
 
-def process_single_gradient_file(grad_file, fasta_file, context_length, gaussian_sd, truncate):
+def process_single_gradient_file(grad_file, fasta_file, context_length, gaussian_sd, truncate, center_bp=None):
     """
     Process a single gradient file: load gradient, load sequence, and reweight.
 
@@ -161,6 +163,7 @@ def process_single_gradient_file(grad_file, fasta_file, context_length, gaussian
         context_length: Sequence context length
         gaussian_sd: Gaussian filter standard deviation
         truncate: Gaussian filter truncate parameter
+        center_bp: If specified, extract only center bp (default: None, use full sequence)
 
     Returns:
         tuple: (reweighted_gradient, sequence, metadata) or None if failed
@@ -197,6 +200,16 @@ def process_single_gradient_file(grad_file, fasta_file, context_length, gaussian
         )
 
         seq_onehot = token_dict["one_hot"].numpy()  # [N, 4]
+
+        # Extract center region if center_bp is specified
+        if center_bp is not None:
+            seq_len = grad_numpy.shape[0]
+            pos_start = seq_len // 2 - center_bp // 2
+            pos_end = pos_start + center_bp
+
+            # Extract center region
+            grad_numpy = grad_numpy[pos_start:pos_end]
+            seq_onehot = seq_onehot[pos_start:pos_end]
 
         # Reweight gradient
         # Step 1: Compute standard deviation across nucleotides at each position
@@ -310,7 +323,7 @@ def load_gradients_from_directory(gradient_dir, baseline_type="random", logger=N
     return gradients_by_celltype, metadata_by_celltype
 
 
-def process_gradients_parallel(gradient_files, fasta_file, context_length, gaussian_sd, truncate, n_jobs=-1, logger=None):
+def process_gradients_parallel(gradient_files, fasta_file, context_length, gaussian_sd, truncate, center_bp=None, n_jobs=-1, logger=None):
     """
     Process all gradient files in parallel: load gradients, sequences, and reweight.
 
@@ -320,6 +333,7 @@ def process_gradients_parallel(gradient_files, fasta_file, context_length, gauss
         context_length: Sequence context length
         gaussian_sd: Gaussian filter standard deviation
         truncate: Gaussian filter truncate parameter
+        center_bp: If specified, extract only center bp (default: None, use full sequence)
         n_jobs: Number of parallel jobs (-1 = all CPUs)
         logger: Logger instance
 
@@ -332,7 +346,7 @@ def process_gradients_parallel(gradient_files, fasta_file, context_length, gauss
     # Process all files in parallel
     results = Parallel(n_jobs=n_jobs, verbose=10)(
         delayed(process_single_gradient_file)(
-            grad_file, fasta_file, context_length, gaussian_sd, truncate
+            grad_file, fasta_file, context_length, gaussian_sd, truncate, center_bp
         ) for grad_file in gradient_files
     )
 
@@ -607,18 +621,19 @@ def run_tfmodisco_cli(gradient_npz, onehot_npz, output_h5, num_seqlets=40000, wi
 @click.option("--initial_flank_to_add", type=int, default=8, help="Initial flank to add (default: 8, like borzoi)")
 @click.option("--sliding_window_size", type=int, default=18, help="Sliding window size (default: 18, like borzoi)")
 @click.option("--flank_size", type=int, default=8, help="Flank size (default: 8, like borzoi)")
+@click.option("--center_bp", "-c", type=int, default=None, help="Extract only center bp (default: None, use full sequence)")
 @click.option("--n_jobs", type=int, default=-1, help="Number of parallel jobs for processing (-1 = all CPUs)")
 @click.option("--force_restart", is_flag=True, help="Force restart even if intermediate files exist")
 @click.option("--generate_script", is_flag=True, help="Generate bash script instead of running MoDISco")
 def main(exp_name, chk, baseline, log_base, res_base, gaussian_sd, truncate, num_seqlets,
-         trim_to_window_size, initial_flank_to_add, sliding_window_size, flank_size, n_jobs, force_restart, generate_script):
+         trim_to_window_size, initial_flank_to_add, sliding_window_size, flank_size, center_bp, n_jobs, force_restart, generate_script):
     """
     Apply TF-MoDISco to differential expression gradients, processing each cell type separately.
     """
     # Setup paths
     LOG_BASE = os.path.abspath(log_base)
     RES_BASE = os.path.abspath(res_base)
-    gradient_dir = f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/interp_diff"
+    gradient_dir = f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/interp_diff_gradient_input"
     output_dir = f"{RES_BASE}/{exp_name}/analysis_{chk}/modisco"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -638,6 +653,7 @@ def main(exp_name, chk, baseline, log_base, res_base, gaussian_sd, truncate, num
     logger.info(f"Initial flank to add: {initial_flank_to_add}")
     logger.info(f"Sliding window size: {sliding_window_size}")
     logger.info(f"Flank size: {flank_size}")
+    logger.info(f"Center bp: {center_bp if center_bp else 'None (use full sequence)'}")
     logger.info(f"Parallel jobs: {n_jobs if n_jobs > 0 else 'all CPUs'}")
 
     # Load config to get reference genome path and context length
@@ -716,6 +732,7 @@ def main(exp_name, chk, baseline, log_base, res_base, gaussian_sd, truncate, num
                     context_length,
                     gaussian_sd=gaussian_sd,
                     truncate=truncate,
+                    center_bp=center_bp,
                     n_jobs=n_jobs,
                     logger=logger
                 )

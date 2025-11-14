@@ -192,8 +192,8 @@ def get_model(checkpoint, device, config=None):
 
 def validate_score_names(score_names):
     """Validate and filter score names based on implemented scores."""
-    IMPLEMENTED_SCORES = {"raw_diff", "l1_sum", "l2_sum", "log_square", 
-                          "local_raw_diff", "local_l1_sum", "local_l2_sum", "local_log_square"}  # Add more score names as you implement them
+    IMPLEMENTED_SCORES = {"raw_diff", "raw_log_diff", "l1_sum", "l2_sum", "log_square", 
+                          "local_raw_diff", "local_raw_log_diff", "local_l1_sum", "local_l2_sum", "local_log_square"}  # Add more score names as you implement them
     original_score_names = set(score_names)
     score_names = [name for name in score_names if name in IMPLEMENTED_SCORES]
 
@@ -211,6 +211,11 @@ def validate_score_names(score_names):
 def vep_score(pred_mut, pred_wt, score_name):
     if score_name == "raw_diff":
         diffs = pred_mut - pred_wt
+        scores = np.sum(diffs, axis=1)
+    elif score_name == "raw_log_diff":
+        log_alt = np.log2(1 + pred_mut)
+        log_ref = np.log2(1 + pred_wt)
+        diffs = log_alt - log_ref
         scores = np.sum(diffs, axis=1)
     elif score_name == "l1_sum":
         diffs = np.abs(pred_mut - pred_wt)  # shape: (B, L, T)
@@ -239,6 +244,13 @@ def vep_score(pred_mut, pred_wt, score_name):
     elif score_name == "local_raw_diff":
         # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
         diffs = pred_mut - pred_wt
+        diffs_local = diffs[:, diffs.shape[1] // 2 - 15: diffs.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
+        scores = np.sum(diffs_local, axis=1)  # shape: (B, T)
+    elif score_name == "local_raw_log_diff":
+        # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
+        log_alt = np.log2(1 + pred_mut)
+        log_ref = np.log2(1 + pred_wt)
+        diffs = log_alt - log_ref
         diffs_local = diffs[:, diffs.shape[1] // 2 - 15: diffs.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
         scores = np.sum(diffs_local, axis=1)  # shape: (B, T)
     elif score_name == "local_log_square":

@@ -237,13 +237,13 @@ if [ "$MERGE_ONLY" != "true" ]; then
             python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
                 -h5 "$H5_FILE" \
                 -l "$LABEL_META" \
-                -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG $LOAD_EXISTING_FLAG
+                -e "$EXPERIMENT" -s raw_diff -s raw_log_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_raw_log_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG $LOAD_EXISTING_FLAG
         else
             # Filelist mode
             python Analysis/03_variant_effect_screen/init_tasks.py -fl "$FILE_LIST" \
                 -h5 "$H5_FILE" \
                 -l "$LABEL_META" \
-                -e "$EXPERIMENT" -s raw_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG $LOAD_EXISTING_FLAG
+                -e "$EXPERIMENT" -s raw_diff -s raw_log_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_raw_log_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG $LOAD_EXISTING_FLAG
         fi
     else
         echo "H5 file already exists and --force not specified. Skipping init_tasks."
