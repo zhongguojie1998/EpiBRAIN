@@ -97,15 +97,17 @@ gene_level_results_orig['modality'] = gene_level_results_orig['modality_x'].repl
 
 # %% plot modality metrics bar plots by cell type
 for res, use_celltype_head in zip([gene_level_results, gene_level_results_orig], [True, False]):
-    fig, ax = plt.subplots(figsize=(6, 4))
+    fig, ax = plt.subplots(figsize=(8, 4))
     res = res[res['modality'] == 'RNA']
     # calculate the average PearsonR for each cell type
     celltype_groups = res.groupby('celltype')['pearsonr_log'].mean().reset_index()
     celltype_groups = celltype_groups.sort_values('pearsonr_log', ascending=False)
-    celltype_groups['celltype'] = celltype_groups['celltype'].str.replace('BasalGanglia-', '').str.replace('_RNAminus', '').str.replace('_RNAplus', '')
-
-    # create barplot
-    sns.barplot(data=celltype_groups, x='celltype', y='pearsonr_log', ax=ax, color='steelblue')
+    celltype_groups['celltype'] = celltype_groups['celltype'].str.replace('_RNAminus', '').str.replace('_RNAplus', '')
+    celltype_groups['atlas_name'] = celltype_groups['celltype'].apply(
+        lambda x: 'BasalGanglia' if 'BasalGanglia' in x else 'MiniAtlas')
+    # create barplot with reversed colors
+    palette_reversed = {'BasalGanglia': sns.color_palette()[0], 'MiniAtlas': sns.color_palette()[1]}
+    sns.barplot(data=celltype_groups, x='celltype', y='pearsonr_log', hue='atlas_name', ax=ax, palette=palette_reversed)
 
     # rotate x-axis labels for better readability
     ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
@@ -124,6 +126,11 @@ for res, use_celltype_head in zip([gene_level_results, gene_level_results_orig],
     fig.tight_layout()
     save_dir = 'figures/' + ('celltype_head/' if use_celltype_head else 'original/')
     fig.savefig(save_dir + 'Gene_level_PearsonR_barplot_RNA_by_celltype.pdf')
+    fig, ax = plt.subplots(figsize=(2, 3))
+    sns.boxplot(data=res, x='atlas_name', y='pearsonr_log', ax=ax, width=0.4, hue='atlas_name', palette=palette_reversed, showfliers=False)
+    fig.tight_layout()
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
+    fig.savefig(save_dir + 'Gene_level_PearsonR_boxplot_RNA_by_atlas.pdf')
 
 
 # %% get gene level raw counts
@@ -269,11 +276,11 @@ gene_target_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim
 rna_tracks = gene_pred_raw.columns[gene_pred_raw.columns.str.contains('RNA')]
 basalganglia_tracks = [c for c in rna_tracks if 'BasalGanglia' in c]
 miniatlas_tracks = [c for c in rna_tracks if 'MiniAtlas' in c]
-gene_pred_rna = gene_pred_raw[basalganglia_tracks]
-gene_target_rna = gene_target_raw[basalganglia_tracks]
+gene_pred_rna = gene_pred_raw[rna_tracks]
+gene_target_rna = gene_target_raw[rna_tracks]
 # log transform
-gene_pred_rna_log = np.log1p(gene_pred_rna)
-gene_target_rna_log = np.log1p(gene_target_rna)
+gene_pred_rna_log = np.log(gene_pred_rna)
+gene_target_rna_log = np.log(gene_target_rna)
 gene_pearsonr_values = {}
 for gene in gene_pred_rna_log.index:
     gene_pred_values = gene_pred_rna_log.loc[gene]
@@ -303,7 +310,7 @@ ax[1].set_title('Genes with Mean Expression >= 1')
 fig.savefig('figures/celltype_head/Gene_level_PearsonR_vs_mean_expression_logrpkm.pdf')
 # kde on pearsonr only
 fig, ax = plt.subplots(figsize=(6, 4))
-gene_pearsonr_df['Expression Level Group'] = pd.cut(gene_pearsonr_df['mean'], bins=[-np.inf, 1, 3, 5, np.inf], labels=['Low (<1)', 'Medium (1-3)', 'High (3-5)', 'Very High (>5)'])
+chch['Expression Level Group'] = pd.cut(gene_pearsonr_df['mean'], bins=[-np.inf, 1, 3, 5, np.inf], labels=['Low (<1)', 'Medium (1-3)', 'High (3-5)', 'Very High (>5)'])
 # Define consistent color palette for each group
 group_colors = {
     'Low (<1)': '#4575b4',
@@ -441,7 +448,7 @@ for i, (mod, color) in enumerate(zip(['ATAC', 'K27Ac', 'K27Me3'],
                                       [palette['ATAC'], palette['K27Ac'], palette['K27Me3']])):
     mod_data = data_toplot[data_toplot['modality'] == mod]
     mean_val = mod_data['pearsonr'].mean()
-    ax.text(0.02, y_text_pos - i*0.08, f'{mod}: μ = {mean_val:.3f}',
+    ax.text(0.02, y_text_pos - i*0.08, f'{mod}: μ = {mean_val:.3f} (n={len(mod_data)})',
             transform=ax.transAxes, fontsize=10, verticalalignment='top',
             color=color, fontweight='bold')
 
@@ -464,7 +471,7 @@ for i, mod in enumerate(['ATAC', 'K27Ac', 'K27Me3']):
     # print average values
     for j, (is_linked, group) in enumerate(mod_data.groupby('is_abc_linked')):
         mean_value = group['pearsonr'].mean()
-        ax[i].text(0.02, y_text_pos - j*0.08, f'{is_linked}: μ = {mean_value:.3f}',
+        ax[i].text(0.02, y_text_pos - j*0.08, f'{is_linked}: μ = {mean_value:.3f} (n={len(group)})',
                    transform=ax[i].transAxes, fontsize=10, verticalalignment='top',
                    color=palette[f'{mod}:{is_linked}'], fontweight='bold')
     ax[i].set_title(f'MiniAtlas Cross Cell Types ({mod})')
@@ -659,5 +666,72 @@ for mod, group in modality_groups:
 sns.kdeplot(data=pearsonr_df, x='PearsonR', hue='modality: avg', ax=ax, fill=True, alpha=0.5, common_norm=False)
 ax.set_xlabel('PearsonR across Cell Types (Centered)')
 fig.savefig('figures/celltype_head/BasalGanglia_cross_cell_type_pearsonr_kde_log_centered_all_modalities.pdf')
+
+# %% Section 5
+# plot PearsonR with regard to the cell type sizes and saturation
+bin_level_results = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear_full_atlas/analysis_17/raw_data/Test_metric.csv', index_col=0)
+# get the number of cells from meta data
+cell_type_meta = pd.read_csv('Data/data_config/basal_ganglia_miniatlas_complete_v1.csv', index_col=0)
+cell_type_meta.reset_index(inplace=True, drop=True)
+# annotate the bin level results with cell type information
+bin_level_results = bin_level_results.merge(cell_type_meta, left_on='trial', right_on='exp')
+# rename modality of RNA strands
+bin_level_results['modality'] = bin_level_results['modality'].replace(
+    {'RNAplus': 'RNA-', 'RNAminus': 'RNA+', 'K27Ac': 'H3K27ac', 'K27Me3': 'H3K27me3', 'K9Me3': 'H3K9me3'})
+# plot PearsonR vs number of cells
+# log transform the cell type number
+bin_level_results['log_celltype_n'] = np.log10(bin_level_results['celltype_n'])
+# create bins for cell type sizes
+bin_level_results['celltype_bin'] = pd.cut(bin_level_results['log_celltype_n'], bins=10)
+# calculate mean and standard error for each bin and modality
+grouped_stats = bin_level_results.groupby(['celltype_bin', 'modality'])['PearsonR'].agg(['mean', 'sem', 'count']).reset_index()
+# get bin centers for plotting
+grouped_stats['bin_center'] = grouped_stats['celltype_bin'].apply(lambda x: x.mid)
+
+fig, ax = plt.subplots(figsize=(6, 4))
+modalities = grouped_stats['modality'].unique()
+modalities = modalities[modalities != 'RNA+']  # exclude RNA+ and RNA- for this plot
+modalities = modalities[modalities != 'RNA-']
+palette = sns.color_palette()
+for i, modality in enumerate(modalities):
+    modality_data = grouped_stats[grouped_stats['modality'] == modality]
+    ax.errorbar(modality_data['bin_center'], modality_data['mean'],
+                yerr=modality_data['sem'], label=modality,
+                color=palette[i], linewidth=2.5, marker='o', markersize=6,
+                capsize=4, capthick=2)
+ax.set_xlabel('log10(Number of Cells)')
+ax.set_ylabel('PearsonR')
+ax.set_title('Bin-level PearsonR vs Number of Cells')
+ax.legend()
+fig.savefig('figures/celltype_head/Bin_level_PearsonR_vs_number_of_cells.pdf')
+
+# %% # load gene level metrics
+gene_level_results = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear_full_atlas/analysis_17/gene_level/raw_data/Test_gene_metrics_length.csv', index_col=0)
+gene_level_results = gene_level_results.merge(cell_type_meta, left_on='trial', right_on='exp')
+gene_level_results['modality'] = gene_level_results['modality_x'].replace(
+    {'RNA': 'RNA', 'RNAplus': 'RNA', 'RNAminus': 'RNA', 'K27Ac': 'H3K27ac', 'K27Me3': 'H3K27me3', 'K9Me3': 'H3K9me3'})
+# log transform the cell type number
+gene_level_results['log_celltype_n'] = np.log10(gene_level_results['celltype_n'])
+# create bins for cell type sizes
+gene_level_results['celltype_bin'] = pd.cut(gene_level_results['log_celltype_n'], bins=10)
+# calculate mean and standard error for each bin and modality
+grouped_stats_gene = gene_level_results.groupby(['celltype_bin', 'modality'])['pearsonr_log'].agg(['mean', 'sem', 'count']).reset_index()
+# get bin centers for plotting
+grouped_stats_gene['bin_center'] = grouped_stats_gene['celltype_bin'].apply(lambda x: x.mid)
+
+fig, ax = plt.subplots(figsize=(6, 4))
+modalities = ['RNA']
+palette = sns.color_palette()
+for i, modality in enumerate(modalities):
+    modality_data = grouped_stats_gene[grouped_stats_gene['modality'] == modality]
+    ax.errorbar(modality_data['bin_center'], modality_data['mean'],
+                yerr=modality_data['sem'], label=modality,
+                color=palette[4], linewidth=2.5, marker='o', markersize=6,
+                capsize=4, capthick=2)
+ax.set_xlabel('log10(Number of Cells)')
+ax.set_ylabel('PearsonR')
+ax.set_title('Gene-level PearsonR vs Number of Cells')
+ax.legend()
+fig.savefig('figures/celltype_head/Gene_level_PearsonR_vs_number_of_cells.pdf')
 
 # %%

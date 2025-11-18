@@ -320,7 +320,7 @@ ax.set_title(organ)
 legend_elements = [Patch(facecolor=colors[t], edgecolor='black', label=t) for t in to_plot['type'].unique()]
 ax.legend(handles=legend_elements, title='Type')
 # %% plot overall model performances
-organ = 'Cortex'
+organ = 'Basal_ganglia'
 variant_groups = ['all', '<3k', '3k-12k', '12k-35k', '>35k']
 
 # Prepare data for all groups

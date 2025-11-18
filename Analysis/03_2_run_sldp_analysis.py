@@ -116,7 +116,9 @@ def main():
         exp_n = exp_n[sort_idx]
         # Calculate variant effects
         exp_var_score = res["results/local_log_square"][positions, :]
-        final_score = exp_var_score * (1 - 2 * exp_reverse_map).reshape(-1, 1)
+        # local_log_square is symmetric
+        final_score = exp_var_score
+        # final_score = exp_var_score * (1 - 2 * exp_reverse_map).reshape(-1, 1)
         variant_effects = pd.DataFrame(final_score, columns=tracks)
         
         # Create variant and summary statistics DataFrames

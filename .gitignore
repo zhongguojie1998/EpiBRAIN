@@ -32,8 +32,10 @@ hostfile
 *.out
 
 SLDP/
+Analysis/12_ldsc/
 .nfs*
 *.bw
+*.err
 
 # dot env
 .env
