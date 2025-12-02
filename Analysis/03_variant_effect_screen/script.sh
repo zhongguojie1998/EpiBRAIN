@@ -20,6 +20,7 @@
 #        - "ssh+slurm": submit first N chunks to SSH machines, remaining chunks to SLURM
 # --load_existing is path to existing HDF5 file to transfer predictions from, optional
 # --merge if set, only run the merge step (skip all processing steps)
+# --timeout is timeout in seconds for waiting for all chunks to complete, optional (if not specified, will wait indefinitely)
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -78,6 +79,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --load_existing)
             LOAD_EXISTING="$2"
+            shift 2
+            ;;
+        --timeout)
+            TIMEOUT_SECONDS="$2"
             shift 2
             ;;
         *)
@@ -405,21 +410,25 @@ if [ "$MERGE_ONLY" != "true" ]; then
     # wait for all chunks to complete
     echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
 
-    # Timeout based on input type
-    if [ -n "$VCF_FILE" ]; then
-        TIMEOUT_SECONDS=86400  # 24 hours
+    # Set timeout if not provided via --timeout argument
+    if [ -z "$TIMEOUT_SECONDS" ]; then
+        # No timeout specified - will wait indefinitely
+        echo "No timeout specified - will wait indefinitely for chunks to complete"
     else
-        TIMEOUT_SECONDS=172800  # 48 hours
+        echo "Timeout set to $((TIMEOUT_SECONDS/3600)) hours"
+        START_TIME=$(date +%s)
     fi
-    START_TIME=$(date +%s)
 
     while true; do
-        CURRENT_TIME=$(date +%s)
-        ELAPSED=$((CURRENT_TIME - START_TIME))
+        # Check timeout only if specified
+        if [ -n "$TIMEOUT_SECONDS" ]; then
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$((CURRENT_TIME - START_TIME))
 
-        if [ $ELAPSED -gt $TIMEOUT_SECONDS ]; then
-            echo "Error: Timeout after $((TIMEOUT_SECONDS/3600)):00:00. Not all chunks completed within time limit."
-            exit 1
+            if [ $ELAPSED -gt $TIMEOUT_SECONDS ]; then
+                echo "Error: Timeout after $((TIMEOUT_SECONDS/3600)):00:00. Not all chunks completed within time limit."
+                exit 1
+            fi
         fi
 
         # Sync results from VPN machines if any
