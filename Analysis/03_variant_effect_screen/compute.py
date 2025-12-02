@@ -77,7 +77,7 @@ class VariantDataset(Dataset):
     def __getitem__(self, idx):
         task_index, chr_name, pos, ref, alt = self.variants[idx]
         if chr_name not in STD_CHR:
-            return None, task_index, "invalid_chr"
+            return None, None, task_index, "invalid_chr"
 
         try:
             token_dict = self.dna_tokenizer(
@@ -88,7 +88,7 @@ class VariantDataset(Dataset):
 
             wt_nt_fetched = onehot_to_str(wt_seq_onehot[s_idx:e_idx])
             if ref != wt_nt_fetched:
-                return None, task_index, f"ref_mismatch(ref:{ref},get:{wt_nt_fetched})"
+                return None, None, task_index, f"ref_mismatch(ref:{ref},get:{wt_nt_fetched})"
 
             alt_nt_onehot = str_to_one_hot(alt)
             mut_seq_onehot = wt_seq_onehot.clone()
@@ -99,7 +99,7 @@ class VariantDataset(Dataset):
 
             return (wt_seq_onehot, mut_seq_onehot), (wt_seq_onehot_rev, mut_seq_onehot_rev), task_index, None
         except Exception as e:
-            return None, task_index, str(e)
+            return None, None, task_index, str(e)
 
 
 def collate_fn(batch):
@@ -117,7 +117,7 @@ def collate_fn(batch):
         msgs.append(err)
 
     if len(wt_list) == 0:
-        return None, None, np.array(task_ids), np.array(msgs), np.array(masks)
+        return None, None, None, None, np.array(task_ids), np.array(msgs), np.array(masks)
     return torch.stack(wt_list), torch.stack(mut_list), torch.stack(wt_rev_list), torch.stack(mut_rev_list), np.array(task_ids), np.array(msgs), np.array(masks)
 
 
@@ -143,7 +143,7 @@ def save_intermediate_results(
     # Save to independent intermediate file
     intermediate_file = chunk_results_dir / f"chunk_{chunk_id}_part_{save_count}.h5"
 
-    with h5py.File(intermediate_file, "w", libver='latest') as f:
+    with h5py.File(intermediate_file, "w") as f:
         f.attrs["chunk_id"] = chunk_id
         f.attrs["part_idx"] = save_count
         f.attrs["part_nsample"] = len(successful_indices) + len(error_indices)
@@ -192,8 +192,8 @@ def get_model(checkpoint, device, config=None):
 
 def validate_score_names(score_names):
     """Validate and filter score names based on implemented scores."""
-    IMPLEMENTED_SCORES = {"raw_diff", "l1_sum", "l2_sum", "log_square", 
-                          "local_raw_diff", "local_l1_sum", "local_l2_sum", "local_log_square"}  # Add more score names as you implement them
+    IMPLEMENTED_SCORES = {"raw_diff", "raw_log_diff", "l1_sum", "l2_sum", "log_square", 
+                          "local_raw_diff", "local_raw_log_diff", "local_l1_sum", "local_l2_sum", "local_log_square"}  # Add more score names as you implement them
     original_score_names = set(score_names)
     score_names = [name for name in score_names if name in IMPLEMENTED_SCORES]
 
@@ -211,6 +211,11 @@ def validate_score_names(score_names):
 def vep_score(pred_mut, pred_wt, score_name):
     if score_name == "raw_diff":
         diffs = pred_mut - pred_wt
+        scores = np.sum(diffs, axis=1)
+    elif score_name == "raw_log_diff":
+        log_alt = np.log2(1 + pred_mut)
+        log_ref = np.log2(1 + pred_wt)
+        diffs = log_alt - log_ref
         scores = np.sum(diffs, axis=1)
     elif score_name == "l1_sum":
         diffs = np.abs(pred_mut - pred_wt)  # shape: (B, L, T)
@@ -241,6 +246,13 @@ def vep_score(pred_mut, pred_wt, score_name):
         diffs = pred_mut - pred_wt
         diffs_local = diffs[:, diffs.shape[1] // 2 - 15: diffs.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
         scores = np.sum(diffs_local, axis=1)  # shape: (B, T)
+    elif score_name == "local_raw_log_diff":
+        # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
+        log_alt = np.log2(1 + pred_mut)
+        log_ref = np.log2(1 + pred_wt)
+        diffs = log_alt - log_ref
+        diffs_local = diffs[:, diffs.shape[1] // 2 - 15: diffs.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
+        scores = np.sum(diffs_local, axis=1)  # shape: (B, T)
     elif score_name == "local_log_square":
         # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
         log_alt = np.log2(1 + pred_mut)
@@ -260,7 +272,7 @@ def vep_score(pred_mut, pred_wt, score_name):
 @click.option("--config_path", type=str, help="If provided, build the model in runtime, the model_path should be pointed to a chk")
 @click.option("--device", default="cpu")
 @click.option("--batch_size", type=int, default=32)
-@click.option("--save_interval", type=int, default=20000, help="Save intermediate results every N samples")
+@click.option("--save_interval", type=int, default=2000, help="Save intermediate results every N samples")
 @click.option("-p", "--precision", type=click.Choice(["float32", "float64"]), default="float32", help="Numerical precision (float32 for speed, float64 for accuracy)")
 @click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
 @click.option("-s", "--score_names", multiple=True, help="Score names to compute (will read from HDF5 if not provided)")
@@ -315,8 +327,8 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
     last_save_time = start_time
 
     # Create intermediate results directory
-    h5_path = Path(hdf5_file)
-    chunk_results_dir = h5_path.parent / f"{h5_path.stem}_chunk_results"
+    h5_name = Path(hdf5_file).stem  # Get filename without .h5 extension
+    chunk_results_dir = Path(hdf5_file).parent / f"{h5_name}_chunk_results"
     chunk_results_dir.mkdir(exist_ok=True)
 
     for wt_batch, mut_batch, wt_rev_batch, mut_rev_batch, task_ids, msgs, masks in dataloader:
