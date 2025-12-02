@@ -96,9 +96,12 @@ def aggregate_exons_from_prediction(prediction, exon_intervals, context_start, c
         pool_width: Width of each prediction bin in bp
 
     Returns:
-        Aggregated prediction values for each trial
+        Tuple of (aggregated_values, n_bins) where:
+            - aggregated_values: Aggregated prediction values for each trial
+            - n_bins: Total number of bins used in aggregation
     """
     aggregated = []
+    total_bins = 0
 
     for start, end in exon_intervals:
         # Check if exon overlaps with prediction context
@@ -115,15 +118,17 @@ def aggregate_exons_from_prediction(prediction, exon_intervals, context_start, c
 
         # Extract exon region from prediction
         if bin_end > bin_start:
+            n_bins_in_exon = bin_end - bin_start
+            total_bins += n_bins_in_exon
             exon_pred = prediction[bin_start:bin_end]
             aggregated.append(exon_pred)
 
     if len(aggregated) > 0:
         # Concatenate all exon predictions and sum
         all_exon_preds = np.concatenate(aggregated, axis=0)
-        return all_exon_preds.sum(axis=0)
+        return all_exon_preds.sum(axis=0), total_bins
     else:
-        return None
+        return None, 0
 
 
 def process_variant_by_gene(variant_h5_path, gtf, genes_pr, label_meta, pool_width=32):
@@ -219,10 +224,10 @@ def process_variant_by_gene(variant_h5_path, gtf, genes_pr, label_meta, pool_wid
         track_names = [name for _, name in tracks_to_use]
 
         # Aggregate predictions over exons for all tracks at once
-        ref_agg = aggregate_exons_from_prediction(
+        ref_agg, gene_length_bins = aggregate_exons_from_prediction(
             pred_ref[:, track_indices], exon_intervals, context_start, context_end, pool_width
         )
-        alt_agg = aggregate_exons_from_prediction(
+        alt_agg, _ = aggregate_exons_from_prediction(
             pred_alt[:, track_indices], exon_intervals, context_start, context_end, pool_width
         )
 
@@ -237,7 +242,9 @@ def process_variant_by_gene(variant_h5_path, gtf, genes_pr, label_meta, pool_wid
                 'ref': ref,
                 'alt': alt,
                 'gene_id': gene_id,
+                'gene_name': gene.name if hasattr(gene, 'name') else gene_id,
                 'gene_strand': gene.strand,
+                'gene_length_bins': gene_length_bins,
                 'gene_tss': tss,
                 'distance_to_tss': distance_to_tss,
                 'track': track_names,
@@ -362,6 +369,7 @@ def main(vcf, exp_name, chk, res_base, log_base, genes_gtf, pool_width, n_jobs, 
 
         print(f"Processed {len(final_results)} gene-variant pairs")
         print(f"Unique genes: {final_results['gene_id'].nunique()}")
+        print(f"Unique gene names: {final_results['gene_name'].nunique()}")
         print(f"Unique variants: {len(final_results[['chr', 'pos', 'ref', 'alt']].drop_duplicates())}")
 
         # Summary statistics

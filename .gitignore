@@ -32,7 +32,6 @@ hostfile
 *.out
 
 SLDP/
-Analysis/12_ldsc/
 .nfs*
 *.bw
 *.err
@@ -43,3 +42,10 @@ Analysis/12_ldsc/
 # genomespy
 .genomespy_temp_*.html
 .genomespy_shared/
+
+# tfmodisco output
+tfm_out/
+
+# incomplete pipelines
+Analysis/12_ldsc/
+Analysis/13_gchromVAR/

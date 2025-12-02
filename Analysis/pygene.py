@@ -183,12 +183,19 @@ class Gene:
     self.strand = None
     self.start = None
     self.end = None
+    self.name = None
+    self.kv = {}
 
   def add_transcript(self, tx_id, tx):
     self.transcripts[tx_id] = tx
     self.chrom = tx.chrom
     self.strand = tx.strand
-    self.kv = tx.kv
+    # Store kv if not already set, prioritize gene_name from kv
+    if not self.kv:
+      self.kv = tx.kv
+    # Extract gene_name if available
+    if 'gene_name' in tx.kv and not self.name:
+      self.name = tx.kv['gene_name']
 
   def span(self):
     tx_spans = [tx.span() for tx in self.transcripts.values()]
@@ -226,7 +233,7 @@ class GTF:
 
     while line:
       a = line.split('\t')
-      if a[2] in ['exon','CDS']:
+      if a[2] in ['gene', 'exon','CDS']:
         chrom = a[0]
         interval_type = a[2]
         start = int(a[3])
@@ -234,27 +241,43 @@ class GTF:
         strand = a[6]
         kv = gtf_kv(a[8])
 
-        # add/get transcript
-        tx_id = kv['transcript_id']
-        if self.trim_dot:
-          tx_id = trim_dot(tx_id)
-        if not tx_id in self.transcripts:
-            self.transcripts[tx_id] = Transcript(chrom, strand, kv)
-        tx = self.transcripts[tx_id]
+        # Handle gene lines to capture gene-level attributes
+        if interval_type == 'gene':
+          gene_id = kv['gene_id']
+          if self.trim_dot:
+            gene_id = trim_dot(gene_id)
+          if not gene_id in self.genes:
+            self.genes[gene_id] = Gene()
+          # Store gene-level attributes
+          self.genes[gene_id].chrom = chrom
+          self.genes[gene_id].strand = strand
+          self.genes[gene_id].kv = kv
+          if 'gene_name' in kv:
+            self.genes[gene_id].name = kv['gene_name']
 
-        # add/get gene
-        gene_id = kv['gene_id']
-        if self.trim_dot:
-          gene_id = trim_dot(gene_id)
-        if not gene_id in self.genes:
-          self.genes[gene_id] = Gene()
-        self.genes[gene_id].add_transcript(tx_id, tx)
+        # Handle exon and CDS lines
+        elif interval_type in ['exon', 'CDS']:
+          # add/get transcript
+          tx_id = kv['transcript_id']
+          if self.trim_dot:
+            tx_id = trim_dot(tx_id)
+          if not tx_id in self.transcripts:
+              self.transcripts[tx_id] = Transcript(chrom, strand, kv)
+          tx = self.transcripts[tx_id]
 
-        # add exons
-        if interval_type == 'exon':
-          tx.add_exon(start, end)
-        elif interval_type == 'CDS':
-          tx.add_cds(start, end)
+          # add/get gene
+          gene_id = kv['gene_id']
+          if self.trim_dot:
+            gene_id = trim_dot(gene_id)
+          if not gene_id in self.genes:
+            self.genes[gene_id] = Gene()
+          self.genes[gene_id].add_transcript(tx_id, tx)
+
+          # add exons
+          if interval_type == 'exon':
+            tx.add_exon(start, end)
+          elif interval_type == 'CDS':
+            tx.add_cds(start, end)
 
       line = gtf_in.readline()
 

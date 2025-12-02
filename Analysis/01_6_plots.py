@@ -67,7 +67,7 @@ for res in [bin_level_results, bin_level_results_orig]:
         mean_value = group['PearsonR'].mean()
         max_value = group['PearsonR'].max()
         ax.text(x=list(res['modality'].unique()).index(modality) + 
-                (0.2 if atlas_name == 'MiniAtlas' else -0.), 
+                (0.2 if atlas_name == 'MiniAtlas' else -0.2), 
                 y=max_value * 1.05, s=f'{mean_value:.2f}', 
                 ha='center', va='bottom', fontsize=8, color='black')
     plt.legend(title='Atlas Name', loc='lower left')
@@ -86,13 +86,17 @@ for res in [bin_level_results, bin_level_results_orig]:
 # %% Section 2
 # ================================================================================
 # load gene level metrics
-gene_level_results = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_metrics_length.csv', index_col=0)
+gene_level_results = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_metrics_rpkm.csv', index_col=0)
 gene_level_results = gene_level_results.merge(cell_type_meta, left_on='trial', right_on='exp')
 gene_level_results['modality'] = gene_level_results['modality_x'].replace(
     {'RNA': 'RNA', 'RNAplus': 'RNA', 'RNAminus': 'RNA', 'K27Ac': 'H3K27ac', 'K27Me3': 'H3K27me3', 'K9Me3': 'H3K9me3'})
-gene_level_results_orig = pd.read_csv('Res/full_finetune_original_loss/analysis_20/gene_level/raw_data/Test_gene_metrics.csv', index_col=0)
+gene_level_results_orig = pd.read_csv('Res/full_finetune_original_loss/analysis_20/gene_level/raw_data/Test_gene_metrics_rpkm.csv', index_col=0)
 gene_level_results_orig = gene_level_results_orig.merge(cell_type_meta, left_on='trial', right_on='exp')
 gene_level_results_orig['modality'] = gene_level_results_orig['modality_x'].replace(
+    {'RNA': 'RNA', 'RNAplus': 'RNA', 'RNAminus': 'RNA', 'K27Ac': 'H3K27ac', 'K27Me3': 'H3K27me3', 'K9Me3': 'H3K9me3'})
+gene_level_results_atac = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear_atac_only/analysis_15/gene_level/raw_data/Test_gene_metrics_rpkm.csv', index_col=0)
+gene_level_results_atac = gene_level_results_atac.merge(cell_type_meta, left_on='trial', right_on='exp')
+gene_level_results_atac['modality'] = gene_level_results_atac['modality_x'].replace(
     {'RNA': 'RNA', 'RNAplus': 'RNA', 'RNAminus': 'RNA', 'K27Ac': 'H3K27ac', 'K27Me3': 'H3K27me3', 'K9Me3': 'H3K9me3'})
 
 # %% plot modality metrics bar plots by cell type
@@ -131,6 +135,39 @@ for res, use_celltype_head in zip([gene_level_results, gene_level_results_orig],
     fig.tight_layout()
     ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
     fig.savefig(save_dir + 'Gene_level_PearsonR_boxplot_RNA_by_atlas.pdf')
+# %% comparison of gene level metrics between atac-only and full model
+res_full_model = gene_level_results[gene_level_results['modality'] == 'RNA']
+res_atac_only = gene_level_results_atac[gene_level_results_atac['modality'] == 'RNA']
+# merge on celltype and gene
+merged_res = res_full_model.merge(res_atac_only, on=['celltype', 'atlas_name'], suffixes=('_full', '_atac_only'))
+fig, ax = plt.subplots(figsize=(4, 4))
+# hue by atlas_name
+sns.scatterplot(data=merged_res, y='pearsonr_log_full', x='pearsonr_log_atac_only', ax=ax, hue='atlas_name', palette=palette_reversed, s=50, alpha=0.7)
+# add diagonal line
+max_val = max(merged_res['pearsonr_log_full'].max(), merged_res['pearsonr_log_atac_only'].max())
+min_val = min(merged_res['pearsonr_log_full'].min(), merged_res['pearsonr_log_atac_only'].min())
+ax.plot([min_val, max_val], [min_val, max_val], color='red', linestyle='--')
+ax.set_ylabel('Gene-level PearsonR (Full Model)')
+ax.set_xlabel('Gene-level PearsonR (ATAC-only Model)')
+fig.tight_layout()
+fig.savefig('figures/Gene_level_PearsonR_comparison_ATAC_vs_Full_model.pdf')
+# do a boxplot and show the p-value of paired t-test
+from scipy.stats import ttest_rel
+fig, ax = plt.subplots(figsize=(3, 4))
+# prepare data for boxplot
+data_to_plot = pd.DataFrame({
+    'Full Model': merged_res['pearsonr_log_full'],
+    'ATAC-only Model': merged_res['pearsonr_log_atac_only']
+})
+sns.boxplot(data=data_to_plot, ax=ax, width=0.4, showfliers=False)
+sns.despine(ax=ax, top=True, right=True)
+# perform paired t-test
+t_stat, p_value = ttest_rel(merged_res['pearsonr_log_full'], merged_res['pearsonr_log_atac_only'])
+# print p-value on the plot
+ax.text(0.5, 1.05, f'Paired t-test\np-value: {p_value:.2e}',
+        transform=ax.transAxes, fontsize=10, verticalalignment='top', horizontalalignment='center')
+fig.tight_layout()
+fig.savefig('figures/Gene_level_PearsonR_boxplot_comparison_ATAC_vs_Full_model.pdf')
 
 
 # %% get gene level raw counts
@@ -310,7 +347,7 @@ ax[1].set_title('Genes with Mean Expression >= 1')
 fig.savefig('figures/celltype_head/Gene_level_PearsonR_vs_mean_expression_logrpkm.pdf')
 # kde on pearsonr only
 fig, ax = plt.subplots(figsize=(6, 4))
-chch['Expression Level Group'] = pd.cut(gene_pearsonr_df['mean'], bins=[-np.inf, 1, 3, 5, np.inf], labels=['Low (<1)', 'Medium (1-3)', 'High (3-5)', 'Very High (>5)'])
+gene_pearsonr_df['Expression Level Group'] = pd.cut(gene_pearsonr_df['mean'], bins=[-np.inf, 1, 3, 5, np.inf], labels=['Low (<1)', 'Medium (1-3)', 'High (3-5)', 'Very High (>5)'])
 # Define consistent color palette for each group
 group_colors = {
     'Low (<1)': '#4575b4',
