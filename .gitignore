@@ -44,7 +44,9 @@ SLDP/
 .genomespy_shared/
 
 # tfmodisco output
+meme-5.4.1/
 tfm_out/
+*.npy
 
 # incomplete pipelines
 Analysis/12_ldsc/

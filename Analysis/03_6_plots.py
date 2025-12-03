@@ -1,9 +1,12 @@
-# %% 
+# %%
 import pandas as pd
 import numpy as np
 import os
 import pyBigWig
 from dotenv import load_dotenv
+from scipy.stats import spearmanr, pearsonr
+from sklearn.metrics import f1_score
+import seaborn as sns
 load_dotenv()
 PWD = f'{os.environ["workingHOME"]}/BICAN'
 import sys
@@ -63,5 +66,67 @@ if updates:
 eqtl_finemap.to_csv('Data/source/Jang2025_SingleBrain/finemapped_variants_info.tsv', sep='\t', index=False)
 # %% load the updated file
 eqtl_finemap = pd.read_csv('Data/source/Jang2025_SingleBrain/finemapped_variants_info.tsv', sep='\t')
+
+# %% filter the eqtl_res to snp-gene pairs
+# drop basal gangila cell types
+eqtl_res = eqtl_res[eqtl_res['track'].str.contains('MiniAtlas-')]
+# remove the minus or plus from track names
+eqtl_res['track'] = eqtl_res['track'].str.replace('minus', '').str.replace('plus', '')
+# only keep the RNA results
+eqtl_res = eqtl_res[eqtl_res['track'].str.contains('RNA')]
+# add a column to indicate the eqtl cell type name
+eqtl_res['cell_type'] = eqtl_res['track'].str.replace('_RNA', '').str.replace('MiniAtlas-', '')
+# %% create three matrixes to explore the "direction" prediction result and "effect_size" prediction result (pearson+spearman)
+single_brain_cell_types = eqtl_finemap['QTL'].unique()
+bican_cell_types = eqtl_res['cell_type'].unique()
+res_mats = {'direction': pd.DataFrame(index=single_brain_cell_types, columns=bican_cell_types),
+            'effect_size_pearson': pd.DataFrame(index=single_brain_cell_types, columns=bican_cell_types), 
+            'effect_size_spearman': pd.DataFrame(index=single_brain_cell_types, columns=bican_cell_types)}
+for single_brain_cell_type in single_brain_cell_types:
+    for bican_cell_type in bican_cell_types:
+        # get the prediction and reference
+        single_brain_eqtl = eqtl_finemap[eqtl_finemap['QTL'] == single_brain_cell_type]
+        bican_eqtl = eqtl_res[eqtl_res['cell_type'] == bican_cell_type]
+        # create snp-geneID map
+        single_brain_eqtl['snp_geneID'] = single_brain_eqtl['chr'] + ":" + single_brain_eqtl['pos'].astype(int).astype(str) + ":" + single_brain_eqtl['ref'] + ":" + single_brain_eqtl['alt'] + ":" + single_brain_eqtl['QTL gene ID']
+        bican_eqtl['snp_geneID'] = bican_eqtl['chr'] + ":" + bican_eqtl['pos'].astype(int).astype(str) + ":" + bican_eqtl['ref'] + ":" + bican_eqtl['alt'] + ":" + bican_eqtl['gene_id'].str.replace('\\..*', '', regex=True)
+        # filter to unique snp-geneID
+        single_brain_eqtl = single_brain_eqtl.drop_duplicates(subset=['snp_geneID'])
+        bican_eqtl = bican_eqtl.drop_duplicates(subset=['snp_geneID'])
+        # set to index for easy lookup
+        single_brain_eqtl = single_brain_eqtl.set_index('snp_geneID')
+        bican_eqtl = bican_eqtl.set_index('snp_geneID')
+        # get common snp-geneID
+        common_snp_geneID = single_brain_eqtl.index.intersection(bican_eqtl.index)
+        # filter to common snp-geneID
+        single_brain_eqtl = single_brain_eqtl.loc[common_snp_geneID]
+        bican_eqtl = bican_eqtl.loc[common_snp_geneID]
+        # calculate log fold change for bican_eqtl
+        bican_eqtl['lfdc'] = np.log2(bican_eqtl['alt_value']) - np.log2(bican_eqtl['ref_value'])
+
+        # Get signs of both beta and lfdc
+        single_brain_sign = (single_brain_eqtl['fixed_beta'] > 0).astype(int)
+        bican_sign = (bican_eqtl['lfdc'] > 0).astype(int)
+
+        # calculate F1 score for sign agreement between single_brain_eqtl['fixed_beta'] and bican_eqtl['lfdc']
+        f1 = f1_score(single_brain_sign, bican_sign)
+        res_mats['direction'].loc[single_brain_cell_type, bican_cell_type] = f1
+
+        # calculate spearman correlation between single_brain_eqtl['fixed_beta'] and bican_eqtl['lfdc']
+        spearman_corr, _ = spearmanr(single_brain_eqtl['fixed_beta'], bican_eqtl['lfdc'])
+        res_mats['effect_size_spearman'].loc[single_brain_cell_type, bican_cell_type] = spearman_corr
+
+        # calculate pearson correlation between single_brain_eqtl['fixed_beta'] and bican_eqtl['lfdc']
+        pearson_corr, _ = pearsonr(single_brain_eqtl['fixed_beta'], bican_eqtl['lfdc'])
+        res_mats['effect_size_pearson'].loc[single_brain_cell_type, bican_cell_type] = pearson_corr
+
+
+# %% save the results
+for key, df in res_mats.items():
+    df.to_csv(f'Data/source/Jang2025_SingleBrain/{key}_comparison_matrix.csv')
+# %% plot the results
+res_mats = {}
+for key in ['direction', 'effect_size_pearson', 'effect_size_spearman']:
+    res_mats[key] = pd.read_csv(f'Data/source/Jang2025_SingleBrain/{key}_comparison_matrix.csv', index_col=0)
 
 # %%

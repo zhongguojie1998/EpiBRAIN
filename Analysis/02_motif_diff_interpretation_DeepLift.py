@@ -35,22 +35,109 @@ def which_bins(s_idx: int, e_idx: int, window_size: int):
     bin_end = (e_idx - 1) // window_size
     return np.array(range(bin_start, bin_end + 1))
 
+def untransform_predictions_numpy(preds, label_meta_row):
+    """
+    Untransform predictions back to original scale (numpy version).
+
+    Args:
+        preds: numpy array of predictions
+        label_meta_row: Series with 'scale', 'clip_soft', 'sum_stat'
+
+    Returns:
+        Untransformed predictions
+    """
+    preds = preds.copy()
+
+    trial_scale = label_meta_row.get('scale', 1.0)
+    trial_clip_soft = label_meta_row.get('clip_soft', 48.0)
+    trial_sum_stat = label_meta_row.get('sum_stat', 'sum_three_quarter')
+
+    # Step 1: Undo scale
+    if trial_scale != 1.0:
+        preds = preds / trial_scale
+
+    # Step 2: Undo soft clip
+    if trial_clip_soft is not None:
+        clip_mask = preds > trial_clip_soft
+        preds[clip_mask] = (trial_clip_soft - 1) + (preds[clip_mask] - (trial_clip_soft - 1)) ** 2
+
+    # Step 3: Undo power transform
+    if trial_sum_stat == "sum_three_quarter":
+        preds = preds ** (4.0 / 3.0)
+    elif trial_sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
+        preds = (preds + 1) ** 2 - 1
+    elif trial_sum_stat in ['sum', 'mean', "avg"]:
+        pass
+    else:
+        raise ValueError(f"Unknown sum_stat: {trial_sum_stat}")
+
+    return preds
+
 class ModelWrapper(torch.nn.Module):
-    def __init__(self, model, output_key, target_pos_dim, target_neg_dims, bin_range):
+    def __init__(self, model, output_key, target_pos_dim, target_neg_dims, bin_range, no_untransform=False, label_meta_row_pos=None, label_meta_rows_neg=None):
         super().__init__()
         self.model = model
         self.output_key = output_key
         self.target_pos_dim = target_pos_dim
         self.target_neg_dims = target_neg_dims
         self.bin_range = bin_range
-        
+        self.no_untransform = no_untransform
+        self.label_meta_row_pos = label_meta_row_pos
+        self.label_meta_rows_neg = label_meta_rows_neg
+
     def forward(self, x):
         output_dict = self.model(x)
-        output = output_dict[self.output_key]
+        output = output_dict[self.output_key]  # [batch, N, dim]
+
+        # Untransform predictions if requested
+        if not self.no_untransform and self.label_meta_row_pos is not None:
+            # Untransform positive trial
+            output_pos_raw = output[:, :, self.target_pos_dim]  # [batch, N]
+            output_pos_raw = self._untransform_single(output_pos_raw, self.label_meta_row_pos)
+            output[:, :, self.target_pos_dim] = output_pos_raw
+
+            # Untransform negative trials
+            if self.label_meta_rows_neg is not None:
+                for i, neg_dim in enumerate(self.target_neg_dims):
+                    output_neg_raw = output[:, :, neg_dim]  # [batch, N]
+                    output_neg_raw = self._untransform_single(output_neg_raw, self.label_meta_rows_neg.iloc[i])
+                    output[:, :, neg_dim] = output_neg_raw
+
         # [batch, N, dim] -> [batch]
         output_pos = output[:, self.bin_range, self.target_pos_dim].mean(dim=1)
         output_neg = output[:, self.bin_range, :].mean(dim=1)[:, self.target_neg_dims].mean(dim=1)
         return output_pos - output_neg
+
+    def _untransform_single(self, preds, label_meta_row):
+        """Untransform predictions for a single trial."""
+        trial_scale = label_meta_row.get('scale', 1.0)
+        trial_clip_soft = label_meta_row.get('clip_soft', 48.0)
+        trial_sum_stat = label_meta_row.get('sum_stat', 'sum_three_quarter')
+
+        # Step 1: Undo scale
+        if trial_scale != 1.0:
+            preds = preds / trial_scale
+
+        # Step 2: Undo soft clip
+        if trial_clip_soft is not None:
+            clip_mask = preds > trial_clip_soft
+            preds = torch.where(
+                clip_mask,
+                (trial_clip_soft - 1) + (preds - (trial_clip_soft - 1)) ** 2,
+                preds
+            )
+
+        # Step 3: Undo power transform
+        if trial_sum_stat == "sum_three_quarter":
+            preds = preds ** (4.0 / 3.0)
+        elif trial_sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
+            preds = (preds + 1) ** 2 - 1
+        elif trial_sum_stat in ['sum', 'mean', "avg"]:
+            pass
+        else:
+            raise ValueError(f"Unknown sum_stat: {trial_sum_stat}")
+
+        return preds
 
 def process_region_chunk(args):
     (
@@ -68,6 +155,7 @@ def process_region_chunk(args):
         prefix,
         use_head,
         num_threads,
+        no_untransform,
     ) = args
 
     # Set torch threads for CPU
@@ -128,17 +216,20 @@ def process_region_chunk(args):
 
         try:
             trial_pos_dim = int(label_meta.dim[label_meta['trial'] == trial_pos].values[0])
+            label_meta_row_pos = label_meta[label_meta['trial'] == trial_pos].iloc[0]
         except:
             logger.warning(f"{trial_pos} cannot be found in label meta, skip")
             continue
-        
-        # get negative trial dims
+
+        # get negative trial dims and label_meta rows
         trial_pos_modality = label_meta.modality[label_meta['trial'] == trial_pos].values[0]
         if trial_neg == "all":
-            trial_neg_dims = label_meta.dim[(label_meta['trial'] != trial_pos) & (label_meta['modality'] == trial_pos_modality)].values
+            label_meta_rows_neg = label_meta[(label_meta['trial'] != trial_pos) & (label_meta['modality'] == trial_pos_modality)]
+            trial_neg_dims = label_meta_rows_neg.dim.values
         else:
             neg_trials = trial_neg.split(';')
-            trial_neg_dims = label_meta.dim[label_meta['trial'].isin(neg_trials)].values
+            label_meta_rows_neg = label_meta[label_meta['trial'].isin(neg_trials)]
+            trial_neg_dims = label_meta_rows_neg.dim.values
             if len(trial_neg_dims) == 0:
                 logger.warning(f"No valid negative trials found in {trial_neg}, skip")
                 continue
@@ -173,6 +264,11 @@ def process_region_chunk(args):
                 test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), use_head
             )
             pred_res_trial = pred_res.detach().cpu().numpy()[0, :, trial_pos_dim]
+
+            # Untransform predictions if requested
+            if not no_untransform and label_meta_row_pos is not None:
+                pred_res_trial = untransform_predictions_numpy(pred_res_trial, label_meta_row_pos)
+
             del pred_res
 
         # Clear GPU cache after model prediction
@@ -215,7 +311,12 @@ def process_region_chunk(args):
 
         # prepare model wrapper, will sum the output over the interested bins
         model.zero_grad()
-        model_wrapper = ModelWrapper(model, use_head, trial_pos_dim, trial_neg_dims, bin_range)
+        model_wrapper = ModelWrapper(
+            model, use_head, trial_pos_dim, trial_neg_dims, bin_range,
+            no_untransform=no_untransform,
+            label_meta_row_pos=label_meta_row_pos if not no_untransform else None,
+            label_meta_rows_neg=label_meta_rows_neg if not no_untransform else None
+        )
         # init deep lift with new model wrapper
         dl_model = DeepLift(model_wrapper, multiply_by_inputs=False, eps=1e-7)
         
@@ -371,6 +472,7 @@ def process_region_chunk(args):
 @click.option("--num_processes", type=int, default=4, help="Number of subprocess to use for parallel processing")
 @click.option("--num_threads", type=int, default=None, help="Number of threads per process for CPU mode (default: 1 if num_processes>1, else use all available)")
 @click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
+@click.option("--no_untransform", is_flag=True, help="Skip untransform (use if predictions already in count space)")
 def main(
     region_bed,
     exp_name,
@@ -386,6 +488,7 @@ def main(
     num_processes,
     num_threads,
     use_head,
+    no_untransform,
 ):
     LOG_BASE = os.path.abspath(log_base)
     CHK_BASE = os.path.abspath(chk_base)
@@ -504,6 +607,7 @@ def main(
             prefix,
             use_head,
             num_threads_per_process,
+            no_untransform,
         )
         process_args.append(args)
 

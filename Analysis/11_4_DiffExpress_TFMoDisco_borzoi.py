@@ -16,10 +16,19 @@ The .pt files should contain:
 - Genomic coordinates in the filename (chr_start_end_gene_celltype_strand_background_baseline.pt)
 
 Usage:
-    python 11_4_DiffExpress_TFMoDisco_borzoi.py <gradient_dir> [options]
+    # List available cell types:
+    python 11_4_DiffExpress_TFMoDisco_borzoi.py <gradient_dir>
+
+    # Run analysis for a specific cell type:
+    python 11_4_DiffExpress_TFMoDisco_borzoi.py <gradient_dir> --celltype <celltype> [options]
 
 Example:
+    # List cell types
+    python 11_4_DiffExpress_TFMoDisco_borzoi.py /path/to/gradient_files
+
+    # Run analysis
     python 11_4_DiffExpress_TFMoDisco_borzoi.py /path/to/gradient_files \
+        --celltype Astro \
         --fasta /path/to/genome.fa \
         --context_length 524288 \
         -c 524288 \
@@ -100,12 +109,23 @@ try:
         _original_tsne_init(self, **valid_params)
 
     def _patched_tsne_fit_transform(self, X, y=None):
-        """Patched fit_transform that converts sparse matrices to dense."""
+        """Patched fit_transform that converts sparse matrices to dense and adjusts perplexity."""
         # Convert sparse matrix to dense if needed
         if scipy.sparse.issparse(X):
             if self.verbose:
                 print(f"TSNE patch: Converting sparse matrix of shape {X.shape} to dense")
             X = X.toarray()
+
+        # Dynamically adjust perplexity based on number of samples
+        # perplexity must be less than n_samples
+        n_samples = X.shape[0]
+        adjusted_perplexity = min(self.perplexity, n_samples - 1)
+        if adjusted_perplexity != self.perplexity:
+            if self.verbose or adjusted_perplexity < 5:
+                print(f"TSNE patch: Adjusted perplexity from {self.perplexity} to {adjusted_perplexity} (n_samples={n_samples})")
+                if adjusted_perplexity < 5:
+                    print(f"TSNE patch: Warning - perplexity < 5 may produce suboptimal results")
+            self.perplexity = adjusted_perplexity
 
         # Call original fit_transform
         return _original_tsne_fit_transform(self, X, y)
@@ -113,32 +133,6 @@ try:
     # Apply the patches to sklearn's TSNE
     sklearn.manifold.TSNE.__init__ = _patched_tsne_init
     sklearn.manifold.TSNE.fit_transform = _patched_tsne_fit_transform
-
-    # Also patch the get_tsne_embedding function in modisco if it exists
-    try:
-        import modisco.visualization.tsne as modisco_tsne
-        original_get_tsne_embedding = modisco_tsne.get_tsne_embedding
-
-        def patched_get_tsne_embedding(affinity_mat, aff_to_dist_mat, perplexity, **kwargs):
-            """Patched version that ensures init='random' and converts sparse matrices."""
-            # Force init='random' to avoid PCA initialization issues
-            kwargs['init'] = 'random'
-            kwargs.pop('square_distances', None)  # Remove deprecated parameter if present
-
-            dist_mat = aff_to_dist_mat(affinity_mat)
-
-            # Convert sparse matrix to dense if needed
-            if scipy.sparse.issparse(dist_mat):
-                print(f"TSNE patch (get_tsne_embedding): Converting sparse dist_mat of shape {dist_mat.shape} to dense")
-                dist_mat = dist_mat.toarray()
-
-            tsne = sklearn.manifold.TSNE(metric='precomputed', perplexity=perplexity, **kwargs)
-            embedding = tsne.fit_transform(dist_mat)
-            return embedding
-
-        modisco_tsne.get_tsne_embedding = patched_get_tsne_embedding
-    except (ImportError, AttributeError) as e:
-        print(f"Note: Could not patch modisco.visualization.tsne.get_tsne_embedding: {e}")
 
     print("Applied TSNE patch for sparse matrix compatibility")
 
@@ -939,7 +933,7 @@ def main():
         dest='specific_celltype',
         default=None,
         type='str',
-        help='Analyze only this specific cell type (default: analyze all cell types) [Default: %default]',
+        help='Cell type to analyze (REQUIRED). If not provided, script will list available cell types and exit [Default: %default]',
     )
     parser.add_option(
         '-c',
@@ -1062,7 +1056,7 @@ def main():
         dest='n_jobs',
         default=1,
         type='int',
-        help='Number of parallel jobs for processing cell types (-1 = all CPUs) [Default: %default]',
+        help='[DEPRECATED - IGNORED] Always uses n_jobs=1 (sequential) to avoid threading issues [Default: %default]',
     )
     parser.add_option(
         '--use_cache',
@@ -1085,8 +1079,35 @@ def main():
     else:
         gradient_dir = args[0]
 
+    # If celltype is not specified, list available cell types and exit
+    if options.specific_celltype is None:
+        print(f'\n{"=" * 80}')
+        print('TF-MoDISco Analysis - Cell Type Discovery Mode')
+        print(f'{"=" * 80}')
+        print(f'Gradient directory: {gradient_dir}')
+        print(f'Baseline: {options.baseline}')
+        print(f'{"=" * 80}\n')
+
+        print('Scanning for available cell types...\n')
+        celltypes = identify_celltypes(gradient_dir, baseline=options.baseline)
+
+        print(f'\n{"=" * 80}')
+        print(f'Found {len(celltypes)} cell types:')
+        print(f'{"=" * 80}')
+        for i, celltype in enumerate(celltypes, 1):
+            print(f'{i:3d}. {celltype}')
+        print(f'{"=" * 80}\n')
+
+        print('To run analysis for a specific cell type, use:')
+        print(f'  python {os.path.basename(__file__)} {gradient_dir} --celltype <celltype_name>')
+        print('\nExiting.')
+        return
+
     if options.fasta_file is None:
         parser.error('Must provide reference genome FASTA file with --fasta')
+
+    # Force n_jobs=1 (always run sequentially)
+    print('Note: Running with n_jobs=1 (sequential execution) to avoid threading issues')
 
     # Run analysis
     run_tfmodisco_analysis(
@@ -1112,7 +1133,7 @@ def main():
         num_gaps=options.num_gaps,
         num_mismatches=options.num_mismatches,
         specific_celltype=options.specific_celltype,
-        n_jobs=options.n_jobs,
+        n_jobs=1,  # Always use sequential execution
         use_cache=options.use_cache
     )
 

@@ -20,6 +20,8 @@
 #        - "ssh+slurm": submit first N chunks to SSH machines, remaining chunks to SLURM
 # --load_existing is path to existing HDF5 file to transfer predictions from, optional
 # --merge if set, only run the merge step (skip all processing steps)
+# --timeout is timeout in seconds for waiting for all chunks to complete, optional (if not specified, defaults based on input type: 24h for VCF, 48h for filelist)
+# --untransform if set, untransform predictions back to original scale (requires --label_meta)
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -79,6 +81,14 @@ while [[ $# -gt 0 ]]; do
         --load_existing)
             LOAD_EXISTING="$2"
             shift 2
+            ;;
+        --timeout)
+            TIMEOUT_SECONDS="$2"
+            shift 2
+            ;;
+        --untransform)
+            UNTRANSFORM="true"
+            shift 1
             ;;
         *)
             echo "Unknown option $1"
@@ -277,8 +287,18 @@ if [ "$MERGE_ONLY" != "true" ]; then
         done
     fi
 
+    # Build untransform arguments
+    UNTRANSFORM_ARGS=""
+    if [ "$UNTRANSFORM" = "true" ]; then
+        if [ -z "$LABEL_META" ]; then
+            echo "Error: --label_meta is required when --untransform is enabled"
+            exit 1
+        fi
+        UNTRANSFORM_ARGS="--untransform --label_meta $LABEL_META"
+    fi
+
     python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
-        -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path
+        -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path $UNTRANSFORM_ARGS
 
     # Job submission based on mode
     RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/${H5_BASENAME}_chunk_results"
@@ -405,11 +425,17 @@ if [ "$MERGE_ONLY" != "true" ]; then
     # wait for all chunks to complete
     echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
 
-    # Timeout based on input type
-    if [ -n "$VCF_FILE" ]; then
-        TIMEOUT_SECONDS=86400  # 24 hours
+    # Set timeout if not provided via --timeout argument
+    if [ -z "$TIMEOUT_SECONDS" ]; then
+        # Default timeout based on input type
+        if [ -n "$VCF_FILE" ]; then
+            TIMEOUT_SECONDS=86400  # 24 hours for VCF
+        else
+            TIMEOUT_SECONDS=172800  # 48 hours for filelist
+        fi
+        echo "Using default timeout: $((TIMEOUT_SECONDS/3600)) hours"
     else
-        TIMEOUT_SECONDS=172800  # 48 hours
+        echo "Using provided timeout: $((TIMEOUT_SECONDS/3600)) hours"
     fi
     START_TIME=$(date +%s)
 

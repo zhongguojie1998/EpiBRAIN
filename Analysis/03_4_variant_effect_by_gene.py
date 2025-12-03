@@ -35,6 +35,85 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pygene
 
 
+def untransform_predictions(data, label_meta=None, scale=1.0, clip_soft=48.0, sum_stat="sum_three_quarter"):
+    """
+    Untransform model predictions back to original scale.
+
+    Reverses the forward transformations applied during data preprocessing:
+    1. Scale multiplication: y = scale * y
+    2. Soft clipping: if y > clip_soft: y = (clip_soft - 1) + sqrt(y - clip_soft + 1)
+    3. Three-quarter power: y = y^(3/4) for sum_three_quarter
+
+    Args:
+        data: numpy array of predictions to untransform
+        label_meta: DataFrame with transformation parameters per trial (scale, clip_soft, sum_stat)
+        scale: scale factor applied in forward transform (default: 1.0)
+        clip_soft: soft clipping threshold (default: 48.0)
+        sum_stat: summary statistic used (default: "sum_three_quarter")
+
+    Returns:
+        Untransformed data in original scale
+    """
+    data = data.copy()
+
+    if label_meta is not None:
+        # do it for each trial based on label_meta
+        for i, row in label_meta.iterrows():
+            trial_scale = row.get('scale', 1.0)
+            trial_clip_soft = row.get('clip_soft', 48.0)
+            trial_sum_stat = row.get('sum_stat', 'sum_three_quarter')
+
+            # Step 1: Undo scale
+            if trial_scale != 1.0:
+                data[:, i] = data[:, i] / trial_scale
+
+            # Step 2: Undo soft clip
+            # Forward: if x > clip_soft: x = (clip_soft - 1) + sqrt(x - clip_soft + 1)
+            # Reverse: if x > clip_soft: x = clip_soft - 1 + (x - (clip_soft - 1))^2
+            if trial_clip_soft is not None:
+                clip_mask = data[:, i] > trial_clip_soft
+                data[clip_mask, i] = (trial_clip_soft - 1) + (data[clip_mask, i] - (trial_clip_soft - 1)) ** 2
+
+            # Step 3: Undo three-quarter power
+            # Forward: x = x^(3/4)
+            # Reverse: x = x^(4/3)
+            if trial_sum_stat == "sum_three_quarter":
+                data[:, i] = data[:, i] ** (4.0 / 3.0)
+            elif trial_sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
+                data[:, i] = (data[:, i] + 1) ** 2 - 1
+            elif trial_sum_stat in ['sum', 'mean', "avg"]:
+                # no transformation applied
+                pass
+            else:
+                raise ValueError(f"Unknown sum_stat: {trial_sum_stat}")
+    else:
+        # Step 1: Undo scale
+        if scale != 1.0:
+            data = data / scale
+
+        # Step 2: Undo soft clip
+        # Forward: if x > clip_soft: x = (clip_soft - 1) + sqrt(x - clip_soft + 1)
+        # Reverse: if x > clip_soft: x = clip_soft - 1 + (x - (clip_soft - 1))^2
+        if clip_soft is not None:
+            clip_mask = data > clip_soft
+            data[clip_mask] = (clip_soft - 1) + (data[clip_mask] - (clip_soft - 1)) ** 2
+
+        # Step 3: Undo three-quarter power
+        # Forward: x = x^(3/4)
+        # Reverse: x = x^(4/3)
+        if sum_stat == "sum_three_quarter":
+            data = data ** (4.0 / 3.0)
+        elif sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
+            data = (data + 1) ** 2 - 1
+        elif sum_stat in ['sum', 'mean', "avg"]:
+            # no transformation applied
+            pass
+        else:
+            raise ValueError(f"Unknown sum_stat: {sum_stat}")
+
+    return data
+
+
 def create_genes_pyranges(gtf):
     """
     Create a PyRanges object from GTF genes for efficient overlap queries.
@@ -131,7 +210,7 @@ def aggregate_exons_from_prediction(prediction, exon_intervals, context_start, c
         return None, 0
 
 
-def process_variant_by_gene(variant_h5_path, gtf, genes_pr, label_meta, pool_width=32):
+def process_variant_by_gene(variant_h5_path, gtf, genes_pr, label_meta, pool_width=32, untransform=False):
     """
     Process a single variant and calculate gene-level effects.
 
@@ -141,6 +220,7 @@ def process_variant_by_gene(variant_h5_path, gtf, genes_pr, label_meta, pool_wid
         genes_pr: PyRanges object with gene spans for efficient overlap queries
         label_meta: DataFrame with label metadata (must have 'modality' and 'trial' columns)
         pool_width: Width of prediction bins in bp (default: 32)
+        untransform: Whether to untransform predictions back to original scale (default: False)
 
     Returns:
         DataFrame with gene-level variant effects
@@ -155,6 +235,11 @@ def process_variant_by_gene(variant_h5_path, gtf, genes_pr, label_meta, pool_wid
         pos = f.attrs['pos']
         ref = f.attrs['ref']
         alt = f.attrs['alt']
+
+    # Untransform predictions if requested
+    if untransform:
+        pred_ref = untransform_predictions(pred_ref, label_meta=label_meta)
+        pred_alt = untransform_predictions(pred_alt, label_meta=label_meta)
 
     # Get RNAminus and RNAplus track indices (lists for all cell types)
     rna_minus_tracks = []  # List of (idx, trial_name) tuples
@@ -266,7 +351,7 @@ _worker_gtf = None
 _worker_genes_pr = None
 
 
-def process_single_variant(variant_info, variant_dir, label_meta, pool_width):
+def process_single_variant(variant_info, variant_dir, label_meta, pool_width, untransform):
     """
     Process a single variant from the VCF file.
     Uses global _worker_gtf and _worker_genes_pr initialized in main process.
@@ -276,6 +361,7 @@ def process_single_variant(variant_info, variant_dir, label_meta, pool_width):
         variant_dir: Directory containing variant effect h5 files
         label_meta: DataFrame with label metadata
         pool_width: Width of prediction bins in bp
+        untransform: Whether to untransform predictions back to original scale
 
     Returns:
         DataFrame with gene-level variant effects for this variant, or None if file not found
@@ -292,7 +378,7 @@ def process_single_variant(variant_info, variant_dir, label_meta, pool_width):
         return None
 
     # Process this variant using global worker variables
-    variant_results = process_variant_by_gene(variant_h5, _worker_gtf, _worker_genes_pr, label_meta, pool_width)
+    variant_results = process_variant_by_gene(variant_h5, _worker_gtf, _worker_genes_pr, label_meta, pool_width, untransform)
 
     if len(variant_results) > 0:
         return variant_results
@@ -309,7 +395,8 @@ def process_single_variant(variant_info, variant_dir, label_meta, pool_width):
 @click.option("--pool_width", type=int, default=32, help="Prediction bin width in bp")
 @click.option("--n_jobs", type=int, default=-1, help="Number of parallel jobs (-1 uses all cores)")
 @click.option("--output", "-o", type=str, default=None, help="Output file path (default: <res_base>/<exp_name>/analysis_<chk>/var_eff/variant_effects_by_gene.tsv)")
-def main(vcf, exp_name, chk, res_base, log_base, genes_gtf, pool_width, n_jobs, output):
+@click.option("--untransform", is_flag=True, default=False, help="Untransform predictions back to original scale")
+def main(vcf, exp_name, chk, res_base, log_base, genes_gtf, pool_width, n_jobs, output, untransform):
     """Calculate gene-level variant effects from VCF predictions."""
 
     RES_BASE = os.path.abspath(res_base)
@@ -331,6 +418,10 @@ def main(vcf, exp_name, chk, res_base, log_base, genes_gtf, pool_width, n_jobs, 
     print(f"Loading label metadata from {label_meta_path}...")
     label_meta = pd.read_csv(label_meta_path, index_col=None)
 
+    # Print untransform status
+    if untransform:
+        print(f"Untransform enabled: will reverse transformations using label metadata")
+
     # Read VCF file
     print(f"Reading VCF file: {vcf}")
     vcf_df = pd.read_csv(vcf, sep="\t", comment='#', header=None)
@@ -351,7 +442,7 @@ def main(vcf, exp_name, chk, res_base, log_base, genes_gtf, pool_width, n_jobs, 
         verbose=10,
         require='sharedmem'
     )(
-        delayed(process_single_variant)(variant_info, variant_dir, label_meta, pool_width)
+        delayed(process_single_variant)(variant_info, variant_dir, label_meta, pool_width, untransform)
         for variant_info in variant_infos
     )
 

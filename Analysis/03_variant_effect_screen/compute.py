@@ -126,6 +126,85 @@ def load_label_meta_from_h5(h5_path):
         return f["model_meta/trial_dims"][:]
 
 
+def untransform_predictions(data, label_meta=None, scale=1.0, clip_soft=48.0, sum_stat="sum_three_quarter"):
+    """
+    Untransform model predictions back to original scale.
+
+    Reverses the forward transformations applied during data preprocessing:
+    1. Scale multiplication: y = scale * y
+    2. Soft clipping: if y > clip_soft: y = (clip_soft - 1) + sqrt(y - clip_soft + 1)
+    3. Three-quarter power: y = y^(3/4) for sum_three_quarter
+
+    Args:
+        data: numpy array of predictions to untransform
+        label_meta: DataFrame with transformation parameters per trial (scale, clip_soft, sum_stat)
+        scale: scale factor applied in forward transform (default: 1.0)
+        clip_soft: soft clipping threshold (default: 48.0)
+        sum_stat: summary statistic used (default: "sum_three_quarter")
+
+    Returns:
+        Untransformed data in original scale
+    """
+    data = data.copy()
+
+    if label_meta is not None:
+        # do it for each trial based on label_meta
+        for i, row in label_meta.iterrows():
+            trial_scale = row.get('scale', 1.0)
+            trial_clip_soft = row.get('clip_soft', 48.0)
+            trial_sum_stat = row.get('sum_stat', 'sum_three_quarter')
+
+            # Step 1: Undo scale
+            if trial_scale != 1.0:
+                data[:, :, i] = data[:, :, i] / trial_scale
+
+            # Step 2: Undo soft clip
+            # Forward: if x > clip_soft: x = (clip_soft - 1) + sqrt(x - clip_soft + 1)
+            # Reverse: if x > clip_soft: x = clip_soft - 1 + (x - (clip_soft - 1))^2
+            if trial_clip_soft is not None:
+                clip_mask = data[:, :, i] > trial_clip_soft
+                data[clip_mask, i] = (trial_clip_soft - 1) + (data[clip_mask, i] - (trial_clip_soft - 1)) ** 2
+
+            # Step 3: Undo three-quarter power
+            # Forward: x = x^(3/4)
+            # Reverse: x = x^(4/3)
+            if trial_sum_stat == "sum_three_quarter":
+                data[:, :, i] = data[:, :, i] ** (4.0 / 3.0)
+            elif trial_sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
+                data[:, :, i] = (data[:, :, i] + 1) ** 2 - 1
+            elif trial_sum_stat in ['sum', 'mean', "avg"]:
+                # no transformation applied
+                pass
+            else:
+                raise ValueError(f"Unknown sum_stat: {trial_sum_stat}")
+    else:
+        # Step 1: Undo scale
+        if scale != 1.0:
+            data = data / scale
+
+        # Step 2: Undo soft clip
+        # Forward: if x > clip_soft: x = (clip_soft - 1) + sqrt(x - clip_soft + 1)
+        # Reverse: if x > clip_soft: x = clip_soft - 1 + (x - (clip_soft - 1))^2
+        if clip_soft is not None:
+            clip_mask = data > clip_soft
+            data[clip_mask] = (clip_soft - 1) + (data[clip_mask] - (clip_soft - 1)) ** 2
+
+        # Step 3: Undo three-quarter power
+        # Forward: x = x^(3/4)
+        # Reverse: x = x^(4/3)
+        if sum_stat == "sum_three_quarter":
+            data = data ** (4.0 / 3.0)
+        elif sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
+            data = (data + 1) ** 2 - 1
+        elif sum_stat in ['sum', 'mean', "avg"]:
+            # no transformation applied
+            pass
+        else:
+            raise ValueError(f"Unknown sum_stat: {sum_stat}")
+
+    return data
+
+
 def save_intermediate_results(
     chunk_results_dir, chunk_id, all_success_res, all_success, all_error, error_msgs, save_count, score_names
 ):
@@ -276,7 +355,9 @@ def vep_score(pred_mut, pred_wt, score_name):
 @click.option("-p", "--precision", type=click.Choice(["float32", "float64"]), default="float32", help="Numerical precision (float32 for speed, float64 for accuracy)")
 @click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
 @click.option("-s", "--score_names", multiple=True, help="Score names to compute (will read from HDF5 if not provided)")
-def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, save_interval, precision, use_head, score_names):
+@click.option("--untransform", is_flag=True, default=False, help="Untransform predictions back to original scale")
+@click.option("--label_meta", type=str, help="Path to label metadata CSV file (required if --untransform is used)")
+def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, save_interval, precision, use_head, score_names, untransform, label_meta):
 
     # Sort task indices for optimal HDF5 access pattern
     task_indices = np.load(chunk_indices)
@@ -285,6 +366,17 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
     if not task_indices:
         print("No tasks to process in this chunk")
         return
+
+    # Validate untransform option
+    if untransform and not label_meta:
+        raise ValueError("--label_meta is required when --untransform is enabled")
+
+    # Load label metadata if untransform is enabled
+    label_meta_df = None
+    if untransform:
+        print(f"Loading label metadata from {label_meta}")
+        label_meta_df = pd.read_csv(label_meta, index_col=None)
+        print(f"Untransform enabled: will reverse transformations using label metadata")
 
     model, dna_tokenizer, config = get_model(model_path, device, config_path)
 
@@ -346,6 +438,13 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             pred_mut = model(mut_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
             pred_wt_rev = model(wt_rev_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
             pred_mut_rev = model(mut_rev_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
+
+            # Untransform predictions if requested
+            if untransform:
+                pred_wt = untransform_predictions(pred_wt, label_meta=label_meta_df)
+                pred_mut = untransform_predictions(pred_mut, label_meta=label_meta_df)
+                pred_wt_rev = untransform_predictions(pred_wt_rev, label_meta=label_meta_df)
+                pred_mut_rev = untransform_predictions(pred_mut_rev, label_meta=label_meta_df)
 
             # Calculate different scores based on score_names
             for score_name in score_names:
