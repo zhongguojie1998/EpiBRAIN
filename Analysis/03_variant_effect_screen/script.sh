@@ -425,17 +425,11 @@ if [ "$MERGE_ONLY" != "true" ]; then
     # wait for all chunks to complete
     echo "Waiting for all chunks to complete. Checking results in: $RESULTS_DIR"
 
-    # Set timeout if not provided via --timeout argument
+    # Display timeout setting
     if [ -z "$TIMEOUT_SECONDS" ]; then
-        # Default timeout based on input type
-        if [ -n "$VCF_FILE" ]; then
-            TIMEOUT_SECONDS=86400  # 24 hours for VCF
-        else
-            TIMEOUT_SECONDS=172800  # 48 hours for filelist
-        fi
-        echo "Using default timeout: $((TIMEOUT_SECONDS/3600)) hours"
+        echo "No timeout set. Will wait indefinitely for all chunks to complete."
     else
-        echo "Using provided timeout: $((TIMEOUT_SECONDS/3600)) hours"
+        echo "Using timeout: $((TIMEOUT_SECONDS/3600)) hours"
     fi
     START_TIME=$(date +%s)
 
@@ -443,7 +437,8 @@ if [ "$MERGE_ONLY" != "true" ]; then
         CURRENT_TIME=$(date +%s)
         ELAPSED=$((CURRENT_TIME - START_TIME))
 
-        if [ $ELAPSED -gt $TIMEOUT_SECONDS ]; then
+        # Only check timeout if TIMEOUT_SECONDS is set
+        if [ -n "$TIMEOUT_SECONDS" ] && [ $ELAPSED -gt $TIMEOUT_SECONDS ]; then
             echo "Error: Timeout after $((TIMEOUT_SECONDS/3600)):00:00. Not all chunks completed within time limit."
             exit 1
         fi

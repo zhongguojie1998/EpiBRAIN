@@ -228,37 +228,19 @@ fi
 if should_run_section "03"; then
     print_section_header "Section 03: Variant Effect Prediction"
 
-    echo "Note: Variant effect analysis requires a VCF file."
-    echo "Example command for variant effect prediction:"
-    echo ""
-    echo "python ${ANALYSIS_DIR}/03_0_variant_effect.py \\"
-    echo "  -f <variants.vcf> \\"
-    echo "  -e ${MODEL_NAME} \\"
-    echo "  --chk ${CHK} \\"
-    echo "  --res_base ${RES_BASE} \\"
-    echo "  --log_base ${LOG_BASE} \\"
-    echo "  --chk_base ${CHK_BASE}"
-    echo ""
-    echo "For gene-level variant effects:"
-    echo ""
-    echo "python ${ANALYSIS_DIR}/03_4_variant_effect_by_gene.py \\"
-    echo "  --vcf <variants.vcf> \\"
-    echo "  --exp_name ${MODEL_NAME} \\"
-    echo "  --chk ${CHK} \\"
-    echo "  --res_base ${RES_BASE} \\"
-    echo "  --log_base ${LOG_BASE} \\"
-    echo "  --genes_gtf ${DATA_BASE}/source/gencode.v48.annotation.gtf.gz"
-    echo ""
-    echo "For variant effect screen (high-throughput):"
-    echo ""
-    echo "bash ${ANALYSIS_DIR}/03_variant_effect_screen/script.sh \\"
-    echo "  --vcf <variants.vcf> \\"
-    echo "  --output <output.h5> \\"
-    echo "  --model <model.pkl> \\"
-    echo "  --label_meta ${MODEL_LOG_DIR}/regression_label_meta.csv \\"
-    echo "  --chunks 10"
-    echo ""
-    echo "Section 03: Skipping (requires user-provided VCF file)"
+    echo "Running variant effect screen for eQTL analysis..."
+    bash Analysis/03_variant_effect_screen/script.sh \
+        --vcf ${DATA_BASE}/source/eQTL/all.vcf \
+        --output ${DATA_BASE}/source/eQTL/${MODEL_NAME}.chk${CHK}.h5 \
+        --model ${MODEL_CHK_DIR}/chk_epoch_${CHK}_packaged.pkl \
+        --config ${MODEL_LOG_DIR}/overall_setting.yaml \
+        --label_meta ${MODEL_LOG_DIR}/regression_label_meta.csv \
+        --experiment eQTL \
+        --chunks 6 \
+        --mode slurm \
+        --untransform
+
+    echo "Section 03: Completed"
 fi
 
 # ==============================================================================
@@ -375,7 +357,19 @@ if should_run_section "11"; then
     echo "bash ${ANALYSIS_DIR}/11_3_DiffExpress_run_smooth_gradient.sh ${MODEL_NAME} ${CHK}"
     echo ""
     echo "Step 4: Run TF-MoDISco motif discovery"
-    echo "bash ${ANALYSIS_DIR}/11_4_MoDisco_run.sh ${MODEL_NAME} ${CHK}"
+    for ct in ACBGM AST CBGA L23IT L2IT L34IT L35IT L45IT L4IT L56IT L56NP L5IT L6B L6CT L6IT-1 L6IT-2 MGC OGC OPC PV-CHC PVALB URL VIP; do
+        slurmsub -p cpu -c 24 -m 150G -t 48:00:00 \
+            "python ${ANALYSIS_DIR}/11_4_DiffExpress_TFMoDisco_borzoi.py \
+            ${MODEL_RES_DIR}/analysis_${CHK}/raw_data/interp_diff_gradient_input/ \
+            --fasta ${DATA_BASE}/Ref/hg38/hg38.fa \
+            --context_length 131072 \
+            -c 131072 \
+            -o tfm_out \
+            --baseline grad_input \
+            --n_jobs 1 \
+            --modisco_n_cores 24 \
+            --celltype $ct"
+    done
     echo ""
     echo "Step 5: Run TOMTOM motif matching"
     echo "python ${ANALYSIS_DIR}/11_5_DiffExpress_TOMTOM.py \\"
