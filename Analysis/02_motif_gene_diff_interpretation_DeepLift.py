@@ -26,12 +26,10 @@ from pathlib import Path
 
 import click
 import h5py
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 from captum.attr import DeepLift
-from matplotlib.patches import Rectangle
 from tqdm import tqdm
 
 ROOT = Path(__file__).parent.parent
@@ -156,7 +154,7 @@ def get_gene_exon_regions(gene_name, gtf_file, window_size, n_window, context_le
 
     # Collect all unique exons across all transcripts
     exon_set = set()
-    for tx_id, tx in gene_obj.transcripts.items():
+    for tx in gene_obj.transcripts.values():
         for exon in tx.exons:
             exon_set.add((exon.start, exon.end))
 
@@ -526,9 +524,6 @@ def process_region_chunk(args):
                 for pos_dim in trial_pos_dims:
                     pred_res_pos_trials.append(pred_res_np[:, pos_dim])
 
-            # Average predictions across positive trials
-            pred_res_pos_avg = np.mean(pred_res_pos_trials, axis=0)
-
             del pred_res
 
         if device.startswith('cuda'):
@@ -570,12 +565,14 @@ def process_region_chunk(args):
             logger.warning(f"No valid labels for positive trials in {name_base}, skip")
             continue
 
-        # Average labels across positive trials
-        label_pos_avg = np.mean(label_pos_trials, axis=0)
+        # Save individual trial data for plotting
+        label_trials_dict = {trial_name: trial_data for trial_name, trial_data in zip(trial_pos_list, label_pos_trials)}
+        pred_trials_dict = {trial_name: trial_data for trial_name, trial_data in zip(trial_pos_list, pred_res_pos_trials)}
 
-        plot_data = [label_pos_avg, pred_res_pos_avg]
-        plot_title = [f"{'&'.join(trial_pos_list[:2])}... Target ({len(trial_pos_list)} tracks)",
-                      f"{'&'.join(trial_pos_list[:2])}... Pred ({len(trial_pos_list)} tracks)"]
+        np.save(f"{save_base}/interp_diff/{name_base}_label_trials.npy", label_trials_dict, allow_pickle=True)
+        np.save(f"{save_base}/interp_diff/{name_base}_pred_trials.npy", pred_trials_dict, allow_pickle=True)
+        logger.info(f"Saved {len(label_pos_trials)} individual label trials to: {save_base}/interp_diff/{name_base}_label_trials.npy")
+        logger.info(f"Saved {len(pred_res_pos_trials)} individual prediction trials to: {save_base}/interp_diff/{name_base}_pred_trials.npy")
 
         # Prepare model wrapper
         model.zero_grad()
@@ -617,7 +614,9 @@ def process_region_chunk(args):
                     torch.cuda.empty_cache()
 
                 if save_raw:
-                    torch.save(attribution_cpu, f"{save_base}/interp_diff/{identifier}.pt")
+                    attribution_file = f"{save_base}/interp_diff/{identifier}.pt"
+                    torch.save(attribution_cpu, attribution_file)
+                    logger.info(f"Saved attribution to: {attribution_file}")
             else:
                 attribution_cpu = torch.load(f"{save_base}/interp_diff/{identifier}.pt")
 
@@ -636,64 +635,66 @@ def process_region_chunk(args):
                 signal = signal.reshape(-1, myconfig.data.preprocess.window_size)[trim:-trim]
                 signal = signal.mean(dim=-1).detach()
 
-            plot_data.append(signal)
-            plot_title.append(f"Importance Score ({baseline_type} baseline)")
+                # Save trimmed sequence and attribution for sequence visualization
+                # Reshape and trim to match the bin-level data
+                seq_onehot_trimmed = test_seq_onehot.reshape(-1, myconfig.data.preprocess.window_size, 4)[trim:-trim]
+                seq_onehot_binned = seq_onehot_trimmed.mean(dim=1).detach().numpy()  # [n_window, 4]
 
-        # Plot
-        n = len(plot_data) + 1
-        height_ratios = [1] * len(plot_data) + [0.1]
-        fig, axes = plt.subplots(
-            nrows=n, ncols=1, figsize=(8, n * 1.5), sharex=True,
-            gridspec_kw={"height_ratios": height_ratios}
-        )
+                attribution_trimmed = attribution_cpu[0].reshape(-1, myconfig.data.preprocess.window_size, 4)[trim:-trim]
+                attribution_binned = attribution_trimmed.mean(dim=1).detach().numpy()  # [n_window, 4]
 
-        trim = (
-            myconfig.data.context_length // myconfig.data.preprocess.window_size
-            - myconfig.data.preprocess.n_window
-        ) // 2
-        x = np.arange(real_start, real_end).reshape(-1, myconfig.data.preprocess.window_size)[trim:-trim, 0]
+            # Save importance scores
+            importance_file = f"{save_base}/interp_diff/{identifier}_importance.npy"
+            np.save(importance_file, signal.numpy())
+            logger.info(f"Saved importance scores to: {importance_file}")
 
-        for i, ax in enumerate(axes[:-1]):
-            ax.plot(x, plot_data[i])
-            ax.set_title(plot_title[i])
-            ax.set_ylabel(None)
-            ax.set_xlabel(None)
+            # Save sequence and attribution for visualization
+            seq_file = f"{save_base}/interp_diff/{identifier}_sequence.npy"
+            attr_file = f"{save_base}/interp_diff/{identifier}_attribution.npy"
+            np.save(seq_file, seq_onehot_binned)
+            np.save(attr_file, attribution_binned)
+            logger.info(f"Saved sequence one-hot to: {seq_file}")
+            logger.info(f"Saved raw attribution to: {attr_file}")
 
-        ax = axes[-1]
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-        ax.set_ylim(0, 1)
-        ax.set_yticks([])
-        ax.set_ylabel(None)
-        ax.set_xlabel(None)
-
-        linewidth = 1.5
-        rec_width = 1
-        ax.hlines(0.5, x.min(), x.max(), color="black", linewidth=linewidth)
-        ax.set_title(f"Chromosome {chr_name[3:]}")
-
-        rect = Rectangle(
-            (x[bin_range[0]], 0.5 - 0.5 * rec_width),
-            x[bin_range[-1]] - x[bin_range[0]],
-            rec_width,
-            facecolor="lightblue",
-            edgecolor="black",
-            linewidth=linewidth,
-        )
-        ax.add_patch(rect)
-
-        plt.tight_layout()
-        plt.savefig(
-            f"{res_base}/{exp_name}/analysis_{chk}/plot/interp_diff/{name_base}.png",
-            dpi=300,
-            bbox_inches="tight",
-        )
-        plt.close()
+        # Save metadata for plotting
+        metadata = {
+            'chr_name': chr_name,
+            'real_start': real_start,
+            'real_end': real_end,
+            'start': start,
+            'end': end,
+            'strand': strand,
+            'bin_range': bin_range,
+            'region_name': region_name,
+            'trial_pos_list': trial_pos_list,
+            'trial_neg_list': trial_neg_list,
+            'trial_pos': trial_pos,  # Original pattern for filename reconstruction
+            'trial_neg': trial_neg,  # Original pattern for filename reconstruction
+            'baseline_types': baseline_types,
+            'window_size': myconfig.data.preprocess.window_size,
+            'n_window': myconfig.data.preprocess.n_window,
+            'context_length': myconfig.data.context_length,
+        }
+        metadata_file = f"{save_base}/interp_diff/{name_base}_metadata.npy"
+        np.save(metadata_file, metadata, allow_pickle=True)
+        logger.info(f"Saved metadata to: {metadata_file}")
 
         sample_total_time = time.time() - sample_start_time
         logger.info(f"Sample {name_base} completed in {sample_total_time:.2f}s")
 
-        del test_seq_onehot, plot_data, plot_title
+        # Generate plot command
+        baseline_flags = ' '.join([f'--baseline {bt}' for bt in baseline_types])
+        plot_output = f"{res_base}/{exp_name}/analysis_{chk}/plot/interp_diff/{name_base}.png"
+        plot_cmd = (
+            f"python Analysis/02_motif_interpretation_plot.py \\\n"
+            f"    --data_dir {save_base}/interp_diff \\\n"
+            f"    --name_base {name_base} \\\n"
+            f"    {baseline_flags} \\\n"
+            f"    --output {plot_output}"
+        )
+        logger.info(f"To plot this result, run:\n{plot_cmd}")
+
+        del test_seq_onehot
         if device.startswith('cuda'):
             torch.cuda.empty_cache()
 
@@ -757,9 +758,9 @@ def main(
     CHK_BASE = os.path.abspath(chk_base)
     RES_BASE = os.path.abspath(res_base)
 
-    os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp_diff", exist_ok=True)
     os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/interp_diff", exist_ok=True)
     os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label", exist_ok=True)
+    os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp_diff", exist_ok=True)
 
     logger = BaseLogger(name="Interpretation", level=logging.INFO)
 
