@@ -240,6 +240,14 @@ if should_run_section "03"; then
         --mode slurm \
         --untransform
 
+    echo "Running gene-level variant effect analysis for Jang2025 SingleBrain..."
+    python ${ANALYSIS_DIR}/03_4_variant_effect_by_gene.py \
+        --vcf ${DATA_BASE}/source/Jang2025_SingleBrain/finemapped_variants.vcf \
+        --exp_name ${MODEL_NAME} \
+        --chk ${CHK} \
+        --n_jobs 36 \
+        --untransform
+
     echo "Section 03: Completed"
 fi
 

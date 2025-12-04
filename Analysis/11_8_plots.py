@@ -40,4 +40,20 @@ jdb_obj = jaspardb(release='JASPAR2022')
 # %%
 motif_name = jdb_obj.fetch_motif_by_id(homer_res['AST']['Motif Name'].iloc[0].split('_')[0])
 
+# %% read tomtom results
+motif_df = pd.read_csv('tfm_out/CBGA/tomtom.txt', sep='\t')
+# filter for q-value < 0.05
+motif_df = motif_df[motif_df['q-value'] < 0.001]
+# fetch motif details
+motif_db = pd.read_csv('meme-5.4.1/motif_databases/CIS-BP_2.00/Homo_sapiens.txt', sep=' ', header=None, names=['info', 'motif_id', 'gene_name'])
+motif_df['Gene Name'] = motif_db['gene_name'].groupby(motif_db['motif_id']).first().loc[motif_df['Target ID'].values].values
+# if () exist in the motif_df['Gene Name'], remove it and extract the first bracket
+extracted = motif_df['Gene Name'].str.extract(r'\((.*?)\)', expand=False)
+motif_df['Gene Name'] = extracted.fillna(motif_df['Gene Name'])
+
+# %% overlap the Gene Name to Differential Expression List
+diff_express_list = pd.read_csv('Data/source/DiffExpress/subclass_corrected_edgeR.dds')
+diff_express_list = diff_express_list[diff_express_list['celltype'] == 'CBGA']
+motif_df['Gene Name'].isin(diff_express_list['gene']).sum(), motif_df['Gene Name'].__len__()
+
 # %%
