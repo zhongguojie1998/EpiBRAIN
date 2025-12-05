@@ -196,30 +196,42 @@ class RegionInference:
             gtf_path = ROOT / "Data" / "reference" / "gencode.v45.annotation.gtf.gz"
 
         logger.info(f"Loading GTF from {gtf_path}")
-        gtf = GTF(str(gtf_path))
+        gtf = GTF(str(gtf_path), trim_dot=False)
 
-        # Get gene
-        genes = gtf.get_gene(gene_name)
-        if len(genes) == 0:
-            raise ValueError(f"Gene '{gene_name}' not found in GTF")
+        # Find gene by name
+        gene_obj = None
+        gene_id = None
+        for gid, gene in gtf.genes.items():
+            if gene.name == gene_name:
+                gene_obj = gene
+                gene_id = gid
+                break
 
-        gene = genes[0]
-        logger.info(f"Found gene: {gene.gene_name} ({gene.gene_id}) on {gene.seqid}:{gene.start}-{gene.end}")
+        if gene_obj is None:
+            raise ValueError(f"Gene '{gene_name}' not found in GTF file")
 
-        # Get exons
-        exons = []
-        for transcript in gene.transcripts:
-            for exon in transcript.exons:
-                exons.append((gene.seqid, exon.start, exon.end))
+        logger.info(f"Found gene: {gene_name} ({gene_id})")
+        logger.info(f"  Chromosome: {gene_obj.chrom}")
+        logger.info(f"  Strand: {gene_obj.strand}")
+        logger.info(f"  Transcripts: {len(gene_obj.transcripts)}")
 
-        # Merge overlapping exons
+        # Collect all unique exons across all transcripts
+        exon_set = set()
+        for tx in gene_obj.transcripts.values():
+            for exon in tx.exons:
+                exon_set.add((exon.start, exon.end))
+
+        # Sort exons by position
+        exons = sorted(list(exon_set))
+        logger.info(f"  Total unique exons: {len(exons)}")
+
         if len(exons) == 0:
-            raise ValueError(f"No exons found for gene '{gene_name}'")
+            raise ValueError(f"No exons found for gene {gene_name}")
 
-        exons = sorted(set(exons))
-        logger.info(f"Found {len(exons)} unique exons for {gene_name}")
+        # Convert to (chr, start, end) tuples
+        exons_with_chr = [(gene_obj.chrom, start, end) for start, end in exons]
 
-        return exons
+        return exons_with_chr
 
     def get_sequence_window(self, chr, center_pos):
         """
