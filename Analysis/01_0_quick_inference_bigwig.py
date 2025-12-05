@@ -233,7 +233,7 @@ class RegionInference:
 
         return exons_with_chr
 
-    def get_sequence_and_predict(self, chr, center_pos, use_head='human'):
+    def get_sequence_and_predict(self, chr, center_pos, use_head='regression'):
         """
         Get sequence window and run prediction (following 03_0_variant_effect.py).
 
@@ -269,7 +269,7 @@ class RegionInference:
 
         return pred, real_start, real_end
 
-    def predict_variant_effect(self, chr, pos, ref, alt, use_head='human'):
+    def predict_variant_effect(self, chr, pos, ref, alt, use_head='regression'):
         """
         Predict effect of variant (following 03_0_variant_effect.py).
 
@@ -328,7 +328,7 @@ class RegionInference:
 
         return ref_pred, alt_pred, real_start, real_end
 
-    def predict_region(self, chr, start, end, use_head='human'):
+    def predict_region(self, chr, start, end, use_head='regression'):
         """
         Predict chromatin accessibility for a region.
 
