@@ -491,7 +491,7 @@ Examples:
                        help='Base directory for checkpoints (default: ./Chk)')
 
     # GTF file (for gene mode)
-    parser.add_argument('--gtf', type=str, default=None,
+    parser.add_argument('--gtf', type=str, default='Data/source/gencode.v48.annotation.gtf.gz',
                        help='Path to GTF file (default: auto-detect)')
 
     # Output
