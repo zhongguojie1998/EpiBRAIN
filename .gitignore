@@ -43,6 +43,10 @@ SLDP/
 .genomespy_temp_*.html
 .genomespy_shared/
 
+# pygenometrack
+*.ini
+*.pdf
+
 # tfmodisco output
 meme-5.4.1/
 tfm_out/
@@ -51,3 +55,5 @@ tfm_out/
 # incomplete pipelines
 Analysis/12_ldsc/
 Analysis/13_gchromVAR/
+Analysis/example_*.sh
+Analysis/12_s_ldsc_continous

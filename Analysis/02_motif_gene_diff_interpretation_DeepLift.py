@@ -10,10 +10,12 @@ Usage:
     python 02_motif_gene_diff_interpretation_DeepLift.py \
         --gene_name GENE_NAME \
         --trial_pos POSITIVE_TRACK \
-        --trial_neg NEGATIVE_TRACK1 [NEGATIVE_TRACK2 ...] \
+        [--trial_neg NEGATIVE_TRACK1 [NEGATIVE_TRACK2 ...]] \
         --exp_name EXP_NAME \
         --chk CHECKPOINT \
         [other options]
+
+Note: trial_neg is optional. If not provided, only positive trials will be analyzed.
 """
 
 import logging
@@ -311,12 +313,18 @@ class ModelWrapper(torch.nn.Module):
         device = output.device
         bin_range = self.bin_range.to(device)
         target_pos_dims = self.target_pos_dims.to(device)
-        target_neg_dims = self.target_neg_dims.to(device)
 
-        # Calculate difference: mean of positive trials - mean of negative trials
+        # Calculate signal: mean of positive trials
         output_pos = output[:, bin_range, :][:, :, target_pos_dims].mean(dim=(1, 2))
-        output_neg = output[:, bin_range, :][:, :, target_neg_dims].mean(dim=(1, 2))
-        return output_pos - output_neg
+
+        # If negative trials are provided, calculate difference
+        if len(self.target_neg_dims) > 0:
+            target_neg_dims = self.target_neg_dims.to(device)
+            output_neg = output[:, bin_range, :][:, :, target_neg_dims].mean(dim=(1, 2))
+            return output_pos - output_neg
+        else:
+            # Return only positive signal
+            return output_pos
 
     def _untransform_single(self, preds, label_meta_row):
         """Untransform predictions for a single trial."""
@@ -422,28 +430,35 @@ def process_region_chunk(args):
     logger.info(f"Selected {len(matched_pos_trials)} positive trial(s): {', '.join(matched_pos_trials[:5])}{'...' if len(matched_pos_trials) > 5 else ''}")
 
     # Get negative trial dims and metadata with grep-style substring matching
-    trial_neg_list = trial_neg.split(';')
-    matched_neg_trials = []
-    for pattern in trial_neg_list:
-        # Use substring matching (grep-style)
-        matches = label_meta[label_meta['trial'].str.contains(pattern, na=False, regex=False)]
-        matched_trials = matches['trial'].tolist()
-        matched_neg_trials.extend(matched_trials)
-        if len(matched_trials) > 0:
-            logger.info(f"Pattern '{pattern}' matched {len(matched_trials)} negative trials: {', '.join(matched_trials[:5])}{'...' if len(matched_trials) > 5 else ''}")
-        else:
-            logger.warning(f"Pattern '{pattern}' did not match any negative trials")
+    if trial_neg is not None and trial_neg != '':
+        trial_neg_list = trial_neg.split(';')
+        matched_neg_trials = []
+        for pattern in trial_neg_list:
+            # Use substring matching (grep-style)
+            matches = label_meta[label_meta['trial'].str.contains(pattern, na=False, regex=False)]
+            matched_trials = matches['trial'].tolist()
+            matched_neg_trials.extend(matched_trials)
+            if len(matched_trials) > 0:
+                logger.info(f"Pattern '{pattern}' matched {len(matched_trials)} negative trials: {', '.join(matched_trials[:5])}{'...' if len(matched_trials) > 5 else ''}")
+            else:
+                logger.warning(f"Pattern '{pattern}' did not match any negative trials")
 
-    # Remove duplicates while preserving order
-    matched_neg_trials = list(dict.fromkeys(matched_neg_trials))
-    label_meta_rows_neg = label_meta[label_meta['trial'].isin(matched_neg_trials)]
-    trial_neg_dims = label_meta_rows_neg.dim.values
+        # Remove duplicates while preserving order
+        matched_neg_trials = list(dict.fromkeys(matched_neg_trials))
+        label_meta_rows_neg = label_meta[label_meta['trial'].isin(matched_neg_trials)]
+        trial_neg_dims = label_meta_rows_neg.dim.values
 
-    if len(trial_neg_dims) == 0:
-        logger.error(f"No valid negative trials found matching patterns: {trial_neg}")
-        return
+        if len(trial_neg_dims) == 0:
+            logger.error(f"No valid negative trials found matching patterns: {trial_neg}")
+            return
 
-    logger.info(f"Selected {len(matched_neg_trials)} negative trial(s): {', '.join(matched_neg_trials[:5])}{'...' if len(matched_neg_trials) > 5 else ''}")
+        logger.info(f"Selected {len(matched_neg_trials)} negative trial(s): {', '.join(matched_neg_trials[:5])}{'...' if len(matched_neg_trials) > 5 else ''}")
+    else:
+        # No negative trials specified
+        matched_neg_trials = []
+        label_meta_rows_neg = None
+        trial_neg_dims = np.array([])
+        logger.info("No negative trials specified - analyzing positive trials only")
 
     # Update trial_pos_list and trial_neg_list with matched trials
     trial_pos_list = matched_pos_trials
@@ -476,14 +491,23 @@ def process_region_chunk(args):
 
         # Clean trial names for filenames
         trial_pos_clean = clean_trial_name(trial_pos, keep_suffix=True)
-        neg_trial_count = len(trial_neg_list)
-        trial_neg_clean = f"other-{neg_trial_count}"
 
-        name_base = (
-            f"{prefix}_{chr_name}_{start}_{end}_{region_name}_{trial_pos_clean}_{trial_neg_clean}"
-            if prefix is not None
-            else f"{chr_name}_{start}_{end}_{region_name}_{trial_pos_clean}_{trial_neg_clean}"
-        )
+        # Handle negative trials if present
+        if len(trial_neg_list) > 0:
+            neg_trial_count = len(trial_neg_list)
+            trial_neg_clean = f"other-{neg_trial_count}"
+            name_base = (
+                f"{prefix}_{chr_name}_{start}_{end}_{region_name}_{trial_pos_clean}_{trial_neg_clean}"
+                if prefix is not None
+                else f"{chr_name}_{start}_{end}_{region_name}_{trial_pos_clean}_{trial_neg_clean}"
+            )
+        else:
+            # No negative trials - omit from filename
+            name_base = (
+                f"{prefix}_{chr_name}_{start}_{end}_{region_name}_{trial_pos_clean}"
+                if prefix is not None
+                else f"{chr_name}_{start}_{end}_{region_name}_{trial_pos_clean}"
+            )
 
         if chr_name not in STD_CHR:
             logger.warning(f"Skipping {chr_name} (not in standard chromosomes)")
@@ -667,9 +691,9 @@ def process_region_chunk(args):
             'bin_range': bin_range,
             'region_name': region_name,
             'trial_pos_list': trial_pos_list,
-            'trial_neg_list': trial_neg_list,
+            'trial_neg_list': trial_neg_list if trial_neg_list else [],
             'trial_pos': trial_pos,  # Original pattern for filename reconstruction
-            'trial_neg': trial_neg,  # Original pattern for filename reconstruction
+            'trial_neg': trial_neg if trial_neg else '',  # Original pattern for filename reconstruction
             'baseline_types': baseline_types,
             'window_size': myconfig.data.preprocess.window_size,
             'n_window': myconfig.data.preprocess.n_window,
@@ -706,8 +730,8 @@ def process_region_chunk(args):
               help="Path to GTF annotation file")
 @click.option("--trial_pos", required=True, multiple=True, type=str,
               help="Positive track names (can be specified multiple times)")
-@click.option("--trial_neg", required=True, multiple=True, type=str,
-              help="Negative track names (can be specified multiple times)")
+@click.option("--trial_neg", required=False, multiple=True, type=str,
+              help="Negative track names (can be specified multiple times, optional)")
 @click.option("--exp_name", "-e", required=True, type=str)
 @click.option("--chk", required=True, type=str)
 @click.option(
@@ -770,18 +794,18 @@ def main(
 
     # Convert trial_pos and trial_neg tuples to semicolon-separated strings
     trial_pos_str = ';'.join(trial_pos)
-    trial_neg_str = ';'.join(trial_neg)
+    trial_neg_str = ';'.join(trial_neg) if trial_neg else None
 
-    # Validate we have at least one positive and negative track
+    # Validate we have at least one positive track
     if len(trial_pos) == 0:
         logger.error("At least one positive track must be specified with --trial_pos")
         return
-    if len(trial_neg) == 0:
-        logger.error("At least one negative track must be specified with --trial_neg")
-        return
 
     logger.info(f"Processing {len(trial_pos)} positive track(s): {', '.join(trial_pos)}")
-    logger.info(f"Against {len(trial_neg)} negative track(s): {', '.join(trial_neg)}")
+    if trial_neg_str:
+        logger.info(f"Against {len(trial_neg)} negative track(s): {', '.join(trial_neg)}")
+    else:
+        logger.info("No negative tracks specified - will analyze positive tracks only")
 
     # Get gene exon regions
     logger.info(f"Extracting exon regions for gene: {gene_name}")
