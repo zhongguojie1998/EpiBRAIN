@@ -37,6 +37,8 @@ import numpy as np
 import pandas as pd
 import pyBigWig
 import torch
+import yaml
+from omegaconf import OmegaConf
 from tqdm import tqdm
 
 ROOT = Path(__file__).parent.parent
@@ -84,7 +86,19 @@ class RegionInference:
         # Load config
         if config_path is None:
             config_path = ROOT / "Model" / "config.yaml"
-        self.cfg = load_config(config_path)
+
+        # Check if config_path is a saved YAML file or a Hydra config directory
+        config_path = Path(config_path)
+        if config_path.exists() and config_path.is_file() and config_path.suffix in ['.yaml', '.yml']:
+            # Load saved config file directly
+            logger.info(f"Loading saved config from: {config_path}")
+            with open(config_path, 'r') as f:
+                cfg_dict = yaml.safe_load(f)
+            self.cfg = OmegaConf.create(cfg_dict)
+        else:
+            # Use Hydra's load_config for config directories
+            logger.info(f"Loading config using Hydra from: {config_path}")
+            self.cfg = load_config(config_path)
 
         # Setup model
         logger.info(f"Loading model from {checkpoint_path}")
