@@ -14,6 +14,7 @@ from pathlib import Path
 import argparse
 import sys
 import numpy as np
+from fnmatch import fnmatch
 
 try:
     import pyBigWig
@@ -28,8 +29,9 @@ def find_bigwig_files(bigwig_dir, track_patterns=None):
 
     Args:
         bigwig_dir: Directory containing bigwig files
-        track_patterns: Comma-separated string patterns to match (e.g., "ATAC,K27Ac")
-                       Uses str.contains() matching
+        track_patterns: Comma-separated string patterns to match
+                       Supports wildcards: "BasalGanglia*ATAC,MiniAtlas*K27Ac"
+                       Or simple substring: "ATAC,K27Ac"
 
     Returns:
         List of bigwig file paths
@@ -58,9 +60,21 @@ def find_bigwig_files(bigwig_dir, track_patterns=None):
         for pattern in patterns:
             # Find files matching this pattern
             pattern_matches = []
+
+            # Check if pattern contains wildcards
+            has_wildcard = '*' in pattern or '?' in pattern
+
             for bw_file in all_bigwigs:
-                if pattern in bw_file.name and bw_file not in selected_bigwigs:
-                    pattern_matches.append(bw_file)
+                if bw_file in selected_bigwigs:
+                    continue
+
+                # Use fnmatch for wildcard patterns, substring matching otherwise
+                if has_wildcard:
+                    if fnmatch(bw_file.name, pattern):
+                        pattern_matches.append(bw_file)
+                else:
+                    if pattern in bw_file.name:
+                        pattern_matches.append(bw_file)
 
             # Sort files within this pattern group
             pattern_matches.sort()
@@ -419,12 +433,19 @@ Examples:
       --chr chr1 --start 10000000 --end 10100000 \\
       --output plot.pdf
 
-  # Select specific tracks by pattern matching
+  # Select specific tracks by pattern matching (comma-separated patterns)
   python 00_visualize_data_pygenometrack.py \\
       --bigwig-dir bigwig_files/ \\
-      --tracks "ATAC,K27Ac" \\
+      -t "ATAC,K27Ac" \\
       --region chr1:10000000-10100000 \\
       --output atac_k27ac_plot.pdf
+
+  # Select tracks using wildcard patterns
+  python 00_visualize_data_pygenometrack.py \\
+      --bigwig-dir bigwig_files/ \\
+      -t "BasalGanglia*ATAC,MiniAtlas*ATAC" \\
+      --region chr1:10000000-10100000 \\
+      --output basal_mini_atac.pdf
 
   # Custom track heights and font sizes
   python 00_visualize_data_pygenometrack.py \\
@@ -489,8 +510,11 @@ Examples:
                         help="End position (bp)")
 
     # Optional arguments
-    parser.add_argument("--tracks", type=str, default=None,
-                        help="Comma-separated patterns to match track names (e.g., 'ATAC,K27Ac')")
+    parser.add_argument("-t", "--tracks", type=str, default=None,
+                        help="Comma-separated patterns to match track names. "
+                             "Supports wildcards: 'BasalGanglia*ATAC,MiniAtlas*K27Ac' or "
+                             "simple substring matching: 'ATAC,K27Ac'. "
+                             "Use * to match any characters, ? to match single character.")
     parser.add_argument("--output", type=str, default="pygenometrack_plot.pdf",
                         help="Output image file (default: pygenometrack_plot.pdf)")
     parser.add_argument("--config", type=str, default=None,
