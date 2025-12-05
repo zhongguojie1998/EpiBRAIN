@@ -102,7 +102,18 @@ class RegionInference:
 
         # Setup model
         logger.info(f"Loading model from {checkpoint_path}")
-        self.model = setup_model(self.cfg, checkpoint_path, logger=logger)
+
+        # Disable model compilation for inference
+        if hasattr(self.cfg.model, 'use_compile'):
+            self.cfg.model.use_compile = False
+
+        # Create model
+        self.model = setup_model(self.cfg, logger)
+
+        # Load checkpoint
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+
         self.model.to(device)
         self.model.eval()
 
