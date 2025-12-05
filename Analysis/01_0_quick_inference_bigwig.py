@@ -117,23 +117,37 @@ class RegionInference:
         self.model.to(device)
         self.model.eval()
 
-        # Get model parameters
-        self.seq_len = self.cfg.dataset.seq_len
-        self.window_size = self.cfg.dataset.window_size
-        self.n_window = self.seq_len // self.window_size
+        # Get model parameters from config
+        self.seq_len = self.cfg.data.context_length
+        self.window_size = self.cfg.data.preprocess.window_size
+        self.n_window = self.cfg.model.crop_param.bins_to_return
 
         # Setup FASTA tokenizer
-        fasta_path = self.cfg.dataset.fasta_path
+        fasta_path = os.path.abspath(self.cfg.data.refer_genom)
         logger.info(f"Loading FASTA from {fasta_path}")
-        self.fasta = FastaInterval(fasta_path, return_seq_indices=False)
+        self.fasta = FastaInterval(fasta_file=fasta_path, context_length=self.seq_len, return_seq_indices=False)
 
-        # Load labels (for ground truth)
-        h5_path = self.cfg.dataset.h5_path
-        logger.info(f"Loading labels from {h5_path}")
-        with h5py.File(h5_path, 'r') as f:
-            self.label_names = [x.decode() for x in f['label_names'][:]]
+        # Get label names from config or metadata
+        # Try to load from label metadata file first
+        try:
+            label_meta_path = Path(self.cfg.logging.log_dir) / "regression_label_meta.csv"
+            if label_meta_path.exists():
+                logger.info(f"Loading label metadata from {label_meta_path}")
+                label_meta = pd.read_csv(label_meta_path, index_col=1)
+                self.label_names = label_meta.index.tolist()
+            else:
+                # Fall back to generating labels from data config
+                logger.info("Label metadata not found, generating from data config")
+                data_config_path = self.cfg.data.preprocess.trial_summary_path
+                data_config = pd.read_csv(data_config_path, index_col=0)
+                self.label_names = data_config.index.tolist()
+        except Exception as e:
+            logger.warning(f"Could not load label names from metadata: {e}")
+            # Last resort: create generic labels
+            n_tracks = self.cfg.model.output_heads.regression.track_num
+            self.label_names = [f"track_{i}" for i in range(n_tracks)]
 
-        logger.info(f"Model ready. Sequence length: {self.seq_len}, Window size: {self.window_size}")
+        logger.info(f"Model ready. Sequence length: {self.seq_len}, Window size: {self.window_size}, N windows: {self.n_window}")
         logger.info(f"Number of tracks: {len(self.label_names)}")
 
     def parse_region(self, region_str):
@@ -326,30 +340,43 @@ class RegionInference:
             numpy array: Labels (n_window, n_tracks) or None if not available
         """
         try:
-            # Load labels from h5 file
-            h5_path = self.cfg.dataset.h5_path
-            with h5py.File(h5_path, 'r') as f:
-                # Get chromosome data
-                if chr not in f:
-                    logger.warning(f"Chromosome {chr} not found in labels")
-                    return None
+            # Try to load labels from data storage
+            # Check multiple possible locations
+            storage_path = Path(self.cfg.data.storage_path)
 
-                chr_data = f[chr]
+            # Try different data splits
+            for split in ['valid', 'test', 'train']:
+                h5_path = storage_path / f"{split}_data.h5"
+                if not h5_path.exists():
+                    continue
 
-                # Find overlapping windows
-                # Assuming labels are stored at regular intervals
-                labels = chr_data[:]
+                logger.info(f"Attempting to load labels from {h5_path}")
+                with h5py.File(h5_path, 'r') as f:
+                    # Get chromosome data
+                    if chr not in f:
+                        logger.warning(f"Chromosome {chr} not found in labels in {split}")
+                        continue
 
-                # Calculate which windows we need
-                # This is simplified - adjust based on actual data structure
-                window_idx_start = window_start // self.window_size
-                window_idx_end = window_end // self.window_size
+                    chr_data = f[chr]
 
-                if window_idx_end > len(labels):
-                    logger.warning(f"Window extends beyond available labels")
-                    return None
+                    # Find overlapping windows
+                    # Assuming labels are stored at regular intervals
+                    labels = chr_data[:]
 
-                return labels[window_idx_start:window_idx_end]
+                    # Calculate which windows we need
+                    # This is simplified - adjust based on actual data structure
+                    window_idx_start = window_start // self.window_size
+                    window_idx_end = window_end // self.window_size
+
+                    if window_idx_end > len(labels):
+                        logger.warning(f"Window extends beyond available labels")
+                        continue
+
+                    return labels[window_idx_start:window_idx_end]
+
+            # If we get here, no labels were found
+            logger.warning(f"Could not find labels for region {chr}:{window_start}-{window_end}")
+            return None
 
         except Exception as e:
             logger.warning(f"Could not load labels: {e}")
