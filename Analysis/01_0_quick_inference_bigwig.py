@@ -102,7 +102,7 @@ class RegionInference:
 
         # Setup model
         logger.info(f"Loading model from {checkpoint_path}")
-        self.model = setup_model(self.cfg, checkpoint_path)
+        self.model = setup_model(self.cfg, checkpoint_path, logger=logger)
         self.model.to(device)
         self.model.eval()
 
