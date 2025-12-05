@@ -122,10 +122,10 @@ class RegionInference:
         self.window_size = self.cfg.data.preprocess.window_size
         self.n_window = self.cfg.model.crop_param.bins_to_return
 
-        # Setup FASTA tokenizer
+        # Setup FASTA tokenizer (following 03_0_variant_effect.py)
         fasta_path = os.path.abspath(self.cfg.data.refer_genom)
         logger.info(f"Loading FASTA from {fasta_path}")
-        self.fasta = FastaInterval(fasta_file=fasta_path, context_length=self.seq_len, return_seq_indices=False)
+        self.fasta = FastaInterval(fasta_file=fasta_path, context_length=self.seq_len)
 
         # Get label names from config or metadata
         # Try to load from label metadata file first
@@ -233,88 +233,102 @@ class RegionInference:
 
         return exons_with_chr
 
-    def get_sequence_window(self, chr, center_pos):
+    def get_sequence_and_predict(self, chr, center_pos, use_head='human'):
         """
-        Get sequence window centered at position.
+        Get sequence window and run prediction (following 03_0_variant_effect.py).
 
         Args:
             chr: Chromosome
             center_pos: Center position
+            use_head: Which prediction head to use
 
         Returns:
-            tuple: (sequence, window_start, window_end)
+            tuple: (predictions, window_start, window_end)
+                predictions: numpy array (n_window, n_tracks)
         """
-        # Calculate window boundaries
-        half_len = self.seq_len // 2
-        window_start = center_pos - half_len
-        window_end = center_pos + half_len
+        # Get sequence using FastaInterval (returns dict with 'one_hot', 'real_region')
+        # FastaInterval is 0-indexed, so we center on center_pos
+        token_dict = self.fasta(
+            chr_name=chr,
+            start=center_pos - self.seq_len // 2,
+            end=center_pos + self.seq_len // 2,
+            return_augs=False,
+            return_rela_idx=True
+        )
 
-        # Get sequence
-        seq = self.fasta(chr, window_start, window_end)
+        seq_onehot = token_dict["one_hot"]  # Shape: (L, 4)
+        real_start, real_end = token_dict["real_region"]
 
-        return seq, window_start, window_end
+        logger.info(f"Sequence window: {chr}:{real_start}-{real_end}")
 
-    def predict_sequence(self, seq, apply_softmax=True):
-        """
-        Run model prediction on sequence.
-
-        Args:
-            seq: DNA sequence string
-            apply_softmax: Whether to apply softmax to output
-
-        Returns:
-            numpy array: Predictions (n_window, n_tracks)
-        """
-        # One-hot encode
-        seq_encoded = str_to_one_hot(seq)
-        seq_tensor = torch.from_numpy(seq_encoded).unsqueeze(0).float().to(self.device)
-
-        # Predict
+        # Run prediction (following 03_0_variant_effect.py format)
         with torch.no_grad():
-            output = self.model(seq_tensor)
-            if apply_softmax:
-                output = torch.softmax(output, dim=-1)
-            pred = output[0].cpu().numpy()
+            # Permute from (L, 4) to (1, 4, L) and move to device
+            seq_tensor = seq_onehot.unsqueeze(0).permute(0, 2, 1).to(self.device)
+            pred = self.model(seq_tensor, use_head).detach().cpu().numpy().squeeze(0)
 
-        return pred
+        return pred, real_start, real_end
 
-    def predict_variant_effect(self, chr, pos, ref, alt):
+    def predict_variant_effect(self, chr, pos, ref, alt, use_head='human'):
         """
-        Predict effect of variant on chromatin accessibility.
+        Predict effect of variant (following 03_0_variant_effect.py).
 
         Args:
             chr: Chromosome
-            pos: Position (1-based)
+            pos: Position (1-based, VCF format)
             ref: Reference allele
             alt: Alternative allele
+            use_head: Which prediction head to use
 
         Returns:
             tuple: (ref_pred, alt_pred, window_start, window_end)
         """
         logger.info(f"Predicting variant effect: {chr}:{pos}:{ref}>{alt}")
 
-        # Get reference sequence
-        ref_seq, window_start, window_end = self.get_sequence_window(chr, pos)
+        # Get reference sequence (pos is 1-based in VCF, FastaInterval is 0-based)
+        token_dict = self.fasta(
+            chr_name=chr,
+            start=pos - 1,  # Convert to 0-based
+            end=pos,  # End is exclusive
+            return_augs=False,
+            return_rela_idx=True
+        )
+
+        s_idx, e_idx = token_dict["rela_idx"]
+        wt_seq_onehot = token_dict["one_hot"]
+        real_start, real_end = token_dict["real_region"]
 
         # Verify reference allele
-        center_idx = len(ref_seq) // 2
-        ref_in_seq = ref_seq[center_idx:center_idx+len(ref)]
-        if ref_in_seq.upper() != ref:
-            logger.warning(f"Reference allele mismatch: expected {ref}, got {ref_in_seq}")
+        def onehot_to_str(seq_onehot):
+            mapping = {(1, 0, 0, 0): "A", (0, 1, 0, 0): "C", (0, 0, 1, 0): "G", (0, 0, 0, 1): "T", (0, 0, 0, 0): "N"}
+            seq_str = ""
+            for vec in seq_onehot:
+                key = tuple((vec > 0.5).int().tolist())
+                seq_str += mapping.get(key, "N")
+            return seq_str
 
-        # Create alternative sequence
-        alt_seq = ref_seq[:center_idx] + alt + ref_seq[center_idx+len(ref):]
+        wt_nt_fetched = onehot_to_str(wt_seq_onehot[s_idx:e_idx])
+        if ref != wt_nt_fetched:
+            logger.warning(f"Ref info isn't consistent with genome. {chr}:{pos}, given {ref}, fetched {wt_nt_fetched}")
+
+        # Create alt sequence
+        alt_nt_onehot = str_to_one_hot(alt)
+        mut_seq_onehot = wt_seq_onehot.clone()
+        mut_seq_onehot[s_idx:e_idx] = alt_nt_onehot
+
+        logger.info(f"Predicting reference and alternative sequences for {chr}:{real_start}-{real_end}")
 
         # Predict both sequences
-        logger.info("Predicting reference sequence...")
-        ref_pred = self.predict_sequence(ref_seq)
+        with torch.no_grad():
+            wt_tensor = wt_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(self.device)
+            ref_pred = self.model(wt_tensor, use_head).detach().cpu().numpy().squeeze(0)
 
-        logger.info("Predicting alternative sequence...")
-        alt_pred = self.predict_sequence(alt_seq)
+            mut_tensor = mut_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(self.device)
+            alt_pred = self.model(mut_tensor, use_head).detach().cpu().numpy().squeeze(0)
 
-        return ref_pred, alt_pred, window_start, window_end
+        return ref_pred, alt_pred, real_start, real_end
 
-    def predict_region(self, chr, start, end):
+    def predict_region(self, chr, start, end, use_head='human'):
         """
         Predict chromatin accessibility for a region.
 
@@ -322,20 +336,16 @@ class RegionInference:
             chr: Chromosome
             start: Start position
             end: End position
+            use_head: Which prediction head to use
 
         Returns:
             tuple: (predictions, window_start, window_end)
         """
         logger.info(f"Predicting region: {chr}:{start}-{end}")
 
-        # Get center position
+        # Get center position and predict
         center_pos = (start + end) // 2
-
-        # Get sequence window
-        seq, window_start, window_end = self.get_sequence_window(chr, center_pos)
-
-        # Predict
-        pred = self.predict_sequence(seq)
+        pred, window_start, window_end = self.get_sequence_and_predict(chr, center_pos, use_head)
 
         return pred, window_start, window_end
 
