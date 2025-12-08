@@ -48,7 +48,7 @@ os.chdir(ROOT)
 warnings.filterwarnings("ignore")
 
 from data.data_utils import STD_CHR, ModelSeq, annotate_unmap, get_labels
-from data.tokenizer import FastaInterval, str_to_one_hot
+from data.tokenizer import FastaInterval, str_to_one_hot, one_hot_reverse_complement
 from model.model_utils import setup_model
 from utils.config import load_config
 
@@ -129,12 +129,15 @@ class RegionInference:
 
         # Get label names from config or metadata
         # Try to load from label metadata file first
+        self.label_meta = None
         try:
             label_meta_path = Path(self.cfg.logging.log_dir) / "regression_label_meta.csv"
             if label_meta_path.exists():
                 logger.info(f"Loading label metadata from {label_meta_path}")
-                label_meta = pd.read_csv(label_meta_path, index_col=1)
-                self.label_names = label_meta.index.tolist()
+                self.label_meta = pd.read_csv(label_meta_path)
+                # Use the 'trial' column which has full track names
+                # Format: "BasalGanglia-Astrocyte_ATAC", "BasalGanglia-Astrocyte_K27Ac", etc.
+                self.label_names = self.label_meta['trial'].tolist()
             else:
                 # Fall back to generating labels from data config
                 logger.info("Label metadata not found, generating from data config")
@@ -147,8 +150,63 @@ class RegionInference:
             n_tracks = self.cfg.model.output_heads.regression.track_num
             self.label_names = [f"track_{i}" for i in range(n_tracks)]
 
+        # Build reverse complement swap index for RNAplus/RNAminus tracks
+        self.reverse_complement_swap_index = self._build_rc_swap_index()
+
         logger.info(f"Model ready. Sequence length: {self.seq_len}, Window size: {self.window_size}, N windows: {self.n_window}")
         logger.info(f"Number of tracks: {len(self.label_names)}")
+
+    def _build_rc_swap_index(self):
+        """
+        Build reverse complement swap index for RNAplus/RNAminus tracks.
+
+        Returns:
+            numpy array: Swap index where RNAplus and RNAminus are swapped
+        """
+        if self.label_meta is None:
+            return None
+
+        # Check if we have RNAplus and RNAminus tracks
+        if 'modality' not in self.label_meta.columns or 'cell_type' not in self.label_meta.columns:
+            logger.warning("Missing 'modality' or 'cell_type' columns in label metadata, skipping RC swap index")
+            return None
+
+        has_plus = 'RNAplus' in self.label_meta['modality'].values
+        has_minus = 'RNAminus' in self.label_meta['modality'].values
+
+        if not (has_plus and has_minus):
+            logger.info("No RNAplus/RNAminus tracks found, skipping RC swap index")
+            return None
+
+        # Build swap index
+        swap_index = []
+        for i, row in self.label_meta.iterrows():
+            if row['modality'] == 'RNAplus':
+                # Find the index of RNAminus for corresponding cell type
+                matching = self.label_meta[
+                    (self.label_meta['modality'] == 'RNAminus') &
+                    (self.label_meta['cell_type'] == row['cell_type'])
+                ]
+                if len(matching) > 0:
+                    swap_index.append(int(matching.index[0]))
+                else:
+                    swap_index.append(i)
+            elif row['modality'] == 'RNAminus':
+                # Find the index of RNAplus for corresponding cell type
+                matching = self.label_meta[
+                    (self.label_meta['modality'] == 'RNAplus') &
+                    (self.label_meta['cell_type'] == row['cell_type'])
+                ]
+                if len(matching) > 0:
+                    swap_index.append(int(matching.index[0]))
+                else:
+                    swap_index.append(i)
+            else:
+                # Don't change for other modalities
+                swap_index.append(i)
+
+        logger.info(f"Built reverse complement swap index for RNAplus/RNAminus tracks")
+        return np.array(swap_index)
 
     def parse_region(self, region_str):
         """
@@ -233,14 +291,15 @@ class RegionInference:
 
         return exons_with_chr
 
-    def get_sequence_and_predict(self, chr, center_pos, use_head='regression'):
+    def get_sequence_and_predict(self, chr, center_pos, use_head='regression', use_rev_aug=True):
         """
-        Get sequence window and run prediction (following 03_0_variant_effect.py).
+        Get sequence window and run prediction with optional reverse complement augmentation.
 
         Args:
             chr: Chromosome
             center_pos: Center position
             use_head: Which prediction head to use
+            use_rev_aug: Whether to use reverse complement augmentation (default: True)
 
         Returns:
             tuple: (predictions, window_start, window_end)
@@ -261,11 +320,29 @@ class RegionInference:
 
         logger.info(f"Sequence window: {chr}:{real_start}-{real_end}")
 
-        # Run prediction (following 03_0_variant_effect.py format)
+        # Run prediction with optional reverse complement augmentation
         with torch.no_grad():
             # Permute from (L, 4) to (1, 4, L) and move to device
             seq_tensor = seq_onehot.unsqueeze(0).permute(0, 2, 1).to(self.device)
-            pred = self.model(seq_tensor, use_head).detach().cpu().numpy().squeeze(0)
+            pred_fwd = self.model(seq_tensor, use_head).detach().cpu().numpy().squeeze(0)
+
+            if use_rev_aug:
+                # Get reverse complement sequence
+                seq_onehot_rev = one_hot_reverse_complement(seq_onehot)
+                seq_tensor_rev = seq_onehot_rev.unsqueeze(0).permute(0, 2, 1).to(self.device)
+                pred_rev = self.model(seq_tensor_rev, use_head).detach().cpu().numpy().squeeze(0)
+
+                # Flip predictions along sequence dimension (reverse order)
+                pred_rev = np.flip(pred_rev, axis=0)
+
+                # Swap RNAplus and RNAminus tracks if needed
+                if self.reverse_complement_swap_index is not None:
+                    pred_rev = pred_rev[:, self.reverse_complement_swap_index]
+
+                # Average forward and reverse predictions
+                pred = (pred_fwd + pred_rev) / 2.0
+            else:
+                pred = pred_fwd
 
         return pred, real_start, real_end
 
@@ -351,7 +428,7 @@ class RegionInference:
 
     def get_labels_for_region(self, chr, window_start, window_end):
         """
-        Get ground truth labels for a region.
+        Get ground truth labels for a region by extracting from bigwig files.
 
         Args:
             chr: Chromosome
@@ -362,47 +439,148 @@ class RegionInference:
             numpy array: Labels (n_window, n_tracks) or None if not available
         """
         try:
-            # Try to load labels from data storage
-            # Check multiple possible locations
-            storage_path = Path(self.cfg.data.storage_path)
+            # Load trial summary CSV to get bigwig file paths
+            trial_summary_path = self.cfg.data.preprocess.trial_summary_path
+            if not Path(trial_summary_path).exists():
+                logger.warning(f"Trial summary not found: {trial_summary_path}")
+                return None
 
-            # Try different data splits
-            for split in ['valid', 'test', 'train']:
-                h5_path = storage_path / f"{split}_data.h5"
-                if not h5_path.exists():
+            data_config = pd.read_csv(trial_summary_path, index_col=1)
+
+            # Create ModelSeq for this region
+            mseqs = [ModelSeq(chr, window_start, window_end, "inference")]
+
+            # Create temporary directory for label files
+            import tempfile
+            temp_dir = tempfile.mkdtemp()
+
+            # Annotate unmappable regions if available
+            unmap_npy_path = None
+            if hasattr(self.cfg.data.preprocess, 'unmap_bed') and Path(self.cfg.data.preprocess.unmap_bed).exists():
+                unmap_npy = os.path.join(temp_dir, "mseqs_unmap.npy")
+                mseqs_unmap = annotate_unmap(
+                    mseqs,
+                    self.cfg.data.preprocess.unmap_bed,
+                    self.cfg.data.preprocess.context_length,
+                    self.cfg.data.preprocess.window_size,
+                )
+                np.save(unmap_npy, mseqs_unmap)
+                unmap_npy_path = unmap_npy
+
+            # Extract labels for each track
+            all_labels = []
+            for track_name in self.label_names:
+                # Get track info from data_config
+                if track_name not in data_config.index:
+                    logger.warning(f"Track {track_name} not found in data config, skipping")
                     continue
 
-                logger.info(f"Attempting to load labels from {h5_path}")
-                with h5py.File(h5_path, 'r') as f:
-                    # Get chromosome data
-                    if chr not in f:
-                        logger.warning(f"Chromosome {chr} not found in labels in {split}")
-                        continue
+                track_info = data_config.loc[track_name]
+                genome_cov_file = track_info["file"]
 
-                    chr_data = f[chr]
+                # Check if bigwig file exists
+                if not Path(genome_cov_file).exists():
+                    logger.warning(f"Bigwig file not found for {track_name}: {genome_cov_file}")
+                    continue
 
-                    # Find overlapping windows
-                    # Assuming labels are stored at regular intervals
-                    labels = chr_data[:]
+                # Create temporary H5 file for this track's labels
+                label_h5_file = os.path.join(temp_dir, f"{track_name}_label.h5")
 
-                    # Calculate which windows we need
-                    # This is simplified - adjust based on actual data structure
-                    window_idx_start = window_start // self.window_size
-                    window_idx_end = window_end // self.window_size
+                # Extract labels using get_labels function
+                get_labels(
+                    mseqs,
+                    blacklist_bed=self.cfg.data.preprocess.blacklist_bed,
+                    pool_width=self.cfg.data.preprocess.window_size,
+                    kept_num_after_crop=self.cfg.data.preprocess.n_window,
+                    seqs_cov_file=label_h5_file,
+                    genome_cov_file=genome_cov_file,
+                    umap_npy_path=unmap_npy_path,
+                    **track_info[["sum_stat", "baseline_pct", "umap_pct", "scale", "clip", "clip_soft"]].to_dict(),
+                )
 
-                    if window_idx_end > len(labels):
-                        logger.warning(f"Window extends beyond available labels")
-                        continue
+                # Read the extracted labels
+                with h5py.File(label_h5_file, 'r') as f:
+                    track_labels = f["targets"][0][:]  # Shape: (n_window,)
+                    all_labels.append(track_labels)
 
-                    return labels[window_idx_start:window_idx_end]
+                # Clean up temp file
+                os.remove(label_h5_file)
 
-            # If we get here, no labels were found
-            logger.warning(f"Could not find labels for region {chr}:{window_start}-{window_end}")
-            return None
+            # Clean up temp directory
+            import shutil
+            shutil.rmtree(temp_dir)
+
+            if len(all_labels) == 0:
+                logger.warning(f"No labels could be extracted for {chr}:{window_start}-{window_end}")
+                return None
+
+            # Stack labels into (n_window, n_tracks) array
+            labels = np.stack(all_labels, axis=1)
+            logger.info(f"Extracted labels with shape {labels.shape} for {chr}:{window_start}-{window_end}")
+
+            return labels
 
         except Exception as e:
             logger.warning(f"Could not load labels: {e}")
+            import traceback
+            traceback.print_exc()
             return None
+
+    def untransform_predictions(self, predictions, track_name):
+        """
+        Untransform predictions back to original scale.
+
+        Args:
+            predictions: Numpy array (n_window,) for a single track
+            track_name: Name of the track to get transformation params
+
+        Returns:
+            Untransformed predictions
+        """
+        preds = predictions.copy()
+
+        # Use cached label metadata
+        if self.label_meta is None:
+            # No metadata available, skip untransform
+            return preds
+
+        try:
+            # Find the row for this track by matching the 'trial' column
+            matching_rows = self.label_meta[self.label_meta['trial'] == track_name]
+            if len(matching_rows) == 0:
+                logger.warning(f"Track {track_name} not found in label metadata, skipping untransform")
+                return preds
+
+            meta_row = matching_rows.iloc[0]
+
+            trial_scale = meta_row.get('scale', 1.0)
+            trial_clip_soft = meta_row.get('clip_soft', 48.0)
+            trial_sum_stat = meta_row.get('sum_stat', 'sum_three_quarter')
+
+            # Step 1: Undo scale
+            if trial_scale != 1.0:
+                preds = preds / trial_scale
+
+            # Step 2: Undo soft clip
+            if trial_clip_soft is not None and not pd.isna(trial_clip_soft):
+                clip_mask = preds > trial_clip_soft
+                preds[clip_mask] = (trial_clip_soft - 1) + (preds[clip_mask] - (trial_clip_soft - 1)) ** 2
+
+            # Step 3: Undo power transform
+            if trial_sum_stat == "sum_three_quarter":
+                preds = preds ** (4.0 / 3.0)
+            elif trial_sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
+                preds = (preds + 1) ** 2 - 1
+            elif trial_sum_stat in ['sum', 'mean', "avg"]:
+                pass
+            else:
+                logger.warning(f"Unknown sum_stat: {trial_sum_stat}, skipping power transform")
+
+            return preds
+
+        except Exception as e:
+            logger.warning(f"Error untransforming predictions for {track_name}: {e}")
+            return predictions
 
     def export_to_bigwig(self, predictions, chr, window_start, track_names, output_dir, prefix="pred"):
         """
@@ -440,6 +618,11 @@ class RegionInference:
         for track_idx, track_name in enumerate(tqdm(track_names, desc=f"Exporting {prefix}")):
             output_file = output_path / f"{track_name}.bw"
 
+            # Untransform predictions for this track back to original scale
+            track_predictions = predictions[:, track_idx]
+            if prefix in ["pred", "alt"]:  # Only untransform model predictions, not labels
+                track_predictions = self.untransform_predictions(track_predictions, track_name)
+
             # Create bigwig file
             bw = pyBigWig.open(str(output_file), "w")
 
@@ -453,10 +636,10 @@ class RegionInference:
             ends = []
             values = []
 
-            for i in range(predictions.shape[0]):
+            for i in range(len(track_predictions)):
                 pos_start = window_start + i * self.window_size
                 pos_end = pos_start + self.window_size
-                value = float(predictions[i, track_idx])
+                value = float(track_predictions[i])
 
                 chroms.append(chr)
                 starts.append(pos_start)
@@ -683,31 +866,32 @@ Examples:
     # Visualization command
     logger.info("")
     logger.info("To visualize the results, run:")
+    print()
     if args.variant:
-        logger.info(f"  python Analysis/00_visualize_data_pygenometrack.py \\")
-        logger.info(f"    --bigwig-dir {output_dir}/pred \\")
-        logger.info(f"    --region {chr}:{window_start}-{window_end} \\")
-        logger.info(f"    --output {output_dir}/visualization.pdf")
-        logger.info("")
-        logger.info("  Or compare reference vs alternative:")
-        logger.info(f"  # Reference allele")
-        logger.info(f"  python Analysis/00_visualize_data_pygenometrack.py \\")
-        logger.info(f"    --bigwig-dir {output_dir}/pred \\")
-        logger.info(f"    --region {chr}:{pos-5000}-{pos+5000} \\")
-        logger.info(f"    --output {output_dir}/ref_visualization.pdf")
-        logger.info("")
-        logger.info(f"  # Alternative allele")
-        logger.info(f"  python Analysis/00_visualize_data_pygenometrack.py \\")
-        logger.info(f"    --bigwig-dir {output_dir}/alt \\")
-        logger.info(f"    --region {chr}:{pos-5000}-{pos+5000} \\")
-        logger.info(f"    --output {output_dir}/alt_visualization.pdf")
+        print(f"  python Analysis/00_visualize_data_pygenometrack.py \\")
+        print(f"    --bigwig-dir {output_dir}/pred \\")
+        print(f"    --region {chr}:{window_start}-{window_end} \\")
+        print(f"    --output {output_dir}/visualization.pdf")
+        print()
+        print("  Or compare reference vs alternative:")
+        print(f"  # Reference allele")
+        print(f"  python Analysis/00_visualize_data_pygenometrack.py \\")
+        print(f"    --bigwig-dir {output_dir}/pred \\")
+        print(f"    --region {chr}:{pos-5000}-{pos+5000} \\")
+        print(f"    --output {output_dir}/ref_visualization.pdf")
+        print()
+        print(f"  # Alternative allele")
+        print(f"  python Analysis/00_visualize_data_pygenometrack.py \\")
+        print(f"    --bigwig-dir {output_dir}/alt \\")
+        print(f"    --region {chr}:{pos-5000}-{pos+5000} \\")
+        print(f"    --output {output_dir}/alt_visualization.pdf")
     else:
-        logger.info(f"  python Analysis/00_visualize_data_pygenometrack.py \\")
-        logger.info(f"    --bigwig-dir {output_dir}/pred \\")
-        logger.info(f"    --region {chr}:{window_start}-{window_end} \\")
-        logger.info(f"    --output {output_dir}/visualization.pdf")
+        print(f"  python Analysis/00_visualize_data_pygenometrack.py \\")
+        print(f"    --bigwig-dir {output_dir}/pred \\")
+        print(f"    --region {chr}:{window_start}-{window_end} \\")
+        print(f"    --output {output_dir}/visualization.pdf")
 
-    logger.info("")
+    print()
     logger.info("Done!")
 
 

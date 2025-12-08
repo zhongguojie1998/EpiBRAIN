@@ -46,6 +46,29 @@ from model.model_utils import setup_model
 from utils.config import load_config
 from utils.logging import BaseLogger
 
+# Import attribution methods from other scripts
+sys.path.append(str(ROOT / "Analysis"))
+try:
+    from Analysis.motif_bed_diff_interpretation_gradient_input import gradients_input_attribution_diff
+    from Analysis.motif_bed_diff_interpretation_gradient_input_smooth import smooth_gradients_input_attribution_diff
+except ImportError:
+    # Try alternative import paths
+    try:
+        import importlib.util
+        gi_spec = importlib.util.spec_from_file_location("gi", ROOT / "Analysis" / "02_motif_bed_diff_interpretation_gradient_input.py")
+        gi_module = importlib.util.module_from_spec(gi_spec)
+        gi_spec.loader.exec_module(gi_module)
+        gradients_input_attribution_diff = gi_module.gradients_input_attribution_diff
+
+        gis_spec = importlib.util.spec_from_file_location("gis", ROOT / "Analysis" / "02_motif_bed_diff_interpretation_gradient_input_smooth.py")
+        gis_module = importlib.util.module_from_spec(gis_spec)
+        gis_spec.loader.exec_module(gis_module)
+        smooth_gradients_input_attribution_diff = gis_module.smooth_gradients_input_attribution_diff
+    except Exception as e:
+        print(f"Warning: Could not import gradient methods: {e}")
+        gradients_input_attribution_diff = None
+        smooth_gradients_input_attribution_diff = None
+
 # Import pygene for GTF parsing
 try:
     from pygene import GTF
@@ -375,6 +398,7 @@ def process_region_chunk(args):
         no_untransform,
         trial_pos,
         trial_neg,
+        method,
     ) = args
 
     # Set torch threads for CPU
@@ -603,39 +627,106 @@ def process_region_chunk(args):
         model_wrapper = ModelWrapper(
             model, use_head, trial_pos_dims, trial_neg_dims, bin_range,
             no_untransform=no_untransform,
-            label_meta_rows_pos=label_meta_rows_pos if not no_untransform else None,
-            label_meta_rows_neg=label_meta_rows_neg if not no_untransform else None
+            label_meta_rows_pos=label_meta_rows_pos if (not no_untransform and not label_meta_rows_pos.empty) else None,
+            label_meta_rows_neg=label_meta_rows_neg if (not no_untransform and label_meta_rows_neg is not None and not label_meta_rows_neg.empty) else None
         )
 
-        dl_model = DeepLift(model_wrapper, multiply_by_inputs=False, eps=1e-7)
+        # Initialize attribution method
+        if method == "DeepLift":
+            dl_model = DeepLift(model_wrapper, multiply_by_inputs=False, eps=1e-7)
+        elif method in ["gradient_input", "gradient_input_smooth"]:
+            if method == "gradient_input" and gradients_input_attribution_diff is None:
+                raise ValueError("gradient_input method not available - could not import function")
+            if method == "gradient_input_smooth" and smooth_gradients_input_attribution_diff is None:
+                raise ValueError("gradient_input_smooth method not available - could not import function")
+            dl_model = None  # Not used for gradient methods
+        else:
+            raise ValueError(f"Unknown attribution method: {method}")
 
         sample_start_time = time.time()
 
         for baseline_type, baseline_seq_onehot in baseline_seq_onehots:
             identifier = f"{name_base}_{baseline_type}"
             if not os.path.exists(f"{save_base}/interp_diff/{identifier}.pt") or force_restart:
-                dl_model.model.zero_grad()
+                if method == "DeepLift":
+                    dl_model.model.zero_grad()
 
-                input_tensor = test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device)
-                baseline_tensor = baseline_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device)
+                    input_tensor = test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device)
+                    baseline_tensor = baseline_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device)
 
-                attribution = dl_model.attribute(
-                    inputs=input_tensor,
-                    baselines=baseline_tensor,
-                )
+                    attribution = dl_model.attribute(
+                        inputs=input_tensor,
+                        baselines=baseline_tensor,
+                    )
 
-                if not torch.isfinite(attribution).all():
-                    logger.warning(f"NAN occur in {identifier}")
+                    if not torch.isfinite(attribution).all():
+                        logger.warning(f"NAN occur in {identifier}")
 
-                attribution_cpu = attribution.detach().cpu().permute(0, 2, 1)
-                del attribution
+                    attribution_cpu = attribution.detach().cpu().permute(0, 2, 1)
+                    del attribution
 
-                if device.startswith('cuda'):
-                    torch.cuda.empty_cache()
+                    if device.startswith('cuda'):
+                        torch.cuda.empty_cache()
 
-                del input_tensor, baseline_tensor
-                if device.startswith('cuda'):
-                    torch.cuda.empty_cache()
+                    del input_tensor, baseline_tensor
+                    if device.startswith('cuda'):
+                        torch.cuda.empty_cache()
+
+                elif method == "gradient_input":
+                    # Use gradient×input method
+                    input_tensor = test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device).detach().clone()
+                    input_tensor.requires_grad = True
+
+                    attribution = gradients_input_attribution_diff(
+                        model=model_wrapper.model,
+                        seq_input=input_tensor,
+                        output_key=use_head,
+                        target_pos_dim=trial_pos_dims,
+                        target_neg_dims=trial_neg_dims,
+                        bin_range=bin_range,
+                        label_meta_row_pos=label_meta_rows_pos.iloc[0] if (not no_untransform and not label_meta_rows_pos.empty) else None,
+                        label_meta_rows_neg=label_meta_rows_neg if (not no_untransform and label_meta_rows_neg is not None and not label_meta_rows_neg.empty) else None,
+                    )
+
+                    # gradient function already returns [batch, L, 4], no permute needed
+                    attribution_cpu = attribution.detach().cpu()
+                    del attribution
+
+                    if device.startswith('cuda'):
+                        torch.cuda.empty_cache()
+
+                    del input_tensor
+                    if device.startswith('cuda'):
+                        torch.cuda.empty_cache()
+
+                elif method == "gradient_input_smooth":
+                    # Use smoothgrad×input method
+                    input_tensor = test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device).clone()
+
+                    attribution = smooth_gradients_input_attribution_diff(
+                        model=model_wrapper.model,
+                        seq_input=input_tensor,
+                        output_key=use_head,
+                        target_pos_dim=trial_pos_dims,
+                        target_neg_dims=trial_neg_dims,
+                        bin_range=bin_range,
+                        label_meta_row_pos=label_meta_rows_pos.iloc[0] if (not no_untransform and not label_meta_rows_pos.empty) else None,
+                        label_meta_rows_neg=label_meta_rows_neg if (not no_untransform and label_meta_rows_neg is not None and not label_meta_rows_neg.empty) else None,
+                        n_samples=50,  # Number of samples for smoothgrad
+                        sample_prob=0.90,  # Probability of keeping each position
+                        sample_value=1.0,  # Value to use for sampled positions
+                    )
+
+                    # gradient function already returns [batch, L, 4], no permute needed
+                    attribution_cpu = attribution.detach().cpu()
+                    del attribution
+
+                    if device.startswith('cuda'):
+                        torch.cuda.empty_cache()
+
+                    del input_tensor
+                    if device.startswith('cuda'):
+                        torch.cuda.empty_cache()
 
                 if save_raw:
                     attribution_file = f"{save_base}/interp_diff/{identifier}.pt"
@@ -655,30 +746,35 @@ def process_region_chunk(args):
                     - myconfig.data.preprocess.n_window
                 ) // 2
 
-                signal = (attribution_cpu * test_seq_onehot).sum(dim=-1).mean(dim=0)
-                signal = signal.reshape(-1, myconfig.data.preprocess.window_size)[trim:-trim]
-                signal = signal.mean(dim=-1).detach()
+                # Compute importance score at bp resolution
+                signal_bp = (attribution_cpu * test_seq_onehot).sum(dim=-1).mean(dim=0)  # [L]
+                window_size = myconfig.data.preprocess.window_size
+                signal_bp = signal_bp.reshape(-1, window_size)[trim:-trim]  # [n_window, window_size]
 
-                # Save trimmed sequence and attribution for sequence visualization
-                # Reshape and trim to match the bin-level data
-                seq_onehot_trimmed = test_seq_onehot.reshape(-1, myconfig.data.preprocess.window_size, 4)[trim:-trim]
-                seq_onehot_binned = seq_onehot_trimmed.mean(dim=1).detach().numpy()  # [n_window, 4]
+                # Flatten to get full bp-resolution importance: [n_window * window_size]
+                signal_bp_flat = signal_bp.reshape(-1).detach().numpy()
 
-                attribution_trimmed = attribution_cpu[0].reshape(-1, myconfig.data.preprocess.window_size, 4)[trim:-trim]
-                attribution_binned = attribution_trimmed.mean(dim=1).detach().numpy()  # [n_window, 4]
+                # Save trimmed sequence and attribution for sequence visualization at full bp resolution
+                # Reshape and trim to match the prediction range
+                seq_onehot_reshaped = test_seq_onehot.reshape(-1, window_size, 4)[trim:-trim]
+                attribution_reshaped = attribution_cpu[0].reshape(-1, window_size, 4)[trim:-trim]
 
-            # Save importance scores
+                # Flatten to get full bp-resolution data: [n_window * window_size, 4]
+                seq_onehot_bp = seq_onehot_reshaped.reshape(-1, 4).detach().numpy()
+                attribution_bp = attribution_reshaped.reshape(-1, 4).detach().numpy()
+
+            # Save importance scores at bp resolution
             importance_file = f"{save_base}/interp_diff/{identifier}_importance.npy"
-            np.save(importance_file, signal.numpy())
-            logger.info(f"Saved importance scores to: {importance_file}")
+            np.save(importance_file, signal_bp_flat)
+            logger.info(f"Saved importance scores (bp resolution) to: {importance_file}")
 
-            # Save sequence and attribution for visualization
+            # Save sequence and attribution for visualization at bp resolution
             seq_file = f"{save_base}/interp_diff/{identifier}_sequence.npy"
             attr_file = f"{save_base}/interp_diff/{identifier}_attribution.npy"
-            np.save(seq_file, seq_onehot_binned)
-            np.save(attr_file, attribution_binned)
-            logger.info(f"Saved sequence one-hot to: {seq_file}")
-            logger.info(f"Saved raw attribution to: {attr_file}")
+            np.save(seq_file, seq_onehot_bp)
+            np.save(attr_file, attribution_bp)
+            logger.info(f"Saved sequence one-hot (bp resolution) to: {seq_file}")
+            logger.info(f"Saved raw attribution (bp resolution) to: {attr_file}")
 
         # Save metadata for plotting
         metadata = {
@@ -758,6 +854,8 @@ def process_region_chunk(args):
 @click.option("--num_threads", type=int, default=None, help="Number of threads per process for CPU mode")
 @click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
 @click.option("--no_untransform", is_flag=True, help="Skip untransform")
+@click.option("--method", "-m", type=click.Choice(["DeepLift", "gradient_input", "gradient_input_smooth"]),
+              default="DeepLift", help="Attribution method to use")
 def main(
     gene_name,
     gtf_file,
@@ -777,6 +875,7 @@ def main(
     num_threads,
     use_head,
     no_untransform,
+    method,
 ):
     LOG_BASE = os.path.abspath(log_base)
     CHK_BASE = os.path.abspath(chk_base)
@@ -883,6 +982,7 @@ def main(
             no_untransform,
             trial_pos_str,
             trial_neg_str,
+            method,
         )
         process_args.append(args)
 

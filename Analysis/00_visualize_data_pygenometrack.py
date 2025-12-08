@@ -95,15 +95,18 @@ def find_bigwig_files(bigwig_dir, track_patterns=None):
         return all_bigwigs
 
 
-def compute_global_minmax(bigwig_files, chrom, start, end):
+def compute_global_minmax(bigwig_files, chrom, start, end, track_type=None, num_bins=700, allow_negative=False):
     """
-    Compute global min/max values for label and pred tracks.
+    Compute global min/max values for label and pred tracks with binning.
 
     Args:
         bigwig_files: List of bigwig file paths
         chrom: Chromosome (e.g., 'chr1')
         start: Start position
         end: End position
+        track_type: Optional track type ('label' or 'pred') to override filename detection
+        num_bins: Number of bins for smoothing (default: 700, same as pyGenomeTracks)
+        allow_negative: If True, don't force min to 0 (for diff tracks)
 
     Returns:
         dict: {'label': (min, max), 'pred': (min, max)}
@@ -141,18 +144,24 @@ def compute_global_minmax(bigwig_files, chrom, start, end):
             else:
                 chrom_query = chrom
 
-            # Get values for the region
-            values = bw.values(chrom_query, start, end)
+            # Get binned statistics (same as pyGenomeTracks does internally)
+            # pyGenomeTracks uses stats() which computes mean over bins
+            binned_values = bw.stats(chrom_query, start, end, type="mean", nBins=num_bins)
             bw.close()
 
             # Filter out None/NaN values
-            values = [v for v in values if v is not None and not np.isnan(v)]
+            binned_values = [v for v in binned_values if v is not None and not np.isnan(v)]
 
-            if len(values) > 0:
-                if "label" in track_lower:
-                    label_values.extend(values)
+            if len(binned_values) > 0:
+                # Use track_type if provided, otherwise detect from filename
+                if track_type == 'label':
+                    label_values.extend(binned_values)
+                elif track_type == 'pred':
+                    pred_values.extend(binned_values)
+                elif "label" in track_lower:
+                    label_values.extend(binned_values)
                 elif "pred" in track_lower:
-                    pred_values.extend(values)
+                    pred_values.extend(binned_values)
 
         except Exception as e:
             print(f"  Warning: Could not read {bw_file.name}: {e}")
@@ -162,19 +171,27 @@ def compute_global_minmax(bigwig_files, chrom, start, end):
     result = {}
 
     if label_values:
-        label_min = 0  # Ensure min is at least 0
-        label_max = int(np.ceil(np.max(label_values)))
+        if allow_negative:
+            label_min = np.min(label_values)
+            label_max = np.max(label_values)
+        else:
+            label_min = 0  # Ensure min is at least 0
+            label_max = int(np.ceil(np.max(label_values)))
         result['label'] = (label_min, label_max)
-        print(f"  Label tracks: min={label_min:.4f}, max={label_max:.4f}")
+        print(f"  Label tracks: min={label_min:.4f}, max={label_max:.4f} (computed from {num_bins} bins)")
     else:
         result['label'] = None
         print("  Label tracks: No data found")
 
     if pred_values:
-        pred_min = 0  # Ensure min is at least 0
-        pred_max = int(np.ceil(np.max(pred_values)))
+        if allow_negative:
+            pred_min = np.min(pred_values)
+            pred_max = np.max(pred_values)
+        else:
+            pred_min = 0  # Ensure min is at least 0
+            pred_max = int(np.ceil(np.max(pred_values)))
         result['pred'] = (pred_min, pred_max)
-        print(f"  Pred tracks: min={pred_min:.4f}, max={pred_max:.4f}")
+        print(f"  Pred tracks: min={pred_min:.4f}, max={pred_max:.4f} (computed from {num_bins} bins)")
     else:
         result['pred'] = None
         print("  Pred tracks: No data found")
@@ -389,6 +406,48 @@ def parse_region(region_str):
         sys.exit(1)
 
 
+def parse_highlight_regions(highlight_str):
+    """
+    Parse highlight regions string.
+
+    Args:
+        highlight_str: Comma-separated regions or positions
+                      Single position: 'chr4:89753280'
+                      Region: 'chr4:89753280-89753285'
+                      Multiple: 'chr4:100,chr4:200-300'
+
+    Returns:
+        tuple: (regions_list, is_single_positions)
+               regions_list: List of (chrom, start, end) tuples
+               is_single_positions: True if all are single positions (use vlines), False if regions (use vhighlight)
+    """
+    if not highlight_str:
+        return [], False
+
+    regions = []
+    is_single_positions = True
+
+    for region_str in highlight_str.split(','):
+        region_str = region_str.strip()
+        try:
+            chrom, coords = region_str.split(':')
+            if '-' in coords:
+                # Region format: chr4:start-end
+                start, end = coords.split('-')
+                regions.append((chrom, int(start), int(end)))
+                if int(start) != int(end):
+                    is_single_positions = False
+            else:
+                # Single position format: chr4:pos
+                pos = int(coords)
+                regions.append((chrom, pos, pos))
+        except (ValueError, AttributeError):
+            print(f"Warning: Invalid highlight region format '{region_str}', skipping")
+            continue
+
+    return regions, is_single_positions
+
+
 def find_inference_folders(base_dir):
     """
     Detect folder structure from 01_0_quick_inference_bigwig.py output.
@@ -558,6 +617,12 @@ Examples:
     parser.add_argument("--no-gtf", action="store_true",
                         help="Disable GTF annotation track")
 
+    # Highlight regions
+    parser.add_argument("--highlight", type=str, default=None,
+                        help="Regions to highlight (e.g., 'chr4:89700000-89850000' or multiple: 'chr4:100-200,chr4:300-400')")
+    parser.add_argument("--highlight-color", type=str, default="#ffff00",
+                        help="Color for highlighted regions (default: #ffff00, bright yellow)")
+
     args = parser.parse_args()
 
     # Parse region coordinates
@@ -589,77 +654,439 @@ Examples:
             print(f"Error: No valid folders (pred/, label/, alt/, diff/) found in {args.inference_dir}")
             sys.exit(1)
 
-        # Determine which folders to visualize
-        output_path = Path(args.output)
-        output_base = output_path.stem
-        output_ext = output_path.suffix
-        output_dir = output_path.parent
+        # Check if this is a variant analysis (has alt/ or diff/)
+        is_variant_mode = 'alt' in inference_folders or 'diff' in inference_folders
 
-        # Create separate plots for each folder type
-        plot_configs = []
+        if is_variant_mode:
+            # Variant mode: Create single plot with overlaid ref/alt tracks
+            print(f"\nVariant mode detected. Creating plot with overlaid ref/alt tracks")
 
-        # Priority order: pred (reference), alt (variant), diff (variant), label (ground truth)
-        for folder_type in ['pred', 'alt', 'diff', 'label']:
-            if folder_type in inference_folders:
-                folder_path = inference_folders[folder_type]
+            # Get files from all folders
+            label_files = []
+            pred_files = []
+            alt_files = []
+            diff_files = []
 
-                # Determine output filename
-                if folder_type == 'pred':
-                    # For pred, use the main output name (could be ref or just pred)
-                    folder_output = output_path
-                    folder_label = "predictions" if 'alt' not in inference_folders else "reference allele"
-                else:
-                    folder_output = output_dir / f"{output_base}_{folder_type}{output_ext}"
-                    folder_label = {
-                        'alt': 'alternative allele',
-                        'diff': 'difference (alt - ref)',
-                        'label': 'ground truth labels'
-                    }.get(folder_type, folder_type)
+            if 'label' in inference_folders:
+                label_files = find_bigwig_files(str(inference_folders['label']), args.tracks)
+                print(f"  Found {len(label_files)} label tracks")
 
-                plot_configs.append({
-                    'folder_type': folder_type,
-                    'folder_path': folder_path,
-                    'output_path': folder_output,
-                    'label': folder_label
-                })
+            if 'pred' in inference_folders:
+                pred_files = find_bigwig_files(str(inference_folders['pred']), args.tracks)
+                print(f"  Found {len(pred_files)} pred (reference) tracks")
 
-        print(f"\nWill create {len(plot_configs)} plot(s):")
-        for config in plot_configs:
-            print(f"  - {config['label']}: {config['output_path']}")
+            if 'alt' in inference_folders:
+                alt_files = find_bigwig_files(str(inference_folders['alt']), args.tracks)
+                print(f"  Found {len(alt_files)} alt (alternative) tracks")
 
-        # Generate plots for each folder
-        all_success = True
-        for config in plot_configs:
-            print(f"\n{'='*70}")
-            print(f"Processing {config['label']} ({config['folder_type']}/)...")
-            print(f"{'='*70}")
+            if 'diff' in inference_folders:
+                diff_files = find_bigwig_files(str(inference_folders['diff']), args.tracks)
+                print(f"  Found {len(diff_files)} diff (alt - ref) tracks")
 
-            # Find bigwig files in this folder
-            bigwig_files = find_bigwig_files(str(config['folder_path']), args.tracks)
+            # Create mappings from base name to files
+            label_map = {f.stem: f for f in label_files}
+            pred_map = {f.stem: f for f in pred_files}
+            alt_map = {f.stem: f for f in alt_files}
+            diff_map = {f.stem: f for f in diff_files}
 
-            # Compute min/max for this folder
+            # Get all unique base names and sort them
+            all_base_names = sorted(set(label_map.keys()) | set(pred_map.keys()) | set(alt_map.keys()) | set(diff_map.keys()))
+
+            if len(all_base_names) == 0:
+                print("Error: No bigwig files found matching the track patterns")
+                sys.exit(1)
+
+            print(f"\nTotal cell types to visualize: {len(all_base_names)}")
+
+            # Compute global min/max for label, pred, alt, and diff tracks
+            label_min = args.label_min
+            label_max = args.label_max
+            pred_min = args.pred_min
+            pred_max = args.pred_max
+            alt_min = pred_min  # Alt uses same scale as pred
+            alt_max = pred_max
+            diff_min = None  # Diff can be negative, will be computed separately
+            diff_max = None
+
+            if not args.no_auto_scale:
+                # Compute min/max for label tracks
+                if label_files:
+                    print(f"\nComputing min/max for {len(label_files)} label tracks...")
+                    label_minmax = compute_global_minmax(label_files, chrom, start, end, track_type='label')
+                    if label_minmax and label_minmax.get('label'):
+                        computed_min, computed_max = label_minmax['label']
+                        if label_min is None:
+                            label_min = computed_min
+                        if label_max is None:
+                            label_max = computed_max
+
+                # Compute min/max for pred and alt tracks combined (so they share same scale)
+                pred_alt_files = pred_files + alt_files
+                if pred_alt_files:
+                    print(f"Computing min/max for {len(pred_alt_files)} pred+alt tracks...")
+                    pred_alt_minmax = compute_global_minmax(pred_alt_files, chrom, start, end, track_type='pred')
+                    if pred_alt_minmax and pred_alt_minmax.get('pred'):
+                        computed_min, computed_max = pred_alt_minmax['pred']
+                        if pred_min is None:
+                            pred_min = computed_min
+                            alt_min = computed_min
+                        if pred_max is None:
+                            pred_max = computed_max
+                            alt_max = computed_max
+
+                # Compute min/max for diff tracks (can be negative)
+                if diff_files:
+                    print(f"Computing min/max for {len(diff_files)} diff tracks...")
+                    diff_minmax = compute_global_minmax(diff_files, chrom, start, end, track_type='pred', allow_negative=True)
+                    if diff_minmax and diff_minmax.get('pred'):
+                        # Diff tracks: use actual min/max values (can be negative)
+                        diff_min, diff_max = diff_minmax['pred']
+
+            # Print scale settings
+            print("\nScale settings:")
+            if label_min is not None or label_max is not None:
+                print(f"  Label tracks: [{label_min}, {label_max}]")
+            else:
+                print(f"  Label tracks: auto")
+            if pred_min is not None or pred_max is not None:
+                print(f"  Pred/Alt tracks: [{pred_min}, {pred_max}]")
+            else:
+                print(f"  Pred/Alt tracks: auto")
+            if diff_min is not None or diff_max is not None:
+                print(f"  Diff tracks: [{diff_min}, {diff_max}]")
+            else:
+                print(f"  Diff tracks: auto")
+
+            # Build configuration with overlay
+            output_path = Path(args.output)
+            config_file = output_path.parent / f"{output_path.stem}_config.ini"
+            gtf_file = None if args.no_gtf else args.gtf
+
+            config_lines = []
+
+            print("\nSelected tracks (order: label, ref/alt overlay, diff per cell type):")
+            track_num = 0
+
+            for base_name in all_base_names:
+                # Add label track first
+                if base_name in label_map:
+                    bw_file = label_map[base_name]
+                    track_name = bw_file.stem
+
+                    # Remove prefixes
+                    if track_name.startswith("BasalGanglia-"):
+                        track_name = track_name[len("BasalGanglia-"):]
+                    elif track_name.startswith("MiniAtlas-"):
+                        track_name = track_name[len("MiniAtlas-"):]
+
+                    # Remove modality suffixes
+                    track_lower_temp = track_name.lower()
+                    for modality in ["_atac", "_rna", "_k27ac", "_k27me3", "_k9me3", "_rnaminus", "_rnaplus"]:
+                        if track_lower_temp.endswith(modality):
+                            track_name = track_name[:-len(modality)]
+                            break
+
+                    display_name = f"{track_name} (label)"
+                    track_num += 1
+                    print(f"  {track_num}. {display_name} → blue")
+
+                    # Add label track section
+                    config_lines.append(f"[{display_name}]")
+                    config_lines.append(f"file = {bw_file.absolute()}")
+                    config_lines.append(f"title = {display_name}")
+                    config_lines.append(f"height = {args.height}")
+                    config_lines.append(f"color = #1f77b4")  # Blue
+                    config_lines.append(f"fontsize = {args.fontsize}")
+                    if label_min is not None:
+                        config_lines.append(f"min_value = {label_min}")
+                    if label_max is not None:
+                        config_lines.append(f"max_value = {label_max}")
+                    config_lines.append("file_type = bigwig")
+                    config_lines.append("number_of_bins = 700")
+                    config_lines.append("")
+                    config_lines.append("[spacer]")
+                    config_lines.append(f"height = {args.spacer_height}")
+                    config_lines.append("")
+
+                # Add overlaid ref/alt tracks
+                if base_name in pred_map or base_name in alt_map:
+                    # Get track name
+                    track_name = base_name
+                    if track_name.startswith("BasalGanglia-"):
+                        track_name = track_name[len("BasalGanglia-"):]
+                    elif track_name.startswith("MiniAtlas-"):
+                        track_name = track_name[len("MiniAtlas-"):]
+
+                    # Remove modality suffixes
+                    track_lower_temp = track_name.lower()
+                    for modality in ["_atac", "_rna", "_k27ac", "_k27me3", "_k9me3", "_rnaminus", "_rnaplus"]:
+                        if track_lower_temp.endswith(modality):
+                            track_name = track_name[:-len(modality)]
+                            break
+
+                    # Add pred (reference) track
+                    if base_name in pred_map:
+                        bw_file = pred_map[base_name]
+                        display_name = f"{track_name} (ref)"
+                        track_num += 1
+                        print(f"  {track_num}. {display_name} → red (alpha=0.5)")
+
+                        config_lines.append(f"[{display_name}]")
+                        config_lines.append(f"file = {bw_file.absolute()}")
+                        config_lines.append(f"title = {track_name} (ref/alt)")
+                        config_lines.append(f"height = {args.height}")
+                        config_lines.append(f"color = #d62728")  # Red
+                        config_lines.append(f"alpha = 0.5")  # Transparency for overlay
+                        config_lines.append(f"fontsize = {args.fontsize}")
+                        if pred_min is not None:
+                            config_lines.append(f"min_value = {pred_min}")
+                        if pred_max is not None:
+                            config_lines.append(f"max_value = {pred_max}")
+                        config_lines.append("file_type = bigwig")
+                        config_lines.append("number_of_bins = 700")
+                        config_lines.append("")
+
+                    # Add alt (alternative) track with overlay
+                    if base_name in alt_map:
+                        bw_file = alt_map[base_name]
+                        display_name = f"{track_name} (alt)"
+                        track_num += 1
+                        print(f"  {track_num}. {display_name} → green (alpha=0.5, overlaid)")
+
+                        config_lines.append(f"[{display_name}]")
+                        config_lines.append(f"file = {bw_file.absolute()}")
+                        config_lines.append(f"title =")  # Empty title for overlay
+                        config_lines.append(f"height = {args.height}")
+                        config_lines.append(f"color = #2ca02c")  # Green
+                        config_lines.append(f"alpha = 0.5")  # Transparency for overlay
+                        config_lines.append(f"fontsize = {args.fontsize}")
+                        if alt_min is not None:
+                            config_lines.append(f"min_value = {alt_min}")
+                        if alt_max is not None:
+                            config_lines.append(f"max_value = {alt_max}")
+                        config_lines.append("file_type = bigwig")
+                        config_lines.append("overlay_previous = share-y")
+                        config_lines.append("number_of_bins = 700")
+                        config_lines.append("")
+
+                    # Add spacer after ref/alt overlay
+                    config_lines.append("[spacer]")
+                    config_lines.append(f"height = {args.spacer_height}")
+                    config_lines.append("")
+
+                # Add diff track (alt - ref)
+                if base_name in diff_map:
+                    bw_file = diff_map[base_name]
+                    track_name_diff = base_name
+                    if track_name_diff.startswith("BasalGanglia-"):
+                        track_name_diff = track_name_diff[len("BasalGanglia-"):]
+                    elif track_name_diff.startswith("MiniAtlas-"):
+                        track_name_diff = track_name_diff[len("MiniAtlas-"):]
+
+                    # Remove modality suffixes
+                    track_lower_temp = track_name_diff.lower()
+                    for modality in ["_atac", "_rna", "_k27ac", "_k27me3", "_k9me3", "_rnaminus", "_rnaplus"]:
+                        if track_lower_temp.endswith(modality):
+                            track_name_diff = track_name_diff[:-len(modality)]
+                            break
+
+                    display_name = f"{track_name_diff} (diff)"
+                    track_num += 1
+                    print(f"  {track_num}. {display_name} → purple")
+
+                    config_lines.append(f"[{display_name}]")
+                    config_lines.append(f"file = {bw_file.absolute()}")
+                    config_lines.append(f"title = {display_name}")
+                    config_lines.append(f"height = {args.height}")
+                    config_lines.append(f"color = #9467bd")  # Purple
+                    config_lines.append(f"fontsize = {args.fontsize}")
+                    if diff_min is not None:
+                        config_lines.append(f"min_value = {diff_min}")
+                    if diff_max is not None:
+                        config_lines.append(f"max_value = {diff_max}")
+                    config_lines.append("file_type = bigwig")
+                    config_lines.append("number_of_bins = 700")
+                    config_lines.append("")
+
+                    # Add spacer after diff
+                    config_lines.append("[spacer]")
+                    config_lines.append(f"height = {args.spacer_height}")
+                    config_lines.append("")
+
+            # Add GTF track if provided
+            if gtf_file:
+                gtf_path = Path(gtf_file)
+                if gtf_path.exists():
+                    config_lines.append("[genes]")
+                    config_lines.append(f"file = {gtf_path.absolute()}")
+                    config_lines.append("title = Genes")
+                    config_lines.append(f"height = {args.gtf_height}")
+                    config_lines.append("file_type = gtf")
+                    config_lines.append("prefered_name = gene_name")
+                    config_lines.append("merge_transcripts = true")
+                    config_lines.append("style = flybase")
+                    config_lines.append(f"fontsize = {args.gtf_fontsize}")
+                    config_lines.append("")
+                    config_lines.append("[spacer]")
+                    config_lines.append(f"height = {args.spacer_height}")
+                    config_lines.append("")
+
+            # Add highlight regions if specified
+            if args.highlight:
+                highlight_regions, is_single_positions = parse_highlight_regions(args.highlight)
+                if highlight_regions:
+                    # Use vlines for single positions, vhighlight for regions
+                    if is_single_positions:
+                        # Create BED file for vlines (single positions)
+                        highlight_file = output_path.parent / f"{output_path.stem}_vlines.bed"
+                        with open(highlight_file, 'w') as f:
+                            for hl_chrom, hl_start, hl_end in highlight_regions:
+                                # BED format requires end > start
+                                f.write(f"{hl_chrom}\t{hl_start}\t{hl_start + 1}\n")
+
+                        config_lines.append(f"[vlines]")
+                        config_lines.append(f"file = {highlight_file.absolute()}")
+                        config_lines.append("type = vlines")
+                        config_lines.append("")
+                        print(f"\nAdded {len(highlight_regions)} vertical line(s)")
+                        print(f"  BED file: {highlight_file}")
+                    else:
+                        # Create narrowPeak file for vhighlight (regions)
+                        highlight_file = output_path.parent / f"{output_path.stem}_vhighlight.narrowPeak"
+                        with open(highlight_file, 'w') as f:
+                            for i, (hl_chrom, hl_start, hl_end) in enumerate(highlight_regions):
+                                # narrowPeak format: chrom, start, end, name, score, strand, signalValue, pValue, qValue, peak
+                                name = f"region_{i}"
+                                score = "1000"
+                                strand = "."
+                                signalValue = "1.0"
+                                pValue = "-1"
+                                qValue = "-1"
+                                peak = int((hl_end - hl_start) / 2)  # Peak at center
+                                f.write(f"{hl_chrom}\t{hl_start}\t{hl_end}\t{name}\t{score}\t{strand}\t{signalValue}\t{pValue}\t{qValue}\t{peak}\n")
+
+                        config_lines.append(f"[vhighlight]")
+                        config_lines.append(f"file = {highlight_file.absolute()}")
+                        config_lines.append("type = vhighlight")
+                        config_lines.append("")
+                        print(f"\nAdded {len(highlight_regions)} highlight region(s)")
+                        print(f"  narrowPeak file: {highlight_file}")
+
+            # Add x-axis at the bottom
+            config_lines.append("[x-axis]")
+            config_lines.append("where = bottom")
+            config_lines.append(f"fontsize = {args.axis_fontsize}")
+
+            # Write configuration file
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(config_file, 'w') as f:
+                f.write('\n'.join(config_lines))
+
+            print(f"\nConfiguration saved: {config_file}")
+
+            # Generate plot
+            success = generate_plot(
+                config_file,
+                chrom,
+                start,
+                end,
+                output_path,
+                width=args.width,
+                dpi=args.dpi
+            )
+
+            if success:
+                print("\n" + "="*70)
+                print("Visualization complete!")
+                print(f"  Plot: {output_path}")
+                print(f"  Config: {config_file}")
+                print("="*70)
+            else:
+                print("\n" + "="*70)
+                print("Visualization failed!")
+                print("="*70)
+                sys.exit(1)
+
+            return
+
+        else:
+            # Normal mode: Combine pred and label into single plot
+            print(f"\nCombining pred/ and label/ tracks into single plot")
+
+            # Collect all bigwig files from both folders with appropriate renaming
+            all_bigwig_files = []
+            folder_type_map = {}  # Track which folder each file came from
+
+            # Get files from both folders
+            label_files = []
+            pred_files = []
+
+            if 'label' in inference_folders:
+                label_files = find_bigwig_files(str(inference_folders['label']), args.tracks)
+                print(f"  Found {len(label_files)} label tracks")
+
+            if 'pred' in inference_folders:
+                pred_files = find_bigwig_files(str(inference_folders['pred']), args.tracks)
+                print(f"  Found {len(pred_files)} pred tracks")
+
+            # Interleave pred and label tracks for each cell type
+            # Create mapping from base name to files
+            label_map = {f.stem: f for f in label_files}
+            pred_map = {f.stem: f for f in pred_files}
+
+            # Get all unique base names and sort them
+            all_base_names = sorted(set(label_map.keys()) | set(pred_map.keys()))
+
+            # Add files in order: celltype_pred, celltype_label for each celltype
+            for base_name in all_base_names:
+                # Add pred first
+                if base_name in pred_map:
+                    bw_file = pred_map[base_name]
+                    folder_type_map[bw_file] = 'pred'
+                    all_bigwig_files.append(bw_file)
+
+                # Then add label
+                if base_name in label_map:
+                    bw_file = label_map[base_name]
+                    folder_type_map[bw_file] = 'label'
+                    all_bigwig_files.append(bw_file)
+
+            if len(all_bigwig_files) == 0:
+                print("Error: No bigwig files found matching the track patterns")
+                sys.exit(1)
+
+            print(f"\nTotal tracks to visualize: {len(all_bigwig_files)}")
+
+            # Compute global min/max across all tracks
             label_min = args.label_min
             label_max = args.label_max
             pred_min = args.pred_min
             pred_max = args.pred_max
 
             if not args.no_auto_scale:
-                minmax_data = compute_global_minmax(bigwig_files, chrom, start, end)
+                # Compute min/max separately for label and pred tracks
+                label_files = [f for f in all_bigwig_files if folder_type_map[f] == 'label']
+                pred_files = [f for f in all_bigwig_files if folder_type_map[f] == 'pred']
 
-                if minmax_data:
-                    if minmax_data.get('label'):
-                        computed_label_min, computed_label_max = minmax_data['label']
+                if label_files:
+                    print(f"\nComputing min/max for {len(label_files)} label tracks...")
+                    label_minmax = compute_global_minmax(label_files, chrom, start, end, track_type='label')
+                    if label_minmax and label_minmax.get('label'):
+                        computed_min, computed_max = label_minmax['label']
                         if label_min is None:
-                            label_min = computed_label_min
+                            label_min = computed_min
                         if label_max is None:
-                            label_max = computed_label_max
+                            label_max = computed_max
 
-                    if minmax_data.get('pred'):
-                        computed_pred_min, computed_pred_max = minmax_data['pred']
+                if pred_files:
+                    print(f"Computing min/max for {len(pred_files)} pred tracks...")
+                    pred_minmax = compute_global_minmax(pred_files, chrom, start, end, track_type='pred')
+                    if pred_minmax and pred_minmax.get('pred'):
+                        computed_min, computed_max = pred_minmax['pred']
                         if pred_min is None:
-                            pred_min = computed_pred_min
+                            pred_min = computed_min
                         if pred_max is None:
-                            pred_max = computed_pred_max
+                            pred_max = computed_max
 
             # Print scale settings
             print("\nScale settings:")
@@ -673,24 +1100,147 @@ Examples:
                 print(f"  Pred tracks: auto")
 
             print("\nSelected tracks:")
-            for i, bw in enumerate(bigwig_files, 1):
-                color_label = "blue" if "label" in bw.stem.lower() else ("red" if "pred" in bw.stem.lower() else "default")
-                print(f"  {i}. {bw.name} → {color_label}")
+            for i, bw in enumerate(all_bigwig_files, 1):
+                folder_type = folder_type_map[bw]
+                color_label = "blue" if folder_type == 'label' else "red"
+                print(f"  {i}. {bw.name} ({folder_type}) → {color_label}")
 
-            # Create configuration file
-            config_file = config['output_path'].parent / f"{config['output_path'].stem}_config.ini"
-
-            # Determine GTF file to use
+            # Create a modified create_tracks_config that respects folder types
+            output_path = Path(args.output)
+            config_file = output_path.parent / f"{output_path.stem}_config.ini"
             gtf_file = None if args.no_gtf else args.gtf
 
-            create_tracks_config(bigwig_files, config_file,
-                                height=args.height, default_color=args.color,
-                                label_min=label_min, label_max=label_max,
-                                pred_min=pred_min, pred_max=pred_max,
-                                gtf_file=gtf_file, gtf_height=args.gtf_height,
-                                fontsize=args.fontsize, gtf_fontsize=args.gtf_fontsize,
-                                axis_fontsize=args.axis_fontsize,
-                                spacer_height=args.spacer_height)
+            # Build config manually to handle folder-based coloring
+            config_lines = []
+
+            for bw_file in all_bigwig_files:
+                folder_type = folder_type_map[bw_file]
+
+                # Extract track name from filename
+                track_name = bw_file.stem
+
+                # Remove prefixes if present
+                if track_name.startswith("BasalGanglia-"):
+                    track_name = track_name[len("BasalGanglia-"):]
+                elif track_name.startswith("MiniAtlas-"):
+                    track_name = track_name[len("MiniAtlas-"):]
+
+                # Set color based on folder type
+                track_color = "#1f77b4" if folder_type == 'label' else "#d62728"  # Blue for label, Red for pred
+
+                # Set min/max based on folder type
+                if folder_type == 'label':
+                    min_val = label_min
+                    max_val = label_max
+                else:  # pred
+                    min_val = pred_min
+                    max_val = pred_max
+
+                # Remove modality suffixes for cleaner display
+                track_lower_temp = track_name.lower()
+                for modality in ["_atac", "_rna", "_k27ac", "_k27me3", "_k9me3", "_rnaminus", "_rnaplus"]:
+                    if track_lower_temp.endswith(modality):
+                        track_name = track_name[:-len(modality)]
+                        break
+
+                # Add suffix to indicate pred vs label
+                display_name = f"{track_name} ({folder_type})"
+
+                # Add track section
+                config_lines.append(f"[{display_name}]")
+                config_lines.append(f"file = {bw_file.absolute()}")
+                config_lines.append(f"title = {display_name}")
+                config_lines.append(f"height = {args.height}")
+                config_lines.append(f"color = {track_color}")
+                config_lines.append(f"fontsize = {args.fontsize}")
+
+                # Only add min/max if they are specified
+                if min_val is not None:
+                    config_lines.append(f"min_value = {min_val}")
+                if max_val is not None:
+                    config_lines.append(f"max_value = {max_val}")
+
+                config_lines.append("file_type = bigwig")
+                config_lines.append("number_of_bins = 700")
+                config_lines.append("")
+
+                # Add spacer
+                config_lines.append("[spacer]")
+                config_lines.append(f"height = {args.spacer_height}")
+                config_lines.append("")
+
+            # Add GTF track if provided
+            if gtf_file:
+                gtf_path = Path(gtf_file)
+                if gtf_path.exists():
+                    config_lines.append("[genes]")
+                    config_lines.append(f"file = {gtf_path.absolute()}")
+                    config_lines.append("title = Genes")
+                    config_lines.append(f"height = {args.gtf_height}")
+                    config_lines.append("file_type = gtf")
+                    config_lines.append("prefered_name = gene_name")
+                    config_lines.append("merge_transcripts = true")
+                    config_lines.append("style = flybase")
+                    config_lines.append(f"fontsize = {args.gtf_fontsize}")
+                    config_lines.append("")
+
+                    config_lines.append("[spacer]")
+                    config_lines.append(f"height = {args.spacer_height}")
+                    config_lines.append("")
+
+            # Add highlight regions if specified
+            if args.highlight:
+                highlight_regions, is_single_positions = parse_highlight_regions(args.highlight)
+                if highlight_regions:
+                    # Use vlines for single positions, vhighlight for regions
+                    if is_single_positions:
+                        # Create BED file for vlines (single positions)
+                        highlight_file = output_path.parent / f"{output_path.stem}_vlines.bed"
+                        with open(highlight_file, 'w') as f:
+                            for hl_chrom, hl_start, hl_end in highlight_regions:
+                                # BED format requires end > start
+                                f.write(f"{hl_chrom}\t{hl_start}\t{hl_start + 1}\n")
+
+                        config_lines.append(f"[vlines]")
+                        config_lines.append(f"file = {highlight_file.absolute()}")
+                        config_lines.append("type = vlines")
+                        config_lines.append("")
+                        print(f"\nAdded {len(highlight_regions)} vertical line(s)")
+                        print(f"  BED file: {highlight_file}")
+                    else:
+                        # Create narrowPeak file for vhighlight (regions)
+                        highlight_file = output_path.parent / f"{output_path.stem}_vhighlight.narrowPeak"
+                        with open(highlight_file, 'w') as f:
+                            for i, (hl_chrom, hl_start, hl_end) in enumerate(highlight_regions):
+                                # narrowPeak format: chrom, start, end, name, score, strand, signalValue, pValue, qValue, peak
+                                name = f"region_{i}"
+                                score = "1000"
+                                strand = "."
+                                signalValue = "1.0"
+                                pValue = "-1"
+                                qValue = "-1"
+                                peak = int((hl_end - hl_start) / 2)  # Peak at center
+                                f.write(f"{hl_chrom}\t{hl_start}\t{hl_end}\t{name}\t{score}\t{strand}\t{signalValue}\t{pValue}\t{qValue}\t{peak}\n")
+
+                        config_lines.append(f"[vhighlight]")
+                        config_lines.append(f"file = {highlight_file.absolute()}")
+                        config_lines.append("type = vhighlight")
+                        config_lines.append("")
+                        print(f"\nAdded {len(highlight_regions)} highlight region(s)")
+                        print(f"  narrowPeak file: {highlight_file}")
+
+            # Add x-axis at the bottom
+            config_lines.append("[x-axis]")
+            config_lines.append("where = bottom")
+            config_lines.append(f"fontsize = {args.axis_fontsize}")
+
+            # Write configuration file
+            config_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(config_file, 'w') as f:
+                f.write('\n'.join(config_lines))
+
+            print(f"\nConfiguration saved: {config_file}")
+            print(f"  Number of tracks: {len(all_bigwig_files)}")
 
             # Generate plot
             success = generate_plot(
@@ -698,33 +1248,24 @@ Examples:
                 chrom,
                 start,
                 end,
-                config['output_path'],
+                output_path,
                 width=args.width,
                 dpi=args.dpi
             )
 
             if success:
-                print(f"  ✓ {config['label'].capitalize()} plot saved: {config['output_path']}")
+                print("\n" + "="*70)
+                print("Visualization complete!")
+                print(f"  Plot: {output_path}")
+                print(f"  Config: {config_file}")
+                print("="*70)
             else:
-                print(f"  ✗ Failed to generate {config['label']} plot")
-                all_success = False
+                print("\n" + "="*70)
+                print("Visualization failed!")
+                print("="*70)
+                sys.exit(1)
 
-        # Final summary
-        if all_success:
-            print("\n" + "="*70)
-            print("All visualizations complete!")
-            print("="*70)
-            print(f"\nGenerated {len(plot_configs)} plot(s):")
-            for config in plot_configs:
-                print(f"  - {config['output_path']}")
-            print("="*70)
-        else:
-            print("\n" + "="*70)
-            print("Some visualizations failed!")
-            print("="*70)
-            sys.exit(1)
-
-        return
+            return
 
     # Standard mode: single bigwig directory
     # Find and filter bigwig files

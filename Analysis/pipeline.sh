@@ -132,14 +132,19 @@ print_section_header() {
 if should_run_section "00"; then
     print_section_header "Section 00: Data Visualization"
 
-    # Note: These are typically one-time setup scripts
-    # Uncomment if needed:
-
-    # python "${ANALYSIS_DIR}/00_visualize_data.py" \
-    #     --data_dir "${DATA_BASE}" \
-    #     --output_dir "${MODEL_ANALYSIS_DIR}/00_data_viz"
-
-    echo "Section 00: Skipping (optional visualization step)"
+    # Example: Visualize BigWig tracks for SNCA gene region with pyGenomeTracks
+    echo ""
+    echo "Note: For other visualizations, use:"
+    echo ""
+    echo "# Visualize specific region with track patterns:"
+    echo "python ${ANALYSIS_DIR}/00_visualize_data_pygenometrack.py \\"
+    echo "  --inference-dir ${RES_BASE}/bigwig/<INFERENCE_DIR>/ \\"
+    echo "  --region <CHR>:<START>-<END> \\"
+    echo "  --output <OUTPUT>.pdf \\"
+    echo "  --tracks \"<TRACK_PATTERN>\" \\"
+    echo "  --highlight <CHR>:<POSITION>"
+    echo ""
+    echo "Section 00: Completed"
 fi
 
 # ==============================================================================
@@ -184,6 +189,34 @@ if should_run_section "01"; then
         --res_base "${RES_BASE}" \
         --log_base "${LOG_BASE}"
 
+    # 01_0: Quick inference to BigWig (example for SNCA variant)
+    echo ""
+    echo "Running quick inference for SNCA variant (example)..."
+    python "${ANALYSIS_DIR}/01_0_quick_inference_bigwig.py" \
+        --variant chr4:89753280:G:A \
+        --exp_name "${MODEL_NAME}" \
+        --chk "${CHK}" \
+        --output "${RES_BASE}/bigwig/rs356182_SNCA_parkinsons"
+    
+    # visualzie
+    echo "Visualizing SNCA gene region (example)..."
+    python "${ANALYSIS_DIR}/00_visualize_data_pygenometrack.py" \
+        --inference-dir "${RES_BASE}/bigwig/rs356182_SNCA_parkinsons/" \
+        --region chr4:89442816-89967104 \
+        --output "${MODEL_ANALYSIS_DIR}/SNCA_visualization.pdf" \
+        --tracks "BasalGanglia-STR-D1*" \
+        --highlight chr4:89753280
+
+    echo ""
+    echo "Note: For other variants or regions, use:"
+    echo ""
+    echo "# Quick inference for variant effect:"
+    echo "python ${ANALYSIS_DIR}/01_0_quick_inference_bigwig.py \\"
+    echo "  --variant <CHR>:<POS>:<REF>:<ALT> \\"
+    echo "  --exp_name ${MODEL_NAME} \\"
+    echo "  --chk ${CHK} \\"
+    echo "  --output ${RES_BASE}/bigwig/<OUTPUT_DIR>"
+    echo ""
     echo "Section 01: Completed"
 fi
 
@@ -194,31 +227,69 @@ fi
 if should_run_section "02"; then
     print_section_header "Section 02: Motif Interpretation (Attribution Analysis)"
 
-    echo "Note: Motif interpretation requires a region BED file."
-    echo "Example command for gradient×input interpretation:"
+    echo "Running gene-based interpretation for SNCA with gradient×input method..."
+    python "${ANALYSIS_DIR}/02_motif_gene_diff_interpretation.py" \
+        --gene_name SNCA \
+        --trial_pos STR-D1-MSN_RNAplus \
+        -e "${MODEL_NAME}" \
+        --chk "${CHK}" \
+        -b random \
+        --log_base "${LOG_BASE}" \
+        --chk_base "${CHK_BASE}" \
+        --res_base "${RES_BASE}" \
+        --processor gpu \
+        --num_processes 1 \
+        --num_threads 1 \
+        --use_head regression
+
     echo ""
-    echo "python ${ANALYSIS_DIR}/02_motif_interpretation_gradient_input.py \\"
-    echo "  --region_bed <regions.bed> \\"
-    echo "  --exp_name ${MODEL_NAME} \\"
+    echo "Plotting interpretation results for SNCA gene (example region)..."
+    python "${ANALYSIS_DIR}/02_motif_interpretation_plot.py" \
+        --data_dir "${MODEL_RES_DIR}/analysis_${CHK}/raw_data/interp_diff" \
+        --name_base chr4_89507186_90031474_SNCA_STR-D1-MSN_plus \
+        --baseline random \
+        --output "${MODEL_ANALYSIS_DIR}/chr4_89507186_90031474_SNCA_STR-D1-MSN_plus.pdf" \
+        --show_sequence \
+        --start 89753200 \
+        --end 89753360
+
+    echo ""
+    echo "Note: For other genes or attribution methods, use:"
+    echo ""
+    echo "# Gene-based interpretation (recommended - supports multiple attribution methods):"
+    echo "python ${ANALYSIS_DIR}/02_motif_gene_diff_interpretation_DeepLift.py \\"
+    echo "  --gene_name <GENE> \\"
+    echo "  --trial_pos <CELLTYPE> \\"
+    echo "  -e ${MODEL_NAME} \\"
     echo "  --chk ${CHK} \\"
+    echo "  --method gradient_input  # or DeepLift, or gradient_input_smooth"
+    echo ""
+    echo "# BED-based interpretation (for custom regions):"
+    echo "python ${ANALYSIS_DIR}/02_motif_gene_diff_interpretation.py \\"
+    echo "  --gene_name <GENE> \\"
+    echo "  --trial_pos <CELLTYPE> \\"
+    echo "  -e ${MODEL_NAME} \\"
+    echo "  --chk ${CHK} \\"
+    echo "  -b random \\"
     echo "  --log_base ${LOG_BASE} \\"
     echo "  --chk_base ${CHK_BASE} \\"
     echo "  --res_base ${RES_BASE} \\"
     echo "  --processor gpu \\"
-    echo "  --num_processes 4"
+    echo "  --num_processes 1 \\"
+    echo "  --num_threads 1 \\"
+    echo "  --use_head regression"
     echo ""
-    echo "For differential interpretation (comparing cell types):"
+    echo "# Plot interpretation results:"
+    echo "python ${ANALYSIS_DIR}/02_motif_interpretation_plot.py \\"
+    echo "  --data_dir ${MODEL_RES_DIR}/analysis_${CHK}/raw_data/interp_diff \\"
+    echo "  --name_base <NAME_BASE> \\"
+    echo "  --baseline random \\"
+    echo "  --output <OUTPUT_FILE>.pdf \\"
+    echo "  --show_sequence \\"
+    echo "  --start <START_BP> \\"
+    echo "  --end <END_BP>"
     echo ""
-    echo "python ${ANALYSIS_DIR}/02_motif_bed_diff_interpretation_gradient_input.py \\"
-    echo "  --region_bed <regions_with_celltypes.bed> \\"
-    echo "  --exp_name ${MODEL_NAME} \\"
-    echo "  --chk ${CHK} \\"
-    echo "  --log_base ${LOG_BASE} \\"
-    echo "  --chk_base ${CHK_BASE} \\"
-    echo "  --res_base ${RES_BASE} \\"
-    echo "  --processor gpu"
-    echo ""
-    echo "Section 02: Skipping (requires user-provided region BED file)"
+    echo "Section 02: Completed"
 fi
 
 # ==============================================================================

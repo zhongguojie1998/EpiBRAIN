@@ -20,10 +20,9 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.patches import Rectangle, Polygon, Ellipse
-import matplotlib.patches as mpatches
+from matplotlib.patches import Rectangle
 from matplotlib.ticker import FuncFormatter
-from matplotlib.transforms import Affine2D
+from vizsequence.viz_sequence import plot_weights_given_ax
 
 ROOT = Path(__file__).parent.parent
 sys.path.append(str(ROOT / "Model"))
@@ -33,143 +32,35 @@ os.chdir(ROOT)
 from utils.logging import BaseLogger
 
 
-def add_letter_to_axis(ax, letter, x_pos, y_pos, height, width, color):
+def create_genomic_position_formatter(x_min, x_max):
     """
-    Add a nucleotide letter to the axis at the specified position.
+    Create a formatter function for genomic positions that dynamically chooses
+    the appropriate unit (bp, kb, or Mb) based on the range.
 
     Args:
-        ax: Matplotlib axis
-        letter: One of 'A', 'C', 'G', 'T'
-        x_pos: X position (center)
-        y_pos: Y position (bottom)
-        height: Height of the letter
-        width: Width of the letter
-        color: Color for the letter
-    """
-    if height == 0:
-        return
-
-    # Create transform for positioning and scaling
-    trans = Affine2D().scale(width, height).translate(x_pos - width/2, y_pos) + ax.transData
-
-    if letter == 'A':
-        # Draw A as three polygons (two triangles and a crossbar)
-        # Left side
-        left_triangle = Polygon([[0.0, 0.0], [0.5, 1.0], [0.5, 0.8], [0.2, 0.0]],
-                               facecolor=color, edgecolor='none', transform=trans)
-        ax.add_patch(left_triangle)
-
-        # Right side
-        right_triangle = Polygon([[1.0, 0.0], [0.5, 1.0], [0.5, 0.8], [0.8, 0.0]],
-                                facecolor=color, edgecolor='none', transform=trans)
-        ax.add_patch(right_triangle)
-
-        # Crossbar
-        crossbar = Polygon([[0.225, 0.45], [0.775, 0.45], [0.775, 0.3], [0.225, 0.3]],
-                          facecolor=color, edgecolor='none', transform=trans)
-        ax.add_patch(crossbar)
-
-    elif letter == 'C':
-        # Draw C as an ellipse with a cutout
-        # Outer ellipse
-        outer = Ellipse((0.5, 0.5), 0.8, 1.0, facecolor=color, edgecolor='none', transform=trans)
-        ax.add_patch(outer)
-
-        # Inner ellipse (white cutout)
-        inner = Ellipse((0.5, 0.5), 0.4, 0.65, facecolor='white', edgecolor='none', transform=trans, zorder=3)
-        ax.add_patch(inner)
-
-        # Right cutout rectangle
-        cutout = Rectangle((0.5, 0.0), 0.5, 1.0, facecolor='white', edgecolor='none', transform=trans, zorder=3)
-        ax.add_patch(cutout)
-
-    elif letter == 'G':
-        # Draw G similar to C but with additional bar
-        # Outer ellipse
-        outer = Ellipse((0.5, 0.5), 0.8, 1.0, facecolor=color, edgecolor='none', transform=trans)
-        ax.add_patch(outer)
-
-        # Inner ellipse (white cutout)
-        inner = Ellipse((0.5, 0.5), 0.4, 0.65, facecolor='white', edgecolor='none', transform=trans, zorder=3)
-        ax.add_patch(inner)
-
-        # Right cutout rectangle
-        cutout = Rectangle((0.5, 0.0), 0.5, 1.0, facecolor='white', edgecolor='none', transform=trans, zorder=3)
-        ax.add_patch(cutout)
-
-        # Horizontal bar for G
-        g_bar = Rectangle((0.5, 0.35), 0.35, 0.15, facecolor=color, edgecolor='none', transform=trans, zorder=4)
-        ax.add_patch(g_bar)
-
-    elif letter == 'T':
-        # Draw T as two rectangles (vertical stem and horizontal top)
-        # Vertical stem
-        stem = Rectangle((0.4, 0.0), 0.2, 1.0, facecolor=color, edgecolor='none', transform=trans)
-        ax.add_patch(stem)
-
-        # Horizontal top
-        top = Rectangle((0.0, 0.8), 1.0, 0.2, facecolor=color, edgecolor='none', transform=trans)
-        ax.add_patch(top)
-
-
-def format_genomic_position(x, _pos):
-    """
-    Format genomic position for axis labels.
-    Converts to kb or Mb as appropriate.
-
-    Args:
-        x: Position value
-        _pos: Tick position (unused but required by FuncFormatter)
+        x_min: Minimum position value in the range
+        x_max: Maximum position value in the range
 
     Returns:
-        Formatted string
+        Formatter function
     """
-    if abs(x) >= 1e6:
-        return f'{x/1e6:.1f}M'
-    elif abs(x) >= 1e3:
-        return f'{x/1e3:.0f}k'
+    range_size = x_max - x_min
+
+    # Choose unit based on range size
+    if range_size >= 1e6:
+        # Use Mb for ranges >= 1 million bp
+        def formatter(x, _pos):
+            return f'{x/1e6:.2f}M'
+    elif range_size >= 1e3:
+        # Use kb for ranges >= 1 thousand bp
+        def formatter(x, _pos):
+            return f'{x/1e3:.1f}k'
     else:
-        return f'{int(x)}'
+        # Use bp for small ranges
+        def formatter(x, _pos):
+            return f'{int(x)}'
 
-
-def smooth_data(data, x_coords, target_bins=1024):
-    """
-    Smooth data by binning/averaging when there are too many bins.
-
-    Args:
-        data: 1D array of values to smooth
-        x_coords: Corresponding x-coordinates
-        target_bins: Target number of bins after smoothing (default: 1024)
-
-    Returns:
-        Tuple of (smoothed_data, smoothed_x_coords)
-    """
-    n_bins = len(data)
-
-    if n_bins <= target_bins:
-        # No smoothing needed
-        return data, x_coords
-
-    # Calculate bin size for downsampling
-    bin_size = n_bins / target_bins
-
-    # Create new bins
-    smoothed_data = []
-    smoothed_x = []
-
-    for i in range(target_bins):
-        start_idx = int(i * bin_size)
-        end_idx = int((i + 1) * bin_size)
-
-        # Average the data in this bin
-        bin_mean = np.mean(data[start_idx:end_idx])
-        smoothed_data.append(bin_mean)
-
-        # Use the center position of the bin
-        bin_x_mean = np.mean(x_coords[start_idx:end_idx])
-        smoothed_x.append(bin_x_mean)
-
-    return np.array(smoothed_data), np.array(smoothed_x)
+    return formatter
 
 
 def load_interpretation_data(data_dir, name_base, baseline_types):
@@ -225,9 +116,14 @@ def load_interpretation_data(data_dir, name_base, baseline_types):
         # Clean trial names for filenames (same logic as in the original script)
         trial_pos_clean = clean_trial_name(trial_pos, keep_suffix=True)
         neg_trial_count = len(trial_neg_list)
-        trial_neg_clean = f"other-{neg_trial_count}"
 
-        identifier = f"{chr_name}_{start}_{end}_{region_name}_{trial_pos_clean}_{trial_neg_clean}_{baseline_type}"
+        # Only add trial_neg_clean if there are negative trials
+        if neg_trial_count > 0:
+            trial_neg_clean = f"other-{neg_trial_count}"
+            identifier = f"{chr_name}_{start}_{end}_{region_name}_{trial_pos_clean}_{trial_neg_clean}_{baseline_type}"
+        else:
+            identifier = f"{chr_name}_{start}_{end}_{region_name}_{trial_pos_clean}_{baseline_type}"
+
         logger.info(f"Looking for files with identifier: {identifier}")
 
         importance_file = f"{data_dir}/{identifier}_importance.npy"
@@ -280,117 +176,36 @@ def clean_trial_name(trial_str, keep_suffix=True):
     return '-'.join(cleaned_trials)
 
 
-def plot_sequence_attribution(ax, seq_onehot, attribution, x_coords, bin_highlights=None, start_bin_idx=0):
+def plot_sequence_attribution(ax, seq_onehot, attribution, x_coords):
     """
-    Plot DNA sequence with attribution scores in a logo-style visualization.
+    Plot DNA sequence with attribution scores in a logo-style visualization using vizsequence.
 
     Args:
         ax: Matplotlib axis to plot on
         seq_onehot: One-hot encoded sequence [L, 4] where columns are [A, C, G, T]
         attribution: Attribution scores [L, 4] for each nucleotide
-        x_coords: X-axis coordinates for genomic positions
-        bin_highlights: List of bin indices to highlight (e.g., exon positions)
-        start_bin_idx: Starting bin index for the secondary x-axis (default: 0)
+        x_coords: X-axis coordinates for genomic positions (bp resolution)
     """
-    # Define colors for each nucleotide (A=green, C=blue, G=orange, T=red)
-    colors = ['#00B050', '#0070C0', '#FFC000', '#C00000']
-    nucleotides = ['A', 'C', 'G', 'T']
-
     # Multiply attribution by one-hot to get actual sequence attribution
+    # Shape: [L, 4] for A, C, G, T
     seq_attr = attribution * seq_onehot
 
-    # Calculate letter width based on spacing
-    if len(x_coords) > 1:
-        letter_width = (x_coords[1] - x_coords[0]) * 0.9  # 90% of bin width
-    else:
-        letter_width = 1.0
+    # Use vizsequence to plot the sequence logo - let it handle everything
+    plot_weights_given_ax(
+        ax=ax,
+        array=seq_attr,
+        height_padding_factor=0.2,
+        length_padding=0.5,
+        subticks_frequency=max(1, len(seq_attr) // 10) if len(seq_attr) > 40 else 1,
+        ylabel="Attribution"
+    )
 
-    # Track min/max for axis limits
-    max_pos = 0
-    min_neg = 0
+    # Reduce font sizes for cleaner display
+    ax.tick_params(axis='both', labelsize=7)
+    ax.yaxis.label.set_fontsize(9)
+    ax.xaxis.label.set_fontsize(8)
 
-    # For each position, plot nucleotide letters with heights proportional to attribution
-    for i, x in enumerate(x_coords):
-        # Get attribution values at this position for all nucleotides
-        attr_vals = seq_attr[i]  # [4] values for A, C, G, T
-
-        # Sort by absolute value to stack letters
-        sorted_indices = np.argsort(np.abs(attr_vals))
-
-        # Separate positive and negative contributions
-        pos_height = 0
-        neg_height = 0
-
-        for nuc_idx in sorted_indices:
-            attr_val = attr_vals[nuc_idx]
-
-            if attr_val > 0:
-                # Draw letter above previous positive letters
-                add_letter_to_axis(ax, nucleotides[nuc_idx], x, pos_height,
-                                 attr_val, letter_width, colors[nuc_idx])
-                pos_height += attr_val
-                max_pos = max(max_pos, pos_height)
-            elif attr_val < 0:
-                # Draw letter below previous negative letters
-                add_letter_to_axis(ax, nucleotides[nuc_idx], x, neg_height + attr_val,
-                                 abs(attr_val), letter_width, colors[nuc_idx])
-                neg_height += attr_val
-                min_neg = min(min_neg, neg_height)
-
-    # Set axis limits with padding
-    padding = max(max_pos - min_neg, 0.1) * 0.1  # 10% padding
-    ax.set_ylim(min_neg - padding, max_pos + padding)
-    ax.set_xlim(x_coords[0] - letter_width, x_coords[-1] + letter_width)
-
-    # Add horizontal line at y=0
-    ax.axhline(y=0, color='black', linewidth=0.5, alpha=0.5, zorder=1)
-
-    # Highlight specified bins (e.g., exons) - draw behind letters
-    if bin_highlights is not None and len(bin_highlights) > 0:
-        for bin_idx in bin_highlights:
-            if 0 <= bin_idx < len(x_coords):
-                x = x_coords[bin_idx]
-                width = x_coords[1] - x_coords[0] if len(x_coords) > 1 else 1
-                rect = Rectangle((x - width/2, min_neg - padding), width,
-                                (max_pos + padding) - (min_neg - padding),
-                                facecolor='lightblue', alpha=0.2, edgecolor='none', zorder=0)
-                ax.add_patch(rect)
-
-    # Create legend
-    legend_elements = [mpatches.Patch(facecolor=colors[i], label=nucleotides[i])
-                      for i in range(4)]
-    ax.legend(handles=legend_elements, loc='upper right', ncol=4,
-             framealpha=0.9, fontsize=8)
-
-    # Set up dual x-axes
-    ax.set_ylabel('Attribution Score')
-    ax.set_xlabel('Genomic Position', color='black')
-    ax.grid(True, alpha=0.3, axis='y', zorder=0)
-
-    # Format x-axis to show kb/Mb
-    ax.xaxis.set_major_formatter(FuncFormatter(format_genomic_position))
-
-    # Add secondary x-axis for bin indices
-    ax2 = ax.twiny()
-    ax2.set_xlim(ax.get_xlim())
-
-    # Calculate bin positions
-    n_bins = len(x_coords)
-    bin_indices = np.arange(start_bin_idx, start_bin_idx + n_bins)
-
-    # Set up secondary axis ticks
-    # Show ticks at regular intervals
-    tick_interval = max(1, n_bins // 10)  # Show ~10 ticks
-    tick_positions_idx = np.arange(0, n_bins, tick_interval)
-    tick_positions_genomic = x_coords[tick_positions_idx]
-    tick_labels = bin_indices[tick_positions_idx]
-
-    ax2.set_xticks(tick_positions_genomic)
-    ax2.set_xticklabels(tick_labels)
-    ax2.set_xlabel('Bin Index (Relative)', color='navy')
-    ax2.tick_params(axis='x', labelcolor='navy')
-
-    return ax2
+    return None
 
 
 def plot_interpretation(data, output_file, dpi=300, start_idx=None, end_idx=None, show_sequence=True):
@@ -413,85 +228,74 @@ def plot_interpretation(data, output_file, dpi=300, start_idx=None, end_idx=None
     importance_scores = data['importance_scores']
     sequence_attributions = data['sequence_attributions']
 
-    # Calculate x coordinates first to determine data length
-    trim = (
-        metadata['context_length'] // metadata['window_size']
-        - metadata['n_window']
-    ) // 2
+    # Get the genomic coordinate range
+    window_size = metadata['window_size']
     real_start = metadata['real_start']
     real_end = metadata['real_end']
-    x_full = np.arange(real_start, real_end).reshape(-1, metadata['window_size'])[trim:-trim, 0]
 
-    # Determine slice indices
-    data_length = len(x_full)
+    # Calculate trim for the stored data
+    trim = (
+        metadata['context_length'] // window_size
+        - metadata['n_window']
+    ) // 2
+
+    # Total bp after trimming
+    total_bp = metadata['n_window'] * window_size
+    region_start_bp = real_start + trim * window_size
+    region_end_bp = region_start_bp + total_bp
+
+    # Determine genomic range to plot
     if start_idx is None:
-        start_idx = 0
+        start_genomic = region_start_bp
+    else:
+        start_genomic = max(start_idx, region_start_bp)
+
     if end_idx is None:
-        end_idx = data_length
+        end_genomic = region_end_bp
+    else:
+        end_genomic = min(end_idx, region_end_bp)
 
-    # Validate indices
-    if start_idx < 0:
-        start_idx = 0
-    if end_idx > data_length:
-        end_idx = data_length
-    if start_idx >= end_idx:
-        raise ValueError(f"Invalid range: start_idx ({start_idx}) must be less than end_idx ({end_idx})")
+    # Validate range
+    if start_genomic >= end_genomic:
+        raise ValueError(f"Invalid range: start position {start_genomic} must be less than end position {end_genomic}")
+    if start_genomic < region_start_bp or end_genomic > region_end_bp:
+        logger.warning(f"Requested range [{start_genomic}, {end_genomic}) partially outside available region [{region_start_bp}, {region_end_bp})")
 
-    logger.info(f"Plotting region: bins {start_idx} to {end_idx} (out of {data_length} total bins)")
+    # Calculate bp indices into the data arrays (0-indexed from region_start_bp)
+    start_bp_idx = start_genomic - region_start_bp
+    end_bp_idx = end_genomic - region_start_bp
 
-    # Slice x coordinates
-    x = x_full[start_idx:end_idx]
-    n_bins_to_plot = len(x)
+    logger.info(f"Plotting region: genomic coords {start_genomic} to {end_genomic} ({end_genomic - start_genomic} bp)")
 
-    # Determine if smoothing is needed
-    needs_smoothing = n_bins_to_plot > 1024
-    if needs_smoothing:
-        logger.info(f"Smoothing data from {n_bins_to_plot} bins to 1024 bins for better visualization")
+    # Create bp-resolution x coordinates
+    x_bp = np.arange(start_genomic, end_genomic)
 
-    # Prepare plot data - plot each trial separately
+    # Prepare plot data - only importance and sequence attribution
     plot_data = []
     plot_title = []
     plot_type = []  # 'line' or 'sequence'
-    plot_x = []  # Store x-coordinates for each plot (may differ if smoothed)
+    plot_x = []  # Store x-coordinates for each plot
 
-    # Add individual label trials (sliced and optionally smoothed)
-    for trial_name, trial_data in label_trials.items():
-        data_slice = trial_data[start_idx:end_idx]
-        if needs_smoothing:
-            smoothed_data, smoothed_x = smooth_data(data_slice, x, target_bins=1024)
-            plot_data.append(smoothed_data)
-            plot_x.append(smoothed_x)
-        else:
-            plot_data.append(data_slice)
-            plot_x.append(x)
-        plot_title.append(f"{trial_name} Target")
-        plot_type.append('line')
-
-    # Add individual prediction trials (sliced and optionally smoothed)
-    for trial_name, trial_data in pred_trials.items():
-        data_slice = trial_data[start_idx:end_idx]
-        if needs_smoothing:
-            smoothed_data, smoothed_x = smooth_data(data_slice, x, target_bins=1024)
-            plot_data.append(smoothed_data)
-            plot_x.append(smoothed_x)
-        else:
-            plot_data.append(data_slice)
-            plot_x.append(x)
-        plot_title.append(f"{trial_name} Pred")
-        plot_type.append('line')
-
-    # Add importance scores (sliced, not smoothed to preserve sharp features)
+    # Add importance scores at bp resolution
     for baseline_type, importance_data in importance_scores:
-        plot_data.append(importance_data[start_idx:end_idx])
-        plot_x.append(x)
+        # Importance data is already at bp resolution
+        # Slice to requested range
+        importance_bp = importance_data[start_bp_idx:end_bp_idx]
+
+        plot_data.append(importance_bp)
+        plot_x.append(x_bp)
         plot_title.append(f"Importance Score ({baseline_type} baseline)")
         plot_type.append('line')
 
-    # Add sequence attribution plots (if requested, never smoothed)
+    # Add sequence attribution plots (if requested)
     if show_sequence:
         for baseline_type, seq_onehot, attribution in sequence_attributions:
-            plot_data.append((seq_onehot[start_idx:end_idx], attribution[start_idx:end_idx]))
-            plot_x.append(x)  # Use original x for sequence plots
+            # Slice sequence and attribution at bp resolution
+            seq_slice = seq_onehot[start_bp_idx:end_bp_idx]
+            attr_slice = attribution[start_bp_idx:end_bp_idx]
+
+            plot_data.append((seq_slice, attr_slice))
+            plot_x.append(x_bp)
             plot_title.append(f"Sequence Attribution ({baseline_type} baseline)")
             plot_type.append('sequence')
 
@@ -508,28 +312,24 @@ def plot_interpretation(data, output_file, dpi=300, start_idx=None, end_idx=None
         axes = [axes] if not isinstance(axes, np.ndarray) else axes
 
     # Plot data
-    bin_range = metadata['bin_range']
+    # Calculate x-axis limits at bp resolution
+    x_min = x_bp[0]
+    x_max = x_bp[-1]
+
     for i, ax in enumerate(axes[:-1]):
         if plot_type[i] == 'line':
             ax.plot(plot_x[i], plot_data[i])
             ax.set_title(plot_title[i])
             ax.set_ylabel(None)
             ax.set_xlabel(None)
-            # Set x-axis limits to match the original range
-            ax.set_xlim(x[0], x[-1])
-            # Format x-axis for genomic positions
-            ax.xaxis.set_major_formatter(FuncFormatter(format_genomic_position))
+            # Set x-axis limits to bp resolution
+            ax.set_xlim(x_min, x_max)
+            # Format x-axis for genomic positions dynamically based on range
+            formatter = create_genomic_position_formatter(x_min, x_max)
+            ax.xaxis.set_major_formatter(FuncFormatter(formatter))
         elif plot_type[i] == 'sequence':
             seq_onehot, attribution = plot_data[i]
-            # Adjust bin_range to be relative to the plotted region
-            bin_highlights_adjusted = []
-            for bin_idx in bin_range:
-                if start_idx <= bin_idx < end_idx:
-                    bin_highlights_adjusted.append(bin_idx - start_idx)
-
-            plot_sequence_attribution(ax, seq_onehot, attribution, plot_x[i],
-                                    bin_highlights=bin_highlights_adjusted,
-                                    start_bin_idx=start_idx)
+            plot_sequence_attribution(ax, seq_onehot, attribution, plot_x[i])
             ax.set_title(plot_title[i])
 
     # Plot chromosome bar with region highlight
@@ -541,38 +341,41 @@ def plot_interpretation(data, output_file, dpi=300, start_idx=None, end_idx=None
     ax.set_ylabel(None)
     ax.set_xlabel('Genomic Position')
 
-    # Set x-axis limits to match the original range
-    ax.set_xlim(x[0], x[-1])
+    # Set x-axis limits to bp resolution
+    ax.set_xlim(x_min, x_max)
 
-    # Format x-axis for genomic positions
-    ax.xaxis.set_major_formatter(FuncFormatter(format_genomic_position))
+    # Format x-axis for genomic positions dynamically based on range
+    formatter = create_genomic_position_formatter(x_min, x_max)
+    ax.xaxis.set_major_formatter(FuncFormatter(formatter))
 
     linewidth = 1.5
     rec_width = 1
     chr_name = metadata['chr_name']
     bin_range = metadata['bin_range']
 
-    ax.hlines(0.5, x[0], x[-1], color="black", linewidth=linewidth)
+    ax.hlines(0.5, x_min, x_max, color="black", linewidth=linewidth)
     ax.set_title(f"Chromosome {chr_name[3:]}")
 
-    # Adjust bin_range to be relative to the plotted region
-    # Find which bins in the original bin_range are within the plotted region
-    bin_range_in_plot = []
-    for bin_idx in bin_range:
-        if start_idx <= bin_idx < end_idx:
-            bin_range_in_plot.append(bin_idx - start_idx)
+    # Convert bin_range to genomic coordinates and check if they overlap with plotted region
+    # bin_range contains 0-indexed bin positions relative to the trimmed region
+    bin_range_genomic = [(region_start_bp + b * window_size, region_start_bp + (b + 1) * window_size)
+                          for b in bin_range]
 
-    # Only draw rectangle if there are bins to highlight in the plotted region
-    if len(bin_range_in_plot) > 0:
-        rect = Rectangle(
-            (x[bin_range_in_plot[0]], 0.5 - 0.5 * rec_width),
-            x[bin_range_in_plot[-1]] - x[bin_range_in_plot[0]],
-            rec_width,
-            facecolor="lightblue",
-            edgecolor="black",
-            linewidth=linewidth,
-        )
-        ax.add_patch(rect)
+    # Find overlapping ranges with the plotted region
+    for bin_start, bin_end in bin_range_genomic:
+        if bin_end > start_genomic and bin_start < end_genomic:
+            # This bin overlaps with the plotted region
+            overlap_start = max(bin_start, start_genomic)
+            overlap_end = min(bin_end, end_genomic)
+            rect = Rectangle(
+                (overlap_start, 0.5 - 0.5 * rec_width),
+                overlap_end - overlap_start,
+                rec_width,
+                facecolor="lightblue",
+                edgecolor="black",
+                linewidth=linewidth,
+            )
+            ax.add_patch(rect)
 
     # Save figure
     plt.tight_layout()
@@ -631,14 +434,14 @@ def main():
         "--start",
         type=int,
         default=None,
-        help="Start index for plot region (relative bin index, default: 0)"
+        help="Start genomic coordinate for plot region (default: start of region)"
     )
 
     parser.add_argument(
         "--end",
         type=int,
         default=None,
-        help="End index for plot region (relative bin index, default: plot to end)"
+        help="End genomic coordinate for plot region (default: end of region)"
     )
 
     parser.add_argument(
