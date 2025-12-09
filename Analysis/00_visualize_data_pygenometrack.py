@@ -172,11 +172,11 @@ def compute_global_minmax(bigwig_files, chrom, start, end, track_type=None, num_
 
     if label_values:
         if allow_negative:
-            label_min = np.min(label_values)
-            label_max = np.max(label_values)
+            label_min = round(np.min(label_values), 3)
+            label_max = round(np.max(label_values), 3)
         else:
             label_min = 0  # Ensure min is at least 0
-            label_max = int(np.ceil(np.max(label_values)))
+            label_max = round(np.max(label_values), 3)
         result['label'] = (label_min, label_max)
         print(f"  Label tracks: min={label_min:.4f}, max={label_max:.4f} (computed from {num_bins} bins)")
     else:
@@ -185,11 +185,11 @@ def compute_global_minmax(bigwig_files, chrom, start, end, track_type=None, num_
 
     if pred_values:
         if allow_negative:
-            pred_min = np.min(pred_values)
-            pred_max = np.max(pred_values)
+            pred_min = round(np.min(pred_values), 3)
+            pred_max = round(np.max(pred_values), 3)
         else:
             pred_min = 0  # Ensure min is at least 0
-            pred_max = int(np.ceil(np.max(pred_values)))
+            pred_max = round(np.max(pred_values), 3)
         result['pred'] = (pred_min, pred_max)
         print(f"  Pred tracks: min={pred_min:.4f}, max={pred_max:.4f} (computed from {num_bins} bins)")
     else:
@@ -197,6 +197,155 @@ def compute_global_minmax(bigwig_files, chrom, start, end, track_type=None, num_
         print("  Pred tracks: No data found")
 
     return result
+
+
+def compute_minmax_per_modality(bigwig_files, chrom, start, end, track_type_map=None, num_bins=700, allow_negative=False):
+    """
+    Compute min/max values grouped by track type (label/pred) and modality suffix.
+
+    Args:
+        bigwig_files: List of bigwig file paths
+        chrom: Chromosome (e.g., 'chr1')
+        start: Start position
+        end: End position
+        track_type_map: Optional dict mapping file paths to 'label' or 'pred'
+        num_bins: Number of bins for smoothing (default: 700)
+        allow_negative: If True, don't force min to 0
+
+    Returns:
+        dict: {(track_type, modality): (min, max)}
+              e.g., {('label', '_atac'): (0, 10), ('pred', '_atac'): (0, 12), ...}
+    """
+    if not PYBIGWIG_AVAILABLE:
+        print("Warning: pyBigWig not available. Using auto scaling.")
+        print("Install with: pip install pyBigWig")
+        return {}
+
+    # Ensure chromosome has 'chr' prefix
+    if not chrom.startswith('chr'):
+        chrom = f'chr{chrom}'
+
+    print(f"\nComputing per-modality min/max values for region {chrom}:{start}-{end}...")
+
+    # Group values by (track_type, modality)
+    grouped_values = {}
+
+    for bw_file in bigwig_files:
+        track_name = bw_file.stem
+        track_lower = track_name.lower()
+
+        # Determine track type (label/pred)
+        if track_type_map and bw_file in track_type_map:
+            track_type = track_type_map[bw_file]
+        elif "label" in track_lower:
+            track_type = 'label'
+        elif "pred" in track_lower:
+            track_type = 'pred'
+        else:
+            track_type = 'other'
+
+        # Extract modality suffix
+        modality = get_modality_suffix(track_name)
+        if modality is None:
+            modality = 'none'  # For tracks without modality suffix
+
+        key = (track_type, modality)
+
+        try:
+            bw = pyBigWig.open(str(bw_file))
+
+            # Check if chromosome exists in bigwig
+            if chrom not in bw.chroms():
+                # Try without 'chr' prefix
+                chrom_alt = chrom.replace('chr', '')
+                if chrom_alt in bw.chroms():
+                    chrom_query = chrom_alt
+                else:
+                    print(f"  Warning: Chromosome {chrom} not found in {bw_file.name}")
+                    bw.close()
+                    continue
+            else:
+                chrom_query = chrom
+
+            # Get binned statistics
+            binned_values = bw.stats(chrom_query, start, end, type="mean", nBins=num_bins)
+            bw.close()
+
+            # Filter out None/NaN values
+            binned_values = [v for v in binned_values if v is not None and not np.isnan(v)]
+
+            if len(binned_values) > 0:
+                if key not in grouped_values:
+                    grouped_values[key] = []
+                grouped_values[key].extend(binned_values)
+
+        except Exception as e:
+            print(f"  Warning: Could not read {bw_file.name}: {e}")
+            continue
+
+    # Compute min/max for each group
+    result = {}
+    for key, values in grouped_values.items():
+        track_type, modality = key
+        if values:
+            if allow_negative:
+                min_val = round(np.min(values), 3)
+                max_val = round(np.max(values), 3)
+            else:
+                min_val = 0
+                max_val = round(np.max(values), 3)
+            result[key] = (min_val, max_val)
+            print(f"  {track_type}/{modality}: min={min_val:.4f}, max={max_val:.4f} (n={len(values)} bins)")
+
+    return result
+
+
+def get_modality_suffix(track_name, modality_suffixes=None):
+    """
+    Extract the modality suffix from a track name.
+
+    Args:
+        track_name: Track name string
+        modality_suffixes: List of modality suffixes to check (default: common modalities)
+
+    Returns:
+        Modality suffix string if found, otherwise None
+    """
+    if modality_suffixes is None:
+        modality_suffixes = ["_atac", "_rna", "_k27ac", "_k27me3", "_k9me3", "_rnaminus", "_rnaplus"]
+
+    track_lower = track_name.lower()
+    for modality in modality_suffixes:
+        if track_lower.endswith(modality):
+            return modality
+
+    return None
+
+
+def get_common_suffix(track_names, modality_suffixes=None):
+    """
+    Determine if all track names share a common modality suffix.
+
+    Args:
+        track_names: List of track name strings
+        modality_suffixes: List of modality suffixes to check (default: common modalities)
+
+    Returns:
+        Common suffix string if all tracks share it, otherwise None
+    """
+    if modality_suffixes is None:
+        modality_suffixes = ["_atac", "_rna", "_k27ac", "_k27me3", "_k9me3", "_rnaminus", "_rnaplus"]
+
+    if not track_names:
+        return None
+
+    # Check each modality suffix
+    for modality in modality_suffixes:
+        # Check if all tracks end with this suffix (case-insensitive)
+        if all(name.lower().endswith(modality) for name in track_names):
+            return modality
+
+    return None
 
 
 def get_track_color(track_name, default_color="#1f77b4"):
@@ -222,6 +371,7 @@ def get_track_color(track_name, default_color="#1f77b4"):
 
 def create_tracks_config(bigwig_files, output_file, height=2, default_color="#1f77b4",
                          label_min=None, label_max=None, pred_min=None, pred_max=None,
+                         minmax_per_modality=None,
                          gtf_file=None, gtf_height=5, fontsize=10, gtf_fontsize=10,
                          axis_fontsize=12, spacer_height=0.2):
     """
@@ -232,10 +382,11 @@ def create_tracks_config(bigwig_files, output_file, height=2, default_color="#1f
         output_file: Output configuration file path
         height: Track height (default: 2)
         default_color: Default track color (default: blue)
-        label_min: Minimum value for label tracks
-        label_max: Maximum value for label tracks
-        pred_min: Minimum value for pred tracks
-        pred_max: Maximum value for pred tracks
+        label_min: Minimum value for label tracks (deprecated, use minmax_per_modality)
+        label_max: Maximum value for label tracks (deprecated, use minmax_per_modality)
+        pred_min: Minimum value for pred tracks (deprecated, use minmax_per_modality)
+        pred_max: Maximum value for pred tracks (deprecated, use minmax_per_modality)
+        minmax_per_modality: Dict of {(track_type, modality): (min, max)} for per-modality scaling
         gtf_file: Path to GTF file for gene annotation track (optional)
         gtf_height: Height of GTF track (default: 5)
         fontsize: Font size for track titles (default: 10)
@@ -245,6 +396,34 @@ def create_tracks_config(bigwig_files, output_file, height=2, default_color="#1f
     """
     print(f"\nCreating tracks configuration: {output_file}")
 
+    # FIRST PASS: Collect all track names after prefix and pred/label suffix removal
+    # to determine if they share a common modality suffix
+    track_names_for_suffix_check = []
+    for bw_file in bigwig_files:
+        track_name = bw_file.stem
+
+        # Remove prefixes if present
+        if track_name.startswith("BasalGanglia-"):
+            track_name = track_name[len("BasalGanglia-"):]
+        elif track_name.startswith("MiniAtlas-"):
+            track_name = track_name[len("MiniAtlas-"):]
+
+        # Remove pred/label suffixes
+        for suffix in ["_pred", "_label", "-pred", "-label", "_Pred", "_Label", "-Pred", "-Label"]:
+            if track_name.endswith(suffix):
+                track_name = track_name[:-len(suffix)]
+                break
+
+        track_names_for_suffix_check.append(track_name)
+
+    # Check if all tracks share a common modality suffix
+    common_suffix = get_common_suffix(track_names_for_suffix_check)
+    if common_suffix:
+        print(f"  All tracks share common suffix '{common_suffix}' - will remove it from display names")
+    else:
+        print(f"  Tracks have different suffixes - keeping them for distinction")
+
+    # SECOND PASS: Create config
     config_lines = []
 
     for bw_file in bigwig_files:
@@ -262,16 +441,33 @@ def create_tracks_config(bigwig_files, output_file, height=2, default_color="#1f
         # FIRST: Determine color based on original track name (before removing suffixes)
         track_color = get_track_color(track_name, default_color)
 
-        # FIRST: Determine min/max values based on track type (before removing suffixes)
+        # FIRST: Determine min/max values based on track type and modality (before removing suffixes)
+        # Determine track type
         if "label" in track_lower:
-            min_val = label_min
-            max_val = label_max
+            track_type = 'label'
         elif "pred" in track_lower:
-            min_val = pred_min
-            max_val = pred_max
+            track_type = 'pred'
         else:
-            min_val = None
-            max_val = None
+            track_type = 'other'
+
+        # Extract modality from original track name
+        modality = get_modality_suffix(track_name)
+        if modality is None:
+            modality = 'none'
+
+        # Look up min/max from per-modality dict, fallback to legacy label/pred min/max
+        min_val = None
+        max_val = None
+        if minmax_per_modality and (track_type, modality) in minmax_per_modality:
+            min_val, max_val = minmax_per_modality[(track_type, modality)]
+        else:
+            # Fallback to legacy parameters
+            if track_type == 'label':
+                min_val = label_min
+                max_val = label_max
+            elif track_type == 'pred':
+                min_val = pred_min
+                max_val = pred_max
 
         # THEN: Remove pred/label suffixes for cleaner display (color already assigned)
         for suffix in ["_pred", "_label", "-pred", "-label", "_Pred", "_Label", "-Pred", "-Label"]:
@@ -279,12 +475,11 @@ def create_tracks_config(bigwig_files, output_file, height=2, default_color="#1f
                 track_name = track_name[:-len(suffix)]
                 break
 
-        # THEN: Remove common modality suffixes (case-insensitive check)
-        track_lower_temp = track_name.lower()
-        for modality in ["_atac", "_rna", "_k27ac", "_k27me3", "_k9me3", "_rnaminus", "_rnaplus"]:
-            if track_lower_temp.endswith(modality):
-                track_name = track_name[:-len(modality)]
-                break
+        # THEN: Remove common modality suffix ONLY if all tracks share it
+        if common_suffix:
+            track_lower_temp = track_name.lower()
+            if track_lower_temp.endswith(common_suffix):
+                track_name = track_name[:-len(common_suffix)]
 
         # Add track section
         config_lines.append(f"[{track_name}]")
@@ -708,59 +903,55 @@ Examples:
             diff_min = None  # Diff can be negative, will be computed separately
             diff_max = None
 
+            # Compute per-modality min/max
+            minmax_per_modality = {}
+
             if not args.no_auto_scale:
-                # Compute min/max for label tracks
+                # Create track type map for label files
+                track_type_map_label = {f: 'label' for f in label_files}
                 if label_files:
-                    print(f"\nComputing min/max for {len(label_files)} label tracks...")
-                    label_minmax = compute_global_minmax(label_files, chrom, start, end, track_type='label')
-                    if label_minmax and label_minmax.get('label'):
-                        computed_min, computed_max = label_minmax['label']
-                        if label_min is None:
-                            label_min = computed_min
-                        if label_max is None:
-                            label_max = computed_max
+                    label_minmax_per_mod = compute_minmax_per_modality(label_files, chrom, start, end, track_type_map=track_type_map_label)
+                    minmax_per_modality.update(label_minmax_per_mod)
 
-                # Compute min/max for pred and alt tracks combined (so they share same scale)
+                # Create track type map for pred and alt files (treat both as 'pred' to share same scale)
                 pred_alt_files = pred_files + alt_files
+                track_type_map_pred_alt = {f: 'pred' for f in pred_alt_files}
                 if pred_alt_files:
-                    print(f"Computing min/max for {len(pred_alt_files)} pred+alt tracks...")
-                    pred_alt_minmax = compute_global_minmax(pred_alt_files, chrom, start, end, track_type='pred')
-                    if pred_alt_minmax and pred_alt_minmax.get('pred'):
-                        computed_min, computed_max = pred_alt_minmax['pred']
-                        if pred_min is None:
-                            pred_min = computed_min
-                            alt_min = computed_min
-                        if pred_max is None:
-                            pred_max = computed_max
-                            alt_max = computed_max
+                    pred_alt_minmax_per_mod = compute_minmax_per_modality(pred_alt_files, chrom, start, end, track_type_map=track_type_map_pred_alt)
+                    minmax_per_modality.update(pred_alt_minmax_per_mod)
+                    # Also add as 'alt' type (same values as pred)
+                    for key, value in pred_alt_minmax_per_mod.items():
+                        if key[0] == 'pred':
+                            alt_key = ('alt', key[1])
+                            minmax_per_modality[alt_key] = value
 
-                # Compute min/max for diff tracks (can be negative)
+                # Create track type map for diff files (can be negative)
+                track_type_map_diff = {f: 'diff' for f in diff_files}
                 if diff_files:
-                    print(f"Computing min/max for {len(diff_files)} diff tracks...")
-                    diff_minmax = compute_global_minmax(diff_files, chrom, start, end, track_type='pred', allow_negative=True)
-                    if diff_minmax and diff_minmax.get('pred'):
-                        # Diff tracks: use actual min/max values (can be negative)
-                        diff_min, diff_max = diff_minmax['pred']
-
-            # Print scale settings
-            print("\nScale settings:")
-            if label_min is not None or label_max is not None:
-                print(f"  Label tracks: [{label_min}, {label_max}]")
-            else:
-                print(f"  Label tracks: auto")
-            if pred_min is not None or pred_max is not None:
-                print(f"  Pred/Alt tracks: [{pred_min}, {pred_max}]")
-            else:
-                print(f"  Pred/Alt tracks: auto")
-            if diff_min is not None or diff_max is not None:
-                print(f"  Diff tracks: [{diff_min}, {diff_max}]")
-            else:
-                print(f"  Diff tracks: auto")
+                    diff_minmax_per_mod = compute_minmax_per_modality(diff_files, chrom, start, end, track_type_map=track_type_map_diff, allow_negative=True)
+                    minmax_per_modality.update(diff_minmax_per_mod)
 
             # Build configuration with overlay
             output_path = Path(args.output)
             config_file = output_path.parent / f"{output_path.stem}_config.ini"
             gtf_file = None if args.no_gtf else args.gtf
+
+            # Check if all tracks share a common modality suffix
+            track_names_for_suffix_check = []
+            for base_name in all_base_names:
+                track_name = base_name
+                # Remove prefixes
+                if track_name.startswith("BasalGanglia-"):
+                    track_name = track_name[len("BasalGanglia-"):]
+                elif track_name.startswith("MiniAtlas-"):
+                    track_name = track_name[len("MiniAtlas-"):]
+                track_names_for_suffix_check.append(track_name)
+
+            common_suffix = get_common_suffix(track_names_for_suffix_check)
+            if common_suffix:
+                print(f"\nAll tracks share common suffix '{common_suffix}' - will remove it from display names")
+            else:
+                print(f"\nTracks have different suffixes - keeping them for distinction")
 
             config_lines = []
 
@@ -771,7 +962,8 @@ Examples:
                 # Add label track first
                 if base_name in label_map:
                     bw_file = label_map[base_name]
-                    track_name = bw_file.stem
+                    track_name_orig = bw_file.stem
+                    track_name = track_name_orig
 
                     # Remove prefixes
                     if track_name.startswith("BasalGanglia-"):
@@ -779,12 +971,25 @@ Examples:
                     elif track_name.startswith("MiniAtlas-"):
                         track_name = track_name[len("MiniAtlas-"):]
 
-                    # Remove modality suffixes
-                    track_lower_temp = track_name.lower()
-                    for modality in ["_atac", "_rna", "_k27ac", "_k27me3", "_k9me3", "_rnaminus", "_rnaplus"]:
-                        if track_lower_temp.endswith(modality):
-                            track_name = track_name[:-len(modality)]
-                            break
+                    # Get modality for min/max lookup
+                    modality = get_modality_suffix(track_name_orig)
+                    if modality is None:
+                        modality = 'none'
+
+                    # Look up min/max from per-modality dict
+                    min_val = None
+                    max_val = None
+                    if ('label', modality) in minmax_per_modality:
+                        min_val, max_val = minmax_per_modality[('label', modality)]
+                    elif args.label_min is not None or args.label_max is not None:
+                        min_val = args.label_min
+                        max_val = args.label_max
+
+                    # Remove modality suffix ONLY if all tracks share it
+                    if common_suffix:
+                        track_lower_temp = track_name.lower()
+                        if track_lower_temp.endswith(common_suffix):
+                            track_name = track_name[:-len(common_suffix)]
 
                     display_name = f"{track_name} (label)"
                     track_num += 1
@@ -797,10 +1002,10 @@ Examples:
                     config_lines.append(f"height = {args.height}")
                     config_lines.append(f"color = #1f77b4")  # Blue
                     config_lines.append(f"fontsize = {args.fontsize}")
-                    if label_min is not None:
-                        config_lines.append(f"min_value = {label_min}")
-                    if label_max is not None:
-                        config_lines.append(f"max_value = {label_max}")
+                    if min_val is not None:
+                        config_lines.append(f"min_value = {min_val}")
+                    if max_val is not None:
+                        config_lines.append(f"max_value = {max_val}")
                     config_lines.append("file_type = bigwig")
                     config_lines.append("number_of_bins = 700")
                     config_lines.append("")
@@ -811,18 +1016,35 @@ Examples:
                 # Add overlaid ref/alt tracks
                 if base_name in pred_map or base_name in alt_map:
                     # Get track name
+                    track_name_orig = base_name
                     track_name = base_name
                     if track_name.startswith("BasalGanglia-"):
                         track_name = track_name[len("BasalGanglia-"):]
                     elif track_name.startswith("MiniAtlas-"):
                         track_name = track_name[len("MiniAtlas-"):]
 
-                    # Remove modality suffixes
-                    track_lower_temp = track_name.lower()
-                    for modality in ["_atac", "_rna", "_k27ac", "_k27me3", "_k9me3", "_rnaminus", "_rnaplus"]:
-                        if track_lower_temp.endswith(modality):
-                            track_name = track_name[:-len(modality)]
-                            break
+                    # Get modality for min/max lookup
+                    modality = get_modality_suffix(track_name_orig)
+                    if modality is None:
+                        modality = 'none'
+
+                    # Look up min/max from per-modality dict (pred and alt share same scale)
+                    pred_min_val = None
+                    pred_max_val = None
+                    if ('pred', modality) in minmax_per_modality:
+                        pred_min_val, pred_max_val = minmax_per_modality[('pred', modality)]
+                    elif args.pred_min is not None or args.pred_max is not None:
+                        pred_min_val = args.pred_min
+                        pred_max_val = args.pred_max
+
+                    alt_min_val = pred_min_val  # Alt uses same scale as pred
+                    alt_max_val = pred_max_val
+
+                    # Remove modality suffix ONLY if all tracks share it
+                    if common_suffix:
+                        track_lower_temp = track_name.lower()
+                        if track_lower_temp.endswith(common_suffix):
+                            track_name = track_name[:-len(common_suffix)]
 
                     # Add pred (reference) track
                     if base_name in pred_map:
@@ -838,10 +1060,10 @@ Examples:
                         config_lines.append(f"color = #d62728")  # Red
                         config_lines.append(f"alpha = 0.5")  # Transparency for overlay
                         config_lines.append(f"fontsize = {args.fontsize}")
-                        if pred_min is not None:
-                            config_lines.append(f"min_value = {pred_min}")
-                        if pred_max is not None:
-                            config_lines.append(f"max_value = {pred_max}")
+                        if pred_min_val is not None:
+                            config_lines.append(f"min_value = {pred_min_val}")
+                        if pred_max_val is not None:
+                            config_lines.append(f"max_value = {pred_max_val}")
                         config_lines.append("file_type = bigwig")
                         config_lines.append("number_of_bins = 700")
                         config_lines.append("")
@@ -860,10 +1082,10 @@ Examples:
                         config_lines.append(f"color = #2ca02c")  # Green
                         config_lines.append(f"alpha = 0.5")  # Transparency for overlay
                         config_lines.append(f"fontsize = {args.fontsize}")
-                        if alt_min is not None:
-                            config_lines.append(f"min_value = {alt_min}")
-                        if alt_max is not None:
-                            config_lines.append(f"max_value = {alt_max}")
+                        if alt_min_val is not None:
+                            config_lines.append(f"min_value = {alt_min_val}")
+                        if alt_max_val is not None:
+                            config_lines.append(f"max_value = {alt_max_val}")
                         config_lines.append("file_type = bigwig")
                         config_lines.append("overlay_previous = share-y")
                         config_lines.append("number_of_bins = 700")
@@ -877,18 +1099,29 @@ Examples:
                 # Add diff track (alt - ref)
                 if base_name in diff_map:
                     bw_file = diff_map[base_name]
+                    track_name_orig = base_name
                     track_name_diff = base_name
                     if track_name_diff.startswith("BasalGanglia-"):
                         track_name_diff = track_name_diff[len("BasalGanglia-"):]
                     elif track_name_diff.startswith("MiniAtlas-"):
                         track_name_diff = track_name_diff[len("MiniAtlas-"):]
 
-                    # Remove modality suffixes
-                    track_lower_temp = track_name_diff.lower()
-                    for modality in ["_atac", "_rna", "_k27ac", "_k27me3", "_k9me3", "_rnaminus", "_rnaplus"]:
-                        if track_lower_temp.endswith(modality):
-                            track_name_diff = track_name_diff[:-len(modality)]
-                            break
+                    # Get modality for min/max lookup
+                    modality = get_modality_suffix(track_name_orig)
+                    if modality is None:
+                        modality = 'none'
+
+                    # Look up min/max from per-modality dict
+                    diff_min_val = None
+                    diff_max_val = None
+                    if ('diff', modality) in minmax_per_modality:
+                        diff_min_val, diff_max_val = minmax_per_modality[('diff', modality)]
+
+                    # Remove modality suffix ONLY if all tracks share it
+                    if common_suffix:
+                        track_lower_temp = track_name_diff.lower()
+                        if track_lower_temp.endswith(common_suffix):
+                            track_name_diff = track_name_diff[:-len(common_suffix)]
 
                     display_name = f"{track_name_diff} (diff)"
                     track_num += 1
@@ -900,10 +1133,10 @@ Examples:
                     config_lines.append(f"height = {args.height}")
                     config_lines.append(f"color = #9467bd")  # Purple
                     config_lines.append(f"fontsize = {args.fontsize}")
-                    if diff_min is not None:
-                        config_lines.append(f"min_value = {diff_min}")
-                    if diff_max is not None:
-                        config_lines.append(f"max_value = {diff_max}")
+                    if diff_min_val is not None:
+                        config_lines.append(f"min_value = {diff_min_val}")
+                    if diff_max_val is not None:
+                        config_lines.append(f"max_value = {diff_max_val}")
                     config_lines.append("file_type = bigwig")
                     config_lines.append("number_of_bins = 700")
                     config_lines.append("")
@@ -1057,47 +1290,12 @@ Examples:
 
             print(f"\nTotal tracks to visualize: {len(all_bigwig_files)}")
 
-            # Compute global min/max across all tracks
-            label_min = args.label_min
-            label_max = args.label_max
-            pred_min = args.pred_min
-            pred_max = args.pred_max
+            # Compute per-modality min/max
+            minmax_per_modality = {}
 
             if not args.no_auto_scale:
-                # Compute min/max separately for label and pred tracks
-                label_files = [f for f in all_bigwig_files if folder_type_map[f] == 'label']
-                pred_files = [f for f in all_bigwig_files if folder_type_map[f] == 'pred']
-
-                if label_files:
-                    print(f"\nComputing min/max for {len(label_files)} label tracks...")
-                    label_minmax = compute_global_minmax(label_files, chrom, start, end, track_type='label')
-                    if label_minmax and label_minmax.get('label'):
-                        computed_min, computed_max = label_minmax['label']
-                        if label_min is None:
-                            label_min = computed_min
-                        if label_max is None:
-                            label_max = computed_max
-
-                if pred_files:
-                    print(f"Computing min/max for {len(pred_files)} pred tracks...")
-                    pred_minmax = compute_global_minmax(pred_files, chrom, start, end, track_type='pred')
-                    if pred_minmax and pred_minmax.get('pred'):
-                        computed_min, computed_max = pred_minmax['pred']
-                        if pred_min is None:
-                            pred_min = computed_min
-                        if pred_max is None:
-                            pred_max = computed_max
-
-            # Print scale settings
-            print("\nScale settings:")
-            if label_min is not None or label_max is not None:
-                print(f"  Label tracks: [{label_min}, {label_max}]")
-            else:
-                print(f"  Label tracks: auto")
-            if pred_min is not None or pred_max is not None:
-                print(f"  Pred tracks: [{pred_min}, {pred_max}]")
-            else:
-                print(f"  Pred tracks: auto")
+                # Compute min/max per modality
+                minmax_per_modality = compute_minmax_per_modality(all_bigwig_files, chrom, start, end, track_type_map=folder_type_map)
 
             print("\nSelected tracks:")
             for i, bw in enumerate(all_bigwig_files, 1):
@@ -1110,6 +1308,23 @@ Examples:
             config_file = output_path.parent / f"{output_path.stem}_config.ini"
             gtf_file = None if args.no_gtf else args.gtf
 
+            # Check if all tracks share a common modality suffix
+            track_names_for_suffix_check = []
+            for bw_file in all_bigwig_files:
+                track_name = bw_file.stem
+                # Remove prefixes
+                if track_name.startswith("BasalGanglia-"):
+                    track_name = track_name[len("BasalGanglia-"):]
+                elif track_name.startswith("MiniAtlas-"):
+                    track_name = track_name[len("MiniAtlas-"):]
+                track_names_for_suffix_check.append(track_name)
+
+            common_suffix = get_common_suffix(track_names_for_suffix_check)
+            if common_suffix:
+                print(f"\nAll tracks share common suffix '{common_suffix}' - will remove it from display names")
+            else:
+                print(f"\nTracks have different suffixes - keeping them for distinction")
+
             # Build config manually to handle folder-based coloring
             config_lines = []
 
@@ -1117,7 +1332,8 @@ Examples:
                 folder_type = folder_type_map[bw_file]
 
                 # Extract track name from filename
-                track_name = bw_file.stem
+                track_name_orig = bw_file.stem
+                track_name = track_name_orig
 
                 # Remove prefixes if present
                 if track_name.startswith("BasalGanglia-"):
@@ -1128,20 +1344,30 @@ Examples:
                 # Set color based on folder type
                 track_color = "#1f77b4" if folder_type == 'label' else "#d62728"  # Blue for label, Red for pred
 
-                # Set min/max based on folder type
-                if folder_type == 'label':
-                    min_val = label_min
-                    max_val = label_max
-                else:  # pred
-                    min_val = pred_min
-                    max_val = pred_max
+                # Get modality for min/max lookup
+                modality = get_modality_suffix(track_name_orig)
+                if modality is None:
+                    modality = 'none'
 
-                # Remove modality suffixes for cleaner display
-                track_lower_temp = track_name.lower()
-                for modality in ["_atac", "_rna", "_k27ac", "_k27me3", "_k9me3", "_rnaminus", "_rnaplus"]:
-                    if track_lower_temp.endswith(modality):
-                        track_name = track_name[:-len(modality)]
-                        break
+                # Look up min/max from per-modality dict
+                min_val = None
+                max_val = None
+                if (folder_type, modality) in minmax_per_modality:
+                    min_val, max_val = minmax_per_modality[(folder_type, modality)]
+                else:
+                    # Fallback to user-specified values
+                    if folder_type == 'label' and (args.label_min is not None or args.label_max is not None):
+                        min_val = args.label_min
+                        max_val = args.label_max
+                    elif folder_type == 'pred' and (args.pred_min is not None or args.pred_max is not None):
+                        min_val = args.pred_min
+                        max_val = args.pred_max
+
+                # Remove modality suffix ONLY if all tracks share it
+                if common_suffix:
+                    track_lower_temp = track_name.lower()
+                    if track_lower_temp.endswith(common_suffix):
+                        track_name = track_name[:-len(common_suffix)]
 
                 # Add suffix to indicate pred vs label
                 display_name = f"{track_name} ({folder_type})"
@@ -1271,42 +1497,20 @@ Examples:
     # Find and filter bigwig files
     bigwig_files = find_bigwig_files(args.bigwig_dir, args.tracks)
 
-    # Compute global min/max for label and pred tracks
-    label_min = args.label_min
-    label_max = args.label_max
-    pred_min = args.pred_min
-    pred_max = args.pred_max
+    # Compute per-modality min/max for label and pred tracks
+    minmax_per_modality = {}
 
     if not args.no_auto_scale:
-        # Compute min/max from data
-        minmax_data = compute_global_minmax(bigwig_files, chrom, start, end)
+        # Compute min/max per modality from data
+        minmax_per_modality = compute_minmax_per_modality(bigwig_files, chrom, start, end)
 
-        if minmax_data:
-            # Use computed values if not overridden by user
-            if minmax_data.get('label'):
-                computed_label_min, computed_label_max = minmax_data['label']
-                if label_min is None:
-                    label_min = computed_label_min
-                if label_max is None:
-                    label_max = computed_label_max
-
-            if minmax_data.get('pred'):
-                computed_pred_min, computed_pred_max = minmax_data['pred']
-                if pred_min is None:
-                    pred_min = computed_pred_min
-                if pred_max is None:
-                    pred_max = computed_pred_max
-
-    # Print scale settings
-    print("\nScale settings:")
-    if label_min is not None or label_max is not None:
-        print(f"  Label tracks: [{label_min}, {label_max}]")
-    else:
-        print(f"  Label tracks: auto")
-    if pred_min is not None or pred_max is not None:
-        print(f"  Pred tracks: [{pred_min}, {pred_max}]")
-    else:
-        print(f"  Pred tracks: auto")
+    # Override with user-specified values if provided
+    if args.label_min is not None or args.label_max is not None or args.pred_min is not None or args.pred_max is not None:
+        print("\nUser-specified min/max values:")
+        if args.label_min is not None or args.label_max is not None:
+            print(f"  Label tracks: [{args.label_min}, {args.label_max}]")
+        if args.pred_min is not None or args.pred_max is not None:
+            print(f"  Pred tracks: [{args.pred_min}, {args.pred_max}]")
 
     print("\nSelected tracks:")
     for i, bw in enumerate(bigwig_files, 1):
@@ -1325,8 +1529,9 @@ Examples:
 
     create_tracks_config(bigwig_files, config_file,
                         height=args.height, default_color=args.color,
-                        label_min=label_min, label_max=label_max,
-                        pred_min=pred_min, pred_max=pred_max,
+                        label_min=args.label_min, label_max=args.label_max,
+                        pred_min=args.pred_min, pred_max=args.pred_max,
+                        minmax_per_modality=minmax_per_modality,
                         gtf_file=gtf_file, gtf_height=args.gtf_height,
                         fontsize=args.fontsize, gtf_fontsize=args.gtf_fontsize,
                         axis_fontsize=args.axis_fontsize,

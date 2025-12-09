@@ -9,10 +9,13 @@ Input types:
 1. Gene name: --gene GENE_NAME (extracts exons from GTF)
 2. Region: --region chr1:1000-2000
 3. Variant: --variant chr1:1000:A:T (reference allele and alternative allele)
+4. Saturation mutagenesis: --sat_mutagenesis chr1:1000 or chr1:1000-2000 (all possible SNVs)
 
 Output:
 - For gene/region: pred/ and label/ folders with bigwig files
 - For variant: label/, pred/ (reference), and alt/ (alternative) folders with bigwig files
+- For saturation mutagenesis: TSV files with variant effect scores
+  - If --gene is also provided: includes gene-specific statistics (diff_gene_sum, diff_gene_mean, gene_length)
 
 Usage examples:
     # Gene-based inference
@@ -23,6 +26,12 @@ Usage examples:
 
     # Variant effect prediction
     python 01_0_quick_inference_bigwig.py --variant chr1:154426970:G:A --output variant_rs1234
+
+    # Saturation mutagenesis
+    python 01_0_quick_inference_bigwig.py --sat_mutagenesis chr1:154426970 --output saturation_results
+
+    # Saturation mutagenesis with gene-specific statistics
+    python 01_0_quick_inference_bigwig.py --sat_mutagenesis chr12:40208963 --gene LRRK2 --output saturation_LRRK2
 """
 
 import argparse
@@ -239,6 +248,31 @@ class RegionInference:
         except:
             raise ValueError(f"Invalid variant format: {variant_str}. Expected format: chr1:1000:A:T")
 
+    def parse_sat_region(self, region_str):
+        """
+        Parse saturation mutagenesis region string.
+
+        Args:
+            region_str: Region string in format 'chr1:1000' (single position)
+                       or 'chr1:1000-2000' (range)
+
+        Returns:
+            tuple: (chr, start, end) where start==end for single position
+        """
+        try:
+            chr_part, pos_part = region_str.split(':')
+            if '-' in pos_part:
+                # Range format: chr1:1000-2000
+                start, end = map(int, pos_part.split('-'))
+            else:
+                # Single position format: chr1:1000
+                pos = int(pos_part)
+                start = pos
+                end = pos
+            return chr_part, start, end
+        except:
+            raise ValueError(f"Invalid region format: {region_str}. Expected format: chr1:1000 or chr1:1000-2000")
+
     def get_gene_exons(self, gene_name, gtf_path=None):
         """
         Extract exon regions for a gene from GTF file.
@@ -404,6 +438,226 @@ class RegionInference:
             alt_pred = self.model(mut_tensor, use_head).detach().cpu().numpy().squeeze(0)
 
         return ref_pred, alt_pred, real_start, real_end
+
+    def run_saturation_mutagenesis(self, chr, start_pos, end_pos, use_head='regression', output_dir=None,
+                                   gene_exons=None, gene_name=None):
+        """
+        Run saturation mutagenesis on a region (all possible single nucleotide variants).
+
+        Args:
+            chr: Chromosome
+            start_pos: Start position (1-based, inclusive)
+            end_pos: End position (1-based, inclusive)
+            use_head: Which prediction head to use
+            output_dir: Output directory to save results
+            gene_exons: Optional list of (start, end) tuples for gene exons (0-based)
+            gene_name: Optional gene name
+
+        Returns:
+            pandas DataFrame with columns:
+                - position: genomic position
+                - ref: reference allele
+                - alt: alternative allele
+                - track_name: name of the track
+                - ref_pred_mean: reference prediction (mean over all windows)
+                - alt_pred_mean: alternative prediction (mean over all windows)
+                - diff_mean: alt_pred_mean - ref_pred_mean (global mean)
+                - ref_pred_max: max reference prediction
+                - alt_pred_max: max alternative prediction
+                - diff_max: max absolute difference (global)
+                - diff_local_mean: mean difference in windows within +-500bp of variant
+                - diff_local_max: max absolute difference in windows within +-500bp of variant
+                - diff_gene_sum: sum of differences in windows overlapping gene exons (if gene provided)
+                - diff_gene_mean: mean difference in windows overlapping gene exons (if gene provided)
+                - gene_length: number of bins overlapping gene exons (if gene provided)
+                - gene_name: name of the gene (if gene provided)
+                - window_start: start of prediction window
+                - window_end: end of prediction window
+        """
+        logger.info(f"Running saturation mutagenesis on {chr}:{start_pos}-{end_pos}")
+
+        # Get reference sequence for the region
+        token_dict = self.fasta(
+            chr_name=chr,
+            start=start_pos - 1,  # Convert to 0-based
+            end=end_pos,  # End is exclusive
+            return_augs=False,
+            return_rela_idx=True
+        )
+
+        ref_seq_onehot = token_dict["one_hot"]
+        real_start, real_end = token_dict["real_region"]
+
+        # Convert one-hot to string for reference alleles
+        def onehot_to_str(seq_onehot):
+            mapping = {(1, 0, 0, 0): "A", (0, 1, 0, 0): "C", (0, 0, 1, 0): "G", (0, 0, 0, 1): "T", (0, 0, 0, 0): "N"}
+            seq_str = ""
+            for vec in seq_onehot:
+                key = tuple((vec > 0.5).int().tolist())
+                seq_str += mapping.get(key, "N")
+            return seq_str
+
+        # Get reference sequence string
+        ref_seq_str = onehot_to_str(ref_seq_onehot)
+
+        # Find the relative positions within the fetched sequence
+        s_idx, e_idx = token_dict["rela_idx"]
+
+        # All possible nucleotides
+        nucleotides = ['A', 'C', 'G', 'T']
+
+        # Store results
+        all_results = []
+
+        # Iterate through each position in the region
+        n_positions = end_pos - start_pos + 1
+        logger.info(f"Testing {n_positions} positions with up to 3 alternative alleles each")
+
+        for i in tqdm(range(n_positions), desc="Saturation mutagenesis"):
+            pos = start_pos + i
+            pos_idx = s_idx + i  # Index in the fetched sequence
+
+            # Get reference allele at this position
+            ref_allele = ref_seq_str[pos_idx]
+
+            if ref_allele == 'N':
+                logger.warning(f"Skipping position {pos} with reference allele 'N'")
+                continue
+
+            # Test all alternative alleles
+            for alt_allele in nucleotides:
+                if alt_allele == ref_allele:
+                    continue  # Skip if same as reference
+
+                # Predict variant effect
+                ref_pred, alt_pred, window_start, window_end = self.predict_variant_effect(
+                    chr, pos, ref_allele, alt_allele, use_head
+                )
+
+                # Calculate difference
+                diff = alt_pred - ref_pred
+
+                # Identify local windows within +-500bp of the variant position
+                # Each window has a center position
+                local_window_radius = 500  # bp
+                n_windows = ref_pred.shape[0]
+                window_centers = []
+                for w_idx in range(n_windows):
+                    window_center = window_start + w_idx * self.window_size + self.window_size // 2
+                    window_centers.append(window_center)
+
+                # Find windows within +-500bp of variant position
+                local_window_mask = []
+                for w_center in window_centers:
+                    if abs(w_center - pos) <= local_window_radius:
+                        local_window_mask.append(True)
+                    else:
+                        local_window_mask.append(False)
+
+                local_window_mask = np.array(local_window_mask)
+
+                # Identify gene-overlapping windows if gene exons provided
+                gene_window_mask = None
+                if gene_exons is not None:
+                    gene_window_mask = []
+                    for w_idx in range(n_windows):
+                        window_start_pos = window_start + w_idx * self.window_size
+                        window_end_pos = window_start_pos + self.window_size
+
+                        # Check if this window overlaps with any exon
+                        overlaps_exon = False
+                        for exon_start, exon_end in gene_exons:
+                            # Check overlap: window and exon overlap if they don't not-overlap
+                            # Not-overlap: window_end <= exon_start or window_start >= exon_end
+                            if not (window_end_pos <= exon_start or window_start_pos >= exon_end):
+                                overlaps_exon = True
+                                break
+
+                        gene_window_mask.append(overlaps_exon)
+
+                    gene_window_mask = np.array(gene_window_mask)
+
+                # Average predictions over windows for each track
+                for track_idx, track_name in enumerate(self.label_names):
+                    # Global statistics (all windows)
+                    diff_track = diff[:, track_idx]
+
+                    # Local statistics (windows within +-500bp)
+                    if np.any(local_window_mask):
+                        diff_local = diff_track[local_window_mask]
+                        diff_local_mean = float(np.mean(diff_local))
+                        diff_local_max = float(np.max(np.abs(diff_local)))
+                    else:
+                        # Fallback if no local windows found
+                        diff_local_mean = float(np.mean(diff_track))
+                        diff_local_max = float(np.max(np.abs(diff_track)))
+
+                    # Gene statistics (windows overlapping gene exons)
+                    diff_gene_sum = None
+                    diff_gene_mean = None
+                    gene_length_bins = None
+                    if gene_window_mask is not None and np.any(gene_window_mask):
+                        diff_gene = diff_track[gene_window_mask]
+                        diff_gene_sum = float(np.sum(diff_gene))
+                        diff_gene_mean = float(np.mean(diff_gene))
+                        gene_length_bins = int(np.sum(gene_window_mask))
+
+                    result = {
+                        'position': pos,
+                        'ref': ref_allele,
+                        'alt': alt_allele,
+                        'track_name': track_name,
+                        'ref_pred_mean': float(np.mean(ref_pred[:, track_idx])),
+                        'alt_pred_mean': float(np.mean(alt_pred[:, track_idx])),
+                        'diff_mean': float(np.mean(diff_track)),
+                        'ref_pred_max': float(np.max(ref_pred[:, track_idx])),
+                        'alt_pred_max': float(np.max(alt_pred[:, track_idx])),
+                        'diff_max': float(np.max(np.abs(diff_track))),
+                        'diff_local_mean': diff_local_mean,
+                        'diff_local_max': diff_local_max,
+                        'diff_gene_sum': diff_gene_sum,
+                        'diff_gene_mean': diff_gene_mean,
+                        'gene_length': gene_length_bins,
+                        'gene_name': gene_name,
+                        'window_start': window_start,
+                        'window_end': window_end,
+                    }
+                    all_results.append(result)
+
+        # Convert to DataFrame
+        results_df = pd.DataFrame(all_results)
+
+        # Save results if output directory is provided
+        if output_dir:
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
+
+            # Save full results as TSV
+            results_file = output_path / "saturation_mutagenesis_results.tsv"
+            results_df.to_csv(results_file, sep='\t', index=False)
+            logger.info(f"Saved saturation mutagenesis results to {results_file}")
+
+            # Create summary pivot table: position x track
+            # Prioritize diff_gene_sum if available, otherwise use diff_local_mean
+            if 'diff_gene_sum' in results_df.columns and results_df['diff_gene_sum'].notna().any():
+                # Use gene-specific sum
+                summary_column = 'diff_gene_sum'
+                agg_func = 'max'  # Max across alternative alleles for each position
+                logger.info("Using diff_gene_sum for summary pivot table")
+            else:
+                # Use local mean
+                summary_column = 'diff_local_mean'
+                agg_func = 'max'  # Max across alternative alleles for each position
+                logger.info("Using diff_local_mean for summary pivot table")
+
+            pivot_data = results_df.groupby(['position', 'track_name'])[summary_column].agg(agg_func).reset_index()
+            pivot_table = pivot_data.pivot(index='position', columns='track_name', values=summary_column)
+
+            pivot_file = output_path / "saturation_mutagenesis_summary.tsv"
+            pivot_table.to_csv(pivot_file, sep='\t')
+            logger.info(f"Saved summary pivot table to {pivot_file} (using {summary_column})")
+
+        return results_df
 
     def predict_region(self, chr, start, end, use_head='regression'):
         """
@@ -670,14 +924,27 @@ Examples:
 
   # Variant effect prediction
   python 01_0_quick_inference_bigwig.py --variant chr1:154426970:G:A --exp_name my_exp --chk best --output outputs/variant_rs1234
+
+  # Saturation mutagenesis (single position)
+  python 01_0_quick_inference_bigwig.py --sat_mutagenesis chr1:154426970 --exp_name my_exp --chk best --output outputs/saturation_chr1_154426970
+
+  # Saturation mutagenesis (region)
+  python 01_0_quick_inference_bigwig.py --sat_mutagenesis chr1:154426970-154426975 --exp_name my_exp --chk best --output outputs/saturation_chr1_region
+
+  # Saturation mutagenesis with gene-specific statistics
+  python 01_0_quick_inference_bigwig.py --sat_mutagenesis chr12:40208963 --gene LRRK2 --exp_name my_exp --chk best --output outputs/saturation_LRRK2
         """
     )
 
-    # Input specification (mutually exclusive)
+    # Input specification (mutually exclusive for primary modes)
     input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument('--gene', type=str, help='Gene name (e.g., GRIN2A)')
     input_group.add_argument('--region', type=str, help='Genomic region (e.g., chr1:100000-200000)')
     input_group.add_argument('--variant', type=str, help='Variant (e.g., chr1:154426970:G:A)')
+    input_group.add_argument('--sat_mutagenesis', type=str, help='Saturation mutagenesis region (e.g., chr1:154426970 or chr1:154426970-154426975)')
+
+    # Gene can be used alone or with saturation mutagenesis
+    parser.add_argument('--gene', type=str, default=None,
+                       help='Gene name (e.g., GRIN2A). Can be used alone for gene inference, or with --sat_mutagenesis to calculate gene-specific statistics.')
 
     # Model parameters - Method 1: Direct paths
     parser.add_argument('--checkpoint', type=str, default=None,
@@ -710,6 +977,10 @@ Examples:
                        help='Device to use (cuda or cpu)')
 
     args = parser.parse_args()
+
+    # Validate input: need at least --gene or one of the mutually exclusive options
+    if not args.gene and not args.region and not args.variant and not args.sat_mutagenesis:
+        parser.error("Must specify at least one of: --gene, --region, --variant, or --sat_mutagenesis")
 
     # Resolve model paths
     # Method 1: Direct checkpoint path
@@ -747,8 +1018,41 @@ Examples:
     logger.info(f"Output directory: {output_dir}")
 
     # Process based on input type
-    if args.gene:
-        # Gene mode
+    # Check saturation mutagenesis first (can be combined with --gene)
+    if args.sat_mutagenesis:
+        # Saturation mutagenesis mode
+        logger.info(f"Mode: Saturation mutagenesis for {args.sat_mutagenesis}")
+
+        # Parse region
+        chr, start_pos, end_pos = inference.parse_sat_region(args.sat_mutagenesis)
+
+        # Check if gene is also provided for gene-specific statistics
+        gene_exons = None
+        gene_name = None
+        if args.gene:
+            logger.info(f"Extracting exons for gene: {args.gene}")
+            exons_with_chr = inference.get_gene_exons(args.gene, args.gtf)
+
+            # Convert to list of (start, end) tuples without chromosome
+            gene_exons = [(start, end) for _, start, end in exons_with_chr]
+            gene_name = args.gene
+            logger.info(f"Found {len(gene_exons)} exons for gene {gene_name}")
+
+        # Run saturation mutagenesis
+        results_df = inference.run_saturation_mutagenesis(
+            chr, start_pos, end_pos, output_dir=output_dir,
+            gene_exons=gene_exons, gene_name=gene_name
+        )
+
+        logger.info(f"Saturation mutagenesis complete")
+        logger.info(f"Region: {chr}:{start_pos}-{end_pos}")
+        if gene_name:
+            logger.info(f"Gene: {gene_name} with {len(gene_exons)} exons")
+        logger.info(f"Total variants tested: {len(results_df) // len(inference.label_names)}")
+        logger.info(f"Results saved to: {output_dir}")
+
+    elif args.gene:
+        # Gene mode (without saturation mutagenesis)
         logger.info(f"Mode: Gene-based inference for {args.gene}")
 
         # Get exons
@@ -885,6 +1189,12 @@ Examples:
         print(f"    --bigwig-dir {output_dir}/alt \\")
         print(f"    --region {chr}:{pos-5000}-{pos+5000} \\")
         print(f"    --output {output_dir}/alt_visualization.pdf")
+    elif args.sat_mutagenesis:
+        print(f"  # View results in output directory:")
+        print(f"  cat {output_dir}/saturation_mutagenesis_results.tsv")
+        print()
+        print(f"  # Summary matrix (position x track):")
+        print(f"  cat {output_dir}/saturation_mutagenesis_summary.tsv")
     else:
         print(f"  python Analysis/00_visualize_data_pygenometrack.py \\")
         print(f"    --bigwig-dir {output_dir}/pred \\")
