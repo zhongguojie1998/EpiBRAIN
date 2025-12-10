@@ -875,17 +875,56 @@ class RegionInference:
             logger.warning(f"Error untransforming predictions for {track_name}: {e}")
             return predictions
 
+    def untransform_all_predictions(self, predictions, type='pred'):
+        """
+        Untransform all predictions back to original scale.
+
+        Args:
+            predictions: Numpy array (n_window, n_tracks)
+
+        Returns:
+            Untransformed predictions (n_window, n_tracks)
+        """
+        untransformed = predictions.copy()
+
+        logger.info("Untransforming predictions back to original scale")
+
+        # Untransform each track
+        for track_idx, track_name in enumerate(self.label_names):
+            # Get the correct dimension index from label_meta
+            if self.label_meta is not None and 'dim' in self.label_meta.columns:
+                # Find the row for this track name
+                matching_rows = self.label_meta[self.label_meta['trial'] == track_name]
+                if len(matching_rows) > 0:
+                    dim_idx = int(matching_rows.iloc[0]['dim'])
+                else:
+                    # Fallback to sequential index if not found
+                    logger.warning(f"Track {track_name} not found in label_meta, using sequential index")
+                    dim_idx = track_idx
+            else:
+                # Fallback to sequential index if no label_meta
+                raise ValueError("label_meta is not available or does not contain 'dim' column")
+
+            # Untransform this track
+            if type == 'pred':
+                untransformed[:, dim_idx] = self.untransform_predictions(untransformed[:, dim_idx], track_name)
+            else:
+                untransformed[:, track_idx] = self.untransform_predictions(untransformed[:, track_idx], track_name)
+        return untransformed
+
     def export_to_bigwig(self, predictions, chr, window_start, track_names, output_dir, prefix="pred"):
         """
         Export predictions to bigwig files.
 
+        NOTE: Predictions should already be untransformed to original scale before calling this function.
+
         Args:
-            predictions: Numpy array (n_window, n_tracks)
+            predictions: Numpy array (n_window, n_tracks) - should be in original scale
             chr: Chromosome
             window_start: Start position of first window
             track_names: List of track names
             output_dir: Output directory
-            prefix: Prefix for output folder (pred, label, alt)
+            prefix: Prefix for output folder (pred, label, alt, diff)
         """
         output_path = Path(output_dir) / prefix
         output_path.mkdir(parents=True, exist_ok=True)
@@ -925,10 +964,11 @@ class RegionInference:
                 # Fallback to sequential index if no label_meta
                 raise ValueError("label_meta is not available or does not contain 'dim' column")
 
-            # Untransform predictions for this track back to original scale
-            track_predictions = predictions[:, dim_idx]
-            if prefix in ["pred", "alt"]:  # Only untransform model predictions, not labels
-                track_predictions = self.untransform_predictions(track_predictions, track_name)
+            # Get track predictions - no untransformation here anymore
+            if prefix == 'label':
+                track_predictions = predictions[:, track_idx]
+            else:
+                track_predictions = predictions[:, dim_idx]
 
             # Create bigwig file
             bw = pyBigWig.open(str(output_file), "w")
@@ -1119,9 +1159,12 @@ Examples:
         # Predict
         predictions, window_start, window_end = inference.predict_region(chr, start, end)
 
+        # Untransform predictions back to original scale
+        predictions_untransformed = inference.untransform_all_predictions(predictions)
+
         # Export predictions
         inference.export_to_bigwig(
-            predictions, chr, window_start,
+            predictions_untransformed, chr, window_start,
             inference.label_names, output_dir, prefix="pred"
         )
 
@@ -1129,8 +1172,9 @@ Examples:
         if not args.no_labels:
             labels = inference.get_labels_for_region(chr, window_start, window_end)
             if labels is not None:
+                labels_untransformed = inference.untransform_all_predictions(labels, type='label')
                 inference.export_to_bigwig(
-                    labels, chr, window_start,
+                    labels_untransformed, chr, window_start,
                     inference.label_names, output_dir, prefix="label"
                 )
 
@@ -1147,9 +1191,12 @@ Examples:
         # Predict
         predictions, window_start, window_end = inference.predict_region(chr, start, end)
 
+        # Untransform predictions back to original scale
+        predictions_untransformed = inference.untransform_all_predictions(predictions)
+
         # Export predictions
         inference.export_to_bigwig(
-            predictions, chr, window_start,
+            predictions_untransformed, chr, window_start,
             inference.label_names, output_dir, prefix="pred"
         )
 
@@ -1157,8 +1204,9 @@ Examples:
         if not args.no_labels:
             labels = inference.get_labels_for_region(chr, window_start, window_end)
             if labels is not None:
+                labels_untransformed = inference.untransform_all_predictions(labels, type='label')
                 inference.export_to_bigwig(
-                    labels, chr, window_start,
+                    labels_untransformed, chr, window_start,
                     inference.label_names, output_dir, prefix="label"
                 )
 
@@ -1177,15 +1225,19 @@ Examples:
             chr, pos, ref, alt
         )
 
+        # Untransform predictions back to original scale
+        ref_pred_untransformed = inference.untransform_all_predictions(ref_pred)
+        alt_pred_untransformed = inference.untransform_all_predictions(alt_pred)
+
         # Export reference predictions
         inference.export_to_bigwig(
-            ref_pred, chr, window_start,
+            ref_pred_untransformed, chr, window_start,
             inference.label_names, output_dir, prefix="pred"
         )
 
         # Export alternative predictions
         inference.export_to_bigwig(
-            alt_pred, chr, window_start,
+            alt_pred_untransformed, chr, window_start,
             inference.label_names, output_dir, prefix="alt"
         )
 
@@ -1193,13 +1245,14 @@ Examples:
         if not args.no_labels:
             labels = inference.get_labels_for_region(chr, window_start, window_end)
             if labels is not None:
+                labels_untransformed = inference.untransform_all_predictions(labels, type='label')
                 inference.export_to_bigwig(
-                    labels, chr, window_start,
+                    labels_untransformed, chr, window_start,
                     inference.label_names, output_dir, prefix="label"
                 )
 
-        # Calculate and export difference (alt - ref)
-        diff = alt_pred - ref_pred
+        # Calculate and export difference (alt - ref) using untransformed predictions
+        diff = alt_pred_untransformed - ref_pred_untransformed
         inference.export_to_bigwig(
             diff, chr, window_start,
             inference.label_names, output_dir, prefix="diff"
