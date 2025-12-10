@@ -160,7 +160,9 @@ class RegionInference:
             self.label_names = [f"track_{i}" for i in range(n_tracks)]
 
         # Build reverse complement swap index for RNAplus/RNAminus tracks
-        self.reverse_complement_swap_index = self._build_rc_swap_index()
+        self.rc_orig_index, self.rc_swap_index = self._build_rc_swap_index()
+        if self.rc_swap_index is not None:
+            logger.info("Built reverse complement swap index for RNAplus/RNAminus tracks")
 
         logger.info(f"Model ready. Sequence length: {self.seq_len}, Window size: {self.window_size}, N windows: {self.n_window}")
         logger.info(f"Number of tracks: {len(self.label_names)}")
@@ -169,33 +171,39 @@ class RegionInference:
         """
         Build reverse complement swap index for RNAplus/RNAminus tracks.
 
+        When doing reverse complement, RNAplus and RNAminus need to be swapped
+        because the strand orientation changes.
+
         Returns:
-            numpy array: Swap index where RNAplus and RNAminus are swapped
+            tuple: (org_index, swap_index) where both are numpy arrays
         """
         if self.label_meta is None:
-            return None
+            return None, None
 
         # Check if we have RNAplus and RNAminus tracks
-        if 'modality' not in self.label_meta.columns or 'cell_type' not in self.label_meta.columns:
-            logger.warning("Missing 'modality' or 'cell_type' columns in label metadata, skipping RC swap index")
-            return None
+        if 'modality' not in self.label_meta.columns:
+            return None, None
 
         has_plus = 'RNAplus' in self.label_meta['modality'].values
         has_minus = 'RNAminus' in self.label_meta['modality'].values
 
         if not (has_plus and has_minus):
-            logger.info("No RNAplus/RNAminus tracks found, skipping RC swap index")
-            return None
+            return None, None
 
         # Build swap index using 'dim' column (track index in predictions)
         swap_index = []
+        org_index = self.label_meta['dim'].tolist()
         for i, row in self.label_meta.iterrows():
             if row['modality'] == 'RNAplus':
                 # Find the index of RNAminus for corresponding cell type
-                matching = self.label_meta[
-                    (self.label_meta['modality'] == 'RNAminus') &
-                    (self.label_meta['cell_type'] == row['cell_type'])
-                ]
+                if 'cell_type' in self.label_meta.columns:
+                    matching = self.label_meta[
+                        (self.label_meta['modality'] == 'RNAminus') &
+                        (self.label_meta['cell_type'] == row['cell_type'])
+                    ]
+                else:
+                    # If no cell_type column, match by trial name pattern
+                    matching = self.label_meta[self.label_meta['modality'] == 'RNAminus']
                 if len(matching) > 0:
                     # Use the 'dim' column value (track index in pred)
                     swap_index.append(int(matching.iloc[0]['dim']))
@@ -203,10 +211,14 @@ class RegionInference:
                     swap_index.append(int(row['dim']))
             elif row['modality'] == 'RNAminus':
                 # Find the index of RNAplus for corresponding cell type
-                matching = self.label_meta[
-                    (self.label_meta['modality'] == 'RNAplus') &
-                    (self.label_meta['cell_type'] == row['cell_type'])
-                ]
+                if 'cell_type' in self.label_meta.columns:
+                    matching = self.label_meta[
+                        (self.label_meta['modality'] == 'RNAplus') &
+                        (self.label_meta['cell_type'] == row['cell_type'])
+                    ]
+                else:
+                    # If no cell_type column, match by trial name pattern
+                    matching = self.label_meta[self.label_meta['modality'] == 'RNAplus']
                 if len(matching) > 0:
                     # Use the 'dim' column value (track index in pred)
                     swap_index.append(int(matching.iloc[0]['dim']))
@@ -217,7 +229,7 @@ class RegionInference:
                 swap_index.append(int(row['dim']))
 
         logger.info(f"Built reverse complement swap index for RNAplus/RNAminus tracks")
-        return np.array(swap_index)
+        return np.array(org_index), np.array(swap_index)
 
     def parse_region(self, region_str):
         """
@@ -372,8 +384,8 @@ class RegionInference:
                 pred_rev = np.flip(pred_rev, axis=0)
 
                 # Swap RNAplus and RNAminus tracks if needed
-                if self.reverse_complement_swap_index is not None:
-                    pred_rev = pred_rev[:, self.reverse_complement_swap_index]
+                if self.rc_swap_index is not None:
+                    pred_rev[:, self.rc_orig_index] = pred_rev[:, self.rc_swap_index]
 
                 # Average forward and reverse predictions
                 pred = (pred_fwd + pred_rev) / 2.0
@@ -429,15 +441,40 @@ class RegionInference:
         mut_seq_onehot = wt_seq_onehot.clone()
         mut_seq_onehot[s_idx:e_idx] = alt_nt_onehot
 
+        # Create reverse complement sequences for augmentation
+        wt_seq_onehot_rev = one_hot_reverse_complement(wt_seq_onehot)
+        mut_seq_onehot_rev = one_hot_reverse_complement(mut_seq_onehot)
+
         logger.info(f"Predicting reference and alternative sequences for {chr}:{real_start}-{real_end}")
 
-        # Predict both sequences
+        # Predict both sequences with reverse complement augmentation
         with torch.no_grad():
-            wt_tensor = wt_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(self.device)
-            ref_pred = self.model(wt_tensor, use_head).detach().cpu().numpy().squeeze(0)
+            # Forward strand predictions
+            wt_tensor_fwd = wt_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(self.device)
+            ref_pred_fwd = self.model(wt_tensor_fwd, use_head).detach().cpu().numpy().squeeze(0)
 
-            mut_tensor = mut_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(self.device)
-            alt_pred = self.model(mut_tensor, use_head).detach().cpu().numpy().squeeze(0)
+            mut_tensor_fwd = mut_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(self.device)
+            alt_pred_fwd = self.model(mut_tensor_fwd, use_head).detach().cpu().numpy().squeeze(0)
+
+            # Reverse strand predictions
+            wt_tensor_rev = wt_seq_onehot_rev.unsqueeze(0).permute(0, 2, 1).to(self.device)
+            ref_pred_rev = self.model(wt_tensor_rev, use_head).detach().cpu().numpy().squeeze(0)
+
+            mut_tensor_rev = mut_seq_onehot_rev.unsqueeze(0).permute(0, 2, 1).to(self.device)
+            alt_pred_rev = self.model(mut_tensor_rev, use_head).detach().cpu().numpy().squeeze(0)
+
+            # Flip predictions along sequence dimension (reverse order)
+            ref_pred_rev = np.flip(ref_pred_rev, axis=0)
+            alt_pred_rev = np.flip(alt_pred_rev, axis=0)
+
+            # Swap RNAplus and RNAminus tracks if needed
+            if self.rc_swap_index is not None:
+                ref_pred_rev[:, self.rc_orig_index] = ref_pred_rev[:, self.rc_swap_index]
+                alt_pred_rev[:, self.rc_orig_index] = alt_pred_rev[:, self.rc_swap_index]
+
+            # Average forward and reverse predictions for strand-agnostic results
+            ref_pred = (ref_pred_fwd + ref_pred_rev) / 2.0
+            alt_pred = (alt_pred_fwd + alt_pred_rev) / 2.0
 
         return ref_pred, alt_pred, real_start, real_end
 
@@ -874,8 +911,22 @@ class RegionInference:
         for track_idx, track_name in enumerate(tqdm(track_names, desc=f"Exporting {prefix}")):
             output_file = output_path / f"{track_name}.bw"
 
+            # Get the correct dimension index from label_meta
+            if self.label_meta is not None and 'dim' in self.label_meta.columns:
+                # Find the row for this track name
+                matching_rows = self.label_meta[self.label_meta['trial'] == track_name]
+                if len(matching_rows) > 0:
+                    dim_idx = int(matching_rows.iloc[0]['dim'])
+                else:
+                    # Fallback to sequential index if not found
+                    logger.warning(f"Track {track_name} not found in label_meta, using sequential index")
+                    dim_idx = track_idx
+            else:
+                # Fallback to sequential index if no label_meta
+                raise ValueError("label_meta is not available or does not contain 'dim' column")
+
             # Untransform predictions for this track back to original scale
-            track_predictions = predictions[:, track_idx]
+            track_predictions = predictions[:, dim_idx]
             if prefix in ["pred", "alt"]:  # Only untransform model predictions, not labels
                 track_predictions = self.untransform_predictions(track_predictions, track_name)
 
