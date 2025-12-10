@@ -31,3 +31,5 @@ hostfile
 
 SLDP/
 .nfs*
+
+*.pdf
