@@ -57,10 +57,11 @@ def build_rc_swap_index(label_meta):
     has_minus = 'RNAminus' in label_meta['modality'].values
 
     if not (has_plus and has_minus):
-        return None
+        return None, None
 
-    # Build swap index
+    # Build swap index using 'dim' column (track index in predictions)
     swap_index = []
+    org_index = label_meta['dim'].tolist()
     for i, row in label_meta.iterrows():
         if row['modality'] == 'RNAplus':
             # Find the index of RNAminus for corresponding cell type
@@ -73,9 +74,10 @@ def build_rc_swap_index(label_meta):
                 # If no cell_type column, match by trial name pattern
                 matching = label_meta[label_meta['modality'] == 'RNAminus']
             if len(matching) > 0:
-                swap_index.append(int(matching.index[0]))
+                # Use the 'dim' column value (track index in pred)
+                swap_index.append(int(matching.iloc[0]['dim']))
             else:
-                swap_index.append(i)
+                swap_index.append(int(row['dim']))
         elif row['modality'] == 'RNAminus':
             # Find the index of RNAplus for corresponding cell type
             if 'cell_type' in label_meta.columns:
@@ -87,14 +89,15 @@ def build_rc_swap_index(label_meta):
                 # If no cell_type column, match by trial name pattern
                 matching = label_meta[label_meta['modality'] == 'RNAplus']
             if len(matching) > 0:
-                swap_index.append(int(matching.index[0]))
+                # Use the 'dim' column value (track index in pred)
+                swap_index.append(int(matching.iloc[0]['dim']))
             else:
-                swap_index.append(i)
+                swap_index.append(int(row['dim']))
         else:
             # Don't change for other modalities
-            swap_index.append(i)
+            swap_index.append(int(row['dim']))
 
-    return np.array(swap_index)
+    return np.array(org_index), np.array(swap_index)
 
 
 def process_vcf_chunk(args):
@@ -109,7 +112,7 @@ def process_vcf_chunk(args):
     label_meta = label_meta.set_index("trial")
 
     # Build reverse complement swap index for RNA tracks
-    rc_swap_index = build_rc_swap_index(label_meta)
+    rc_orig_index, rc_swap_index = build_rc_swap_index(label_meta)
     if rc_swap_index is not None:
         logger.info("Built reverse complement swap index for RNAplus/RNAminus tracks")
 
@@ -205,8 +208,8 @@ def process_vcf_chunk(args):
 
                 # Swap RNAplus and RNAminus tracks if needed
                 if rc_swap_index is not None:
-                    pred_res_wt_rev = pred_res_wt_rev[:, rc_swap_index]
-                    pred_res_mut_rev = pred_res_mut_rev[:, rc_swap_index]
+                    pred_res_wt_rev[:, rc_orig_index] = pred_res_wt_rev[:, rc_swap_index]
+                    pred_res_mut_rev[:, rc_orig_index] = pred_res_mut_rev[:, rc_swap_index]
 
                 # Average forward and reverse predictions for strand-agnostic results
                 pred_res_wt = (pred_res_wt_fwd + pred_res_wt_rev) / 2.0

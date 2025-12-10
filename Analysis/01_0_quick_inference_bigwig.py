@@ -187,7 +187,7 @@ class RegionInference:
             logger.info("No RNAplus/RNAminus tracks found, skipping RC swap index")
             return None
 
-        # Build swap index
+        # Build swap index using 'dim' column (track index in predictions)
         swap_index = []
         for i, row in self.label_meta.iterrows():
             if row['modality'] == 'RNAplus':
@@ -197,9 +197,10 @@ class RegionInference:
                     (self.label_meta['cell_type'] == row['cell_type'])
                 ]
                 if len(matching) > 0:
-                    swap_index.append(int(matching.index[0]))
+                    # Use the 'dim' column value (track index in pred)
+                    swap_index.append(int(matching.iloc[0]['dim']))
                 else:
-                    swap_index.append(i)
+                    swap_index.append(int(row['dim']))
             elif row['modality'] == 'RNAminus':
                 # Find the index of RNAplus for corresponding cell type
                 matching = self.label_meta[
@@ -207,12 +208,13 @@ class RegionInference:
                     (self.label_meta['cell_type'] == row['cell_type'])
                 ]
                 if len(matching) > 0:
-                    swap_index.append(int(matching.index[0]))
+                    # Use the 'dim' column value (track index in pred)
+                    swap_index.append(int(matching.iloc[0]['dim']))
                 else:
-                    swap_index.append(i)
+                    swap_index.append(int(row['dim']))
             else:
                 # Don't change for other modalities
-                swap_index.append(i)
+                swap_index.append(int(row['dim']))
 
         logger.info(f"Built reverse complement swap index for RNAplus/RNAminus tracks")
         return np.array(swap_index)
