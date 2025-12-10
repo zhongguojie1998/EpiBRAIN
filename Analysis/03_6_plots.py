@@ -85,8 +85,8 @@ res_mats = {'direction': pd.DataFrame(index=single_brain_cell_types, columns=bic
 for single_brain_cell_type in single_brain_cell_types:
     for bican_cell_type in bican_cell_types:
         # get the prediction and reference
-        single_brain_eqtl = eqtl_finemap[eqtl_finemap['QTL'] == single_brain_cell_type]
-        bican_eqtl = eqtl_res[eqtl_res['cell_type'] == bican_cell_type]
+        single_brain_eqtl = eqtl_finemap[eqtl_finemap['QTL'] == single_brain_cell_type].copy()
+        bican_eqtl = eqtl_res[eqtl_res['cell_type'] == bican_cell_type].copy()
         # create snp-geneID map
         single_brain_eqtl['snp_geneID'] = single_brain_eqtl['chr'] + ":" + single_brain_eqtl['pos'].astype(int).astype(str) + ":" + single_brain_eqtl['ref'] + ":" + single_brain_eqtl['alt'] + ":" + single_brain_eqtl['QTL gene ID']
         bican_eqtl['snp_geneID'] = bican_eqtl['chr'] + ":" + bican_eqtl['pos'].astype(int).astype(str) + ":" + bican_eqtl['ref'] + ":" + bican_eqtl['alt'] + ":" + bican_eqtl['gene_id'].str.replace('\\..*', '', regex=True)
@@ -103,6 +103,7 @@ for single_brain_cell_type in single_brain_cell_types:
         bican_eqtl = bican_eqtl.loc[common_snp_geneID]
         # calculate log fold change for bican_eqtl
         bican_eqtl['lfdc'] = np.log2(bican_eqtl['alt_value']) - np.log2(bican_eqtl['ref_value'])
+        bican_eqtl['diff'] = bican_eqtl['alt_value'] / bican_eqtl['ref_value']
 
         # Get signs of both beta and lfdc
         single_brain_sign = (single_brain_eqtl['fixed_beta'] > 0).astype(int)

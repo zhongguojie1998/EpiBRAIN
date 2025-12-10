@@ -19,7 +19,7 @@ os.chdir(ROOT)
 warnings.filterwarnings("ignore")
 
 from data.data_utils import STD_CHR, ModelSeq, annotate_unmap, get_labels
-from data.tokenizer import FastaInterval, str_to_one_hot
+from data.tokenizer import FastaInterval, str_to_one_hot, one_hot_reverse_complement
 from model.model_utils import setup_model
 from utils.config import load_config
 from utils.logging import BaseLogger
@@ -36,6 +36,67 @@ def onehot_to_str(seq_onehot):
     return seq_str
 
 
+def build_rc_swap_index(label_meta):
+    """
+    Build reverse complement swap index for RNAplus/RNAminus tracks.
+
+    When doing reverse complement, RNAplus and RNAminus need to be swapped
+    because the strand orientation changes.
+
+    Returns:
+        numpy array: Swap index where RNAplus and RNAminus are swapped
+    """
+    if label_meta is None:
+        return None
+
+    # Check if we have RNAplus and RNAminus tracks
+    if 'modality' not in label_meta.columns:
+        return None
+
+    has_plus = 'RNAplus' in label_meta['modality'].values
+    has_minus = 'RNAminus' in label_meta['modality'].values
+
+    if not (has_plus and has_minus):
+        return None
+
+    # Build swap index
+    swap_index = []
+    for i, row in label_meta.iterrows():
+        if row['modality'] == 'RNAplus':
+            # Find the index of RNAminus for corresponding cell type
+            if 'cell_type' in label_meta.columns:
+                matching = label_meta[
+                    (label_meta['modality'] == 'RNAminus') &
+                    (label_meta['cell_type'] == row['cell_type'])
+                ]
+            else:
+                # If no cell_type column, match by trial name pattern
+                matching = label_meta[label_meta['modality'] == 'RNAminus']
+            if len(matching) > 0:
+                swap_index.append(int(matching.index[0]))
+            else:
+                swap_index.append(i)
+        elif row['modality'] == 'RNAminus':
+            # Find the index of RNAplus for corresponding cell type
+            if 'cell_type' in label_meta.columns:
+                matching = label_meta[
+                    (label_meta['modality'] == 'RNAplus') &
+                    (label_meta['cell_type'] == row['cell_type'])
+                ]
+            else:
+                # If no cell_type column, match by trial name pattern
+                matching = label_meta[label_meta['modality'] == 'RNAplus']
+            if len(matching) > 0:
+                swap_index.append(int(matching.index[0]))
+            else:
+                swap_index.append(i)
+        else:
+            # Don't change for other modalities
+            swap_index.append(i)
+
+    return np.array(swap_index)
+
+
 def process_vcf_chunk(args):
     chunk_data, config_path, checkpoint_path, save_base, device, use_head = args
 
@@ -46,6 +107,11 @@ def process_vcf_chunk(args):
     label_meta = pd.read_csv(f"{myconfig.logging.log_dir}/regression_label_meta.csv", index_col=1)
     # set index
     label_meta = label_meta.set_index("trial")
+
+    # Build reverse complement swap index for RNA tracks
+    rc_swap_index = build_rc_swap_index(label_meta)
+    if rc_swap_index is not None:
+        logger.info("Built reverse complement swap index for RNAplus/RNAminus tracks")
 
     # Setup model
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -95,22 +161,56 @@ def process_vcf_chunk(args):
             mut_seq_onehot = wt_seq_onehot.clone()
             mut_seq_onehot[s_idx:e_idx] = alt_nt_onehot
 
-            # get pred result
+            # create reverse complement sequences for augmentation
+            wt_seq_onehot_rev = one_hot_reverse_complement(wt_seq_onehot)
+            mut_seq_onehot_rev = one_hot_reverse_complement(mut_seq_onehot)
+
+            # get pred result with reverse complement augmentation
             with torch.no_grad():
-                pred_res_wt = (
+                # Forward strand predictions
+                pred_res_wt_fwd = (
                     model(wt_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), use_head)
                     .detach()
                     .cpu()
                     .numpy()
                     .squeeze(0)
                 )
-                pred_res_mut = (
+                pred_res_mut_fwd = (
                     model(mut_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device), use_head)
                     .detach()
                     .cpu()
                     .numpy()
                     .squeeze(0)
                 )
+
+                # Reverse strand predictions
+                pred_res_wt_rev = (
+                    model(wt_seq_onehot_rev.unsqueeze(0).permute(0, 2, 1).to(device), use_head)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .squeeze(0)
+                )
+                pred_res_mut_rev = (
+                    model(mut_seq_onehot_rev.unsqueeze(0).permute(0, 2, 1).to(device), use_head)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .squeeze(0)
+                )
+
+                # Flip predictions along sequence dimension (reverse order)
+                pred_res_wt_rev = np.flip(pred_res_wt_rev, axis=0)
+                pred_res_mut_rev = np.flip(pred_res_mut_rev, axis=0)
+
+                # Swap RNAplus and RNAminus tracks if needed
+                if rc_swap_index is not None:
+                    pred_res_wt_rev = pred_res_wt_rev[:, rc_swap_index]
+                    pred_res_mut_rev = pred_res_mut_rev[:, rc_swap_index]
+
+                # Average forward and reverse predictions for strand-agnostic results
+                pred_res_wt = (pred_res_wt_fwd + pred_res_wt_rev) / 2.0
+                pred_res_mut = (pred_res_mut_fwd + pred_res_mut_rev) / 2.0
 
             # get label
             os.makedirs(f"{save_base}/tmp/", exist_ok=True)
@@ -142,7 +242,7 @@ def process_vcf_chunk(args):
                 with h5py.File(label_h5, "r") as f:
                     label_trial[data_config.loc[i, "exp"]] = f["targets"][0]
             labels = np.zeros((myconfig.data.preprocess.n_window, len(label_meta)))
-            for i, (k,v) in enumerate(label_trial.items()):
+            for i, (_, v) in enumerate(label_trial.items()):
                 labels[:, i] = v
 
             with h5py.File(f"{save_base}/{name_base}.h5", "w") as f:

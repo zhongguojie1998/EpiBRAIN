@@ -175,8 +175,9 @@ def aggregate_exons_from_prediction(prediction, exon_intervals, context_start, c
         pool_width: Width of each prediction bin in bp
 
     Returns:
-        Tuple of (aggregated_values, n_bins) where:
-            - aggregated_values: Aggregated prediction values for each trial
+        Tuple of (aggregated_values, logsum_values, n_bins) where:
+            - aggregated_values: Aggregated prediction values for each trial (standard sum)
+            - logsum_values: logSUM score (sum of log2(y+1) over length axis)
             - n_bins: Total number of bins used in aggregation
     """
     aggregated = []
@@ -203,11 +204,15 @@ def aggregate_exons_from_prediction(prediction, exon_intervals, context_start, c
             aggregated.append(exon_pred)
 
     if len(aggregated) > 0:
-        # Concatenate all exon predictions and sum
+        # Concatenate all exon predictions
         all_exon_preds = np.concatenate(aggregated, axis=0)
-        return all_exon_preds.sum(axis=0), total_bins
+        # Standard sum over length axis
+        sum_values = all_exon_preds.sum(axis=0)
+        # logSUM: transform by log2(y+1) then sum over length axis
+        logsum_values = np.log2(all_exon_preds + 1).sum(axis=0)
+        return sum_values, logsum_values, total_bins
     else:
-        return None, 0
+        return None, None, 0
 
 
 def process_variant_by_gene(variant_h5_path, gtf, genes_pr, label_meta, pool_width=32, untransform=False):
@@ -309,16 +314,17 @@ def process_variant_by_gene(variant_h5_path, gtf, genes_pr, label_meta, pool_wid
         track_names = [name for _, name in tracks_to_use]
 
         # Aggregate predictions over exons for all tracks at once
-        ref_agg, gene_length_bins = aggregate_exons_from_prediction(
+        ref_agg, ref_logsum, gene_length_bins = aggregate_exons_from_prediction(
             pred_ref[:, track_indices], exon_intervals, context_start, context_end, pool_width
         )
-        alt_agg, _ = aggregate_exons_from_prediction(
+        alt_agg, alt_logsum, _ = aggregate_exons_from_prediction(
             pred_alt[:, track_indices], exon_intervals, context_start, context_end, pool_width
         )
 
         if ref_agg is not None and alt_agg is not None:
             # Calculate variant effects for all tracks at once
             variant_effects = alt_agg - ref_agg
+            variant_effects_logsum = alt_logsum - ref_logsum
 
             # Create DataFrame chunk for this gene with all tracks
             gene_results = pd.DataFrame({
@@ -336,6 +342,9 @@ def process_variant_by_gene(variant_h5_path, gtf, genes_pr, label_meta, pool_wid
                 'ref_value': ref_agg,
                 'alt_value': alt_agg,
                 'variant_effect': variant_effects,
+                'ref_logsum': ref_logsum,
+                'alt_logsum': alt_logsum,
+                'variant_effect_logsum': variant_effects_logsum,
                 'n_exons': len(exon_intervals)
             })
             results.append(gene_results)
