@@ -123,7 +123,58 @@ def collate_fn(batch):
 
 def load_label_meta_from_h5(h5_path):
     with h5py.File(h5_path, "r") as f:
-        return f["model_meta/trial_dims"][:]
+        trial_dims = f["model_meta/trial_dims"][:]
+        trial_names = f["model_meta/trial_names"][:]
+        # Decode if bytes
+        if hasattr(trial_names[0], 'decode'):
+            trial_names = [name.decode('utf-8') for name in trial_names]
+        return trial_dims, trial_names
+
+
+def build_rc_swap_index(trial_names, trial_dims):
+    """
+    Build reverse complement swap index for stranded tracks (+/-).
+
+    When doing reverse complement, + and - strand tracks need to be swapped
+    because the strand orientation changes.
+
+    Args:
+        trial_names: List of trial names
+        trial_dims: Array of trial dimension indices
+
+    Returns:
+        tuple: (swap_index_array, has_stranded_tracks) where swap_index_array[i]
+               gives the index to swap with for track i, or i itself if no swap needed
+    """
+    n_tracks = len(trial_dims)
+    swap_index = np.arange(n_tracks)  # Default: no swap (map to self)
+
+    # Build mapping from trial name to index
+    name_to_idx = {}
+    for idx in range(n_tracks):
+        track_idx = trial_dims[idx]
+        name_to_idx[trial_names[track_idx]] = idx
+
+    # Find + and - strand pairs and set up swaps
+    has_stranded_tracks = False
+    for idx in range(n_tracks):
+        track_idx = trial_dims[idx]
+        name = trial_names[track_idx]
+
+        if name.endswith('+'):
+            # Find corresponding minus track
+            minus_name = name[:-1] + '-'
+            if minus_name in name_to_idx:
+                swap_index[idx] = name_to_idx[minus_name]
+                has_stranded_tracks = True
+        elif name.endswith('-'):
+            # Find corresponding plus track
+            plus_name = name[:-1] + '+'
+            if plus_name in name_to_idx:
+                swap_index[idx] = name_to_idx[plus_name]
+                has_stranded_tracks = True
+
+    return swap_index, has_stranded_tracks
 
 
 def save_intermediate_results(
@@ -311,7 +362,14 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
 
     dataset = VariantDataset(hdf5_file, task_indices, dna_tokenizer)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True, drop_last=False, persistent_workers=True)
-    trial_dims = load_label_meta_from_h5(hdf5_file)
+    trial_dims, trial_names = load_label_meta_from_h5(hdf5_file)
+
+    # Build reverse complement swap index for stranded tracks
+    rc_swap_index, has_stranded_tracks = build_rc_swap_index(trial_names, trial_dims)
+    if has_stranded_tracks:
+        print(f"Built reverse complement swap index for {np.sum(rc_swap_index != np.arange(len(rc_swap_index)))} stranded track pairs")
+    else:
+        print("No stranded tracks found, reverse complement will not swap any tracks")
 
     print(f"Computing variant effects for chunk {chunk_id}...")
     start_time = time.time()
@@ -346,6 +404,15 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             pred_mut = model(mut_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
             pred_wt_rev = model(wt_rev_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
             pred_mut_rev = model(mut_rev_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
+
+            # Flip predictions along sequence dimension (reverse order)
+            pred_wt_rev = np.flip(pred_wt_rev, axis=1)
+            pred_mut_rev = np.flip(pred_mut_rev, axis=1)
+
+            # Swap stranded tracks (+ and -) for reverse complement
+            if has_stranded_tracks:
+                pred_wt_rev[:, :, :] = pred_wt_rev[:, :, rc_swap_index]
+                pred_mut_rev[:, :, :] = pred_mut_rev[:, :, rc_swap_index]
 
             # Calculate different scores based on score_names
             for score_name in score_names:
