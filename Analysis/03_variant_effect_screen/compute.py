@@ -413,12 +413,19 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             if has_stranded_tracks:
                 pred_wt_rev[:, :, :] = pred_wt_rev[:, :, rc_swap_index]
                 pred_mut_rev[:, :, :] = pred_mut_rev[:, :, rc_swap_index]
+                
+            # average the forward and backward predictions
+            pred_mut = (pred_mut + pred_mut_rev) / 2.0
+            pred_wt = (pred_wt + pred_wt_rev) / 2.0
 
             # Calculate different scores based on score_names
             for score_name in score_names:
-                scores_fwd = vep_score(pred_mut, pred_wt, score_name)
-                scores_rev = vep_score(pred_mut_rev, pred_wt_rev, score_name)
-                scores = (scores_fwd + scores_rev) / 2.0  # shape: (B, T)
+                # Previously used separate forward and reverse scores, which is traitGym implementation
+                # scores_fwd = vep_score(pred_mut, pred_wt, score_name)
+                # scores_rev = vep_score(pred_mut_rev, pred_wt_rev, score_name)
+                # scores = (scores_fwd + scores_rev) / 2.0  # shape: (B, T)
+                # use the averaged predictions to calculate scores
+                scores = vep_score(pred_mut, pred_wt, score_name)
                 all_success_res[score_name].append(scores)
         all_success.append(task_ids[masks])
         all_error.append(task_ids[~masks])
