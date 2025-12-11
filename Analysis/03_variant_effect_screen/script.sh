@@ -378,10 +378,10 @@ if [ "$MERGE_ONLY" != "true" ]; then
                 # Use different memory based on input type
                 if [ -n "$VCF_FILE" ]; then
                     MEM="24G"
-                    TIME="12:00:00"
+                    TIME="48:00:00"
                 else
                     MEM="64G"
-                    TIME="24:00:00"
+                    TIME="72:00:00"
                 fi
                 sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="$MEM" --cpus-per-task="8" --time="$TIME" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
             fi
@@ -397,10 +397,10 @@ if [ "$MERGE_ONLY" != "true" ]; then
                 # Use different memory based on input type
                 if [ -n "$VCF_FILE" ]; then
                     MEM="24G"
-                    TIME="12:00:00"
+                    TIME="48:00:00"
                 else
                     MEM="64G"
-                    TIME="24:00:00"
+                    TIME="72:00:00"
                 fi
                 sbatch --job-name="variant_chunk_$i" --partition="gpu" --mem="$MEM" --cpus-per-task="8" --time="$TIME" --gres="gpu:1" "$JOB_SCRIPT_PATH/run_chunk_$i.sh"
             fi
