@@ -201,10 +201,11 @@ def untransform_predictions(data, label_meta=None, scale=1.0, clip_soft=48.0, su
     1. Scale multiplication: y = scale * y
     2. Soft clipping: if y > clip_soft: y = (clip_soft - 1) + sqrt(y - clip_soft + 1)
     3. Three-quarter power: y = y^(3/4) for sum_three_quarter
+    4. BasalGanglia ATAC correction: multiply by 100 for BasalGanglia-*_ATAC tracks
 
     Args:
         data: numpy array of predictions to untransform
-        label_meta: DataFrame with transformation parameters per trial (scale, clip_soft, sum_stat)
+        label_meta: DataFrame with transformation parameters per trial (scale, clip_soft, sum_stat, trial)
         scale: scale factor applied in forward transform (default: 1.0)
         clip_soft: soft clipping threshold (default: 48.0)
         sum_stat: summary statistic used (default: "sum_three_quarter")
@@ -220,6 +221,7 @@ def untransform_predictions(data, label_meta=None, scale=1.0, clip_soft=48.0, su
             trial_scale = row.get('scale', 1.0)
             trial_clip_soft = row.get('clip_soft', 48.0)
             trial_sum_stat = row.get('sum_stat', 'sum_three_quarter')
+            trial_name = row.get('exp', '')
 
             # Step 1: Undo scale
             if trial_scale != 1.0:
@@ -244,6 +246,10 @@ def untransform_predictions(data, label_meta=None, scale=1.0, clip_soft=48.0, su
                 pass
             else:
                 raise ValueError(f"Unknown sum_stat: {trial_sum_stat}")
+
+            # Step 4: BasalGanglia ATAC correction - multiply by 100
+            if trial_name.startswith('BasalGanglia-') and trial_name.endswith('_ATAC'):
+                data[:, :, i] = data[:, :, i] * 100
     else:
         # Step 1: Undo scale
         if scale != 1.0:
