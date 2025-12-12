@@ -126,6 +126,73 @@ def load_label_meta_from_h5(h5_path):
         return f["model_meta/trial_dims"][:]
 
 
+def build_rc_swap_index(label_meta_df):
+    """
+    Build reverse complement swap index for RNAplus/RNAminus tracks.
+
+    When doing reverse complement, RNAplus and RNAminus need to be swapped
+    because the strand orientation changes.
+
+    Returns:
+        tuple: (org_index, swap_index) where both are numpy arrays, or (None, None) if no swapping needed
+    """
+    if label_meta_df is None:
+        return None, None
+
+    # Check if we have modality column and RNAplus/RNAminus tracks
+    if 'modality' not in label_meta_df.columns:
+        return None, None
+
+    has_plus = 'RNAplus' in label_meta_df['modality'].values
+    has_minus = 'RNAminus' in label_meta_df['modality'].values
+
+    if not (has_plus and has_minus):
+        return None, None
+
+    # Build swap index using 'dim' column (track index in predictions)
+    swap_index = []
+    org_index = label_meta_df['dim'].tolist()
+
+    for i, row in label_meta_df.iterrows():
+        if row['modality'] == 'RNAplus':
+            # Find the index of RNAminus for corresponding cell type
+            if 'cell_type' in label_meta_df.columns:
+                matching = label_meta_df[
+                    (label_meta_df['modality'] == 'RNAminus') &
+                    (label_meta_df['cell_type'] == row['cell_type'])
+                ]
+            else:
+                # Match by trial name pattern
+                matching = label_meta_df[label_meta_df['modality'] == 'RNAminus']
+
+            if len(matching) > 0:
+                swap_index.append(int(matching.iloc[0]['dim']))
+            else:
+                swap_index.append(int(row['dim']))
+
+        elif row['modality'] == 'RNAminus':
+            # Find the index of RNAplus for corresponding cell type
+            if 'cell_type' in label_meta_df.columns:
+                matching = label_meta_df[
+                    (label_meta_df['modality'] == 'RNAplus') &
+                    (label_meta_df['cell_type'] == row['cell_type'])
+                ]
+            else:
+                # Match by trial name pattern
+                matching = label_meta_df[label_meta_df['modality'] == 'RNAplus']
+
+            if len(matching) > 0:
+                swap_index.append(int(matching.iloc[0]['dim']))
+            else:
+                swap_index.append(int(row['dim']))
+        else:
+            # Don't change for other modalities
+            swap_index.append(int(row['dim']))
+
+    print(f"Built reverse complement swap index for RNAplus/RNAminus tracks")
+    return np.array(org_index), np.array(swap_index)
+
+
 def untransform_predictions(data, label_meta=None, scale=1.0, clip_soft=48.0, sum_stat="sum_three_quarter"):
     """
     Untransform model predictions back to original scale.
@@ -373,10 +440,24 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
 
     # Load label metadata if untransform is enabled
     label_meta_df = None
+    rc_orig_index = None
+    rc_swap_index = None
     if untransform:
         print(f"Loading label metadata from {label_meta}")
         label_meta_df = pd.read_csv(label_meta, index_col=None)
         print(f"Untransform enabled: will reverse transformations using label metadata")
+
+        # Build reverse complement swap index for RNAplus/RNAminus tracks
+        rc_orig_index, rc_swap_index = build_rc_swap_index(label_meta_df)
+        if rc_swap_index is not None:
+            print("Built reverse complement swap index for RNAplus/RNAminus tracks")
+    else:
+        # Even if not untransforming, we might still need swap index if label_meta is provided
+        if label_meta:
+            label_meta_df = pd.read_csv(label_meta, index_col=None)
+            rc_orig_index, rc_swap_index = build_rc_swap_index(label_meta_df)
+            if rc_swap_index is not None:
+                print("Built reverse complement swap index for RNAplus/RNAminus tracks")
 
     model, dna_tokenizer, config = get_model(model_path, device, config_path)
 
@@ -434,23 +515,32 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             wt_rev_input = dtype_fn(wt_rev_batch.permute(0, 2, 1).to(device))
             mut_rev_input = dtype_fn(mut_rev_batch.permute(0, 2, 1).to(device))
 
-            pred_wt = model(wt_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
-            pred_mut = model(mut_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
+            pred_wt_fwd = model(wt_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
+            pred_mut_fwd = model(mut_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
             pred_wt_rev = model(wt_rev_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
             pred_mut_rev = model(mut_rev_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
+
+            # Flip predictions along sequence dimension (reverse order)
+            pred_wt_rev = np.flip(pred_wt_rev, axis=1)
+            pred_mut_rev = np.flip(pred_mut_rev, axis=1)
+
+            # Swap RNAplus and RNAminus tracks if needed
+            if rc_swap_index is not None:
+                pred_wt_rev[:, :, rc_orig_index] = pred_wt_rev[:, :, rc_swap_index]
+                pred_mut_rev[:, :, rc_orig_index] = pred_mut_rev[:, :, rc_swap_index]
+
+            # Average forward and reverse predictions
+            pred_wt = (pred_wt_fwd + pred_wt_rev) / 2.0
+            pred_mut = (pred_mut_fwd + pred_mut_rev) / 2.0
 
             # Untransform predictions if requested
             if untransform:
                 pred_wt = untransform_predictions(pred_wt, label_meta=label_meta_df)
                 pred_mut = untransform_predictions(pred_mut, label_meta=label_meta_df)
-                pred_wt_rev = untransform_predictions(pred_wt_rev, label_meta=label_meta_df)
-                pred_mut_rev = untransform_predictions(pred_mut_rev, label_meta=label_meta_df)
 
             # Calculate different scores based on score_names
             for score_name in score_names:
-                scores_fwd = vep_score(pred_mut, pred_wt, score_name)
-                scores_rev = vep_score(pred_mut_rev, pred_wt_rev, score_name)
-                scores = (scores_fwd + scores_rev) / 2.0  # shape: (B, T)
+                scores = vep_score(pred_mut, pred_wt, score_name)
                 all_success_res[score_name].append(scores)
         all_success.append(task_ids[masks])
         all_error.append(task_ids[~masks])
