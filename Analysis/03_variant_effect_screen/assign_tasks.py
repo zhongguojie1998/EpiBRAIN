@@ -102,6 +102,8 @@ def assign_tasks_to_compute(task_indices, compute_assignments):
 )
 @click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
 @click.option("--abs_path", is_flag=True, help="Use absolute paths for scripts and model")
+@click.option("--label_meta", type=str, help="Path to label metadata CSV file")
+@click.option("--untransform", is_flag=True, default=False, help="Untransform predictions back to original scale")
 def main(
     hdf5_file,
     output_dir,
@@ -113,6 +115,8 @@ def main(
     precision,
     use_head,
     abs_path,
+    label_meta,
+    untransform,
 ):
     """Distribute variant effect computation tasks"""
 
@@ -168,6 +172,16 @@ def main(
         # Generate individual script
         script_path = f"{output_dir}/run_chunk_{chunk_id}.sh"
         score_names_args = " ".join([f"--score_names {name}" for name in score_names])
+
+        # Build label_meta and untransform arguments
+        label_meta_args = ""
+        if label_meta:
+            label_meta_args = f"--label_meta {label_meta}"
+
+        untransform_flag = ""
+        if untransform:
+            untransform_flag = "--untransform"
+
         with open(script_path, "w") as f:
             f.write(
                 f"""#!/bin/bash
@@ -180,7 +194,8 @@ def main(
   --save_interval {save_interval} \\
   --precision {precision} \\
   --use_head {use_head} \\
-  {score_names_args}
+  {score_names_args} \\
+  {label_meta_args} {untransform_flag}
 """
             )
         os.chmod(script_path, 0o755)
