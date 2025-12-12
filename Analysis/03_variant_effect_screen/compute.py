@@ -123,15 +123,10 @@ def collate_fn(batch):
 
 def load_label_meta_from_h5(h5_path):
     with h5py.File(h5_path, "r") as f:
-        trial_dims = f["model_meta/trial_dims"][:]
-        trial_names = f["model_meta/trial_names"][:]
-        # Decode if bytes
-        if hasattr(trial_names[0], 'decode'):
-            trial_names = [name.decode('utf-8') for name in trial_names]
-        return trial_dims, trial_names
+        return f["model_meta/trial_dims"][:]
 
 
-def build_rc_swap_index(trial_names, trial_dims):
+def build_rc_swap_index(label_meta_df):
     """
     Build reverse complement swap index for stranded tracks (+/-).
 
@@ -139,42 +134,133 @@ def build_rc_swap_index(trial_names, trial_dims):
     because the strand orientation changes.
 
     Args:
-        trial_names: List of trial names
-        trial_dims: Array of trial dimension indices
+        label_meta_df: DataFrame with label metadata containing 'dim' and 'trial' columns
 
     Returns:
-        tuple: (swap_index_array, has_stranded_tracks) where swap_index_array[i]
-               gives the index to swap with for track i, or i itself if no swap needed
+        tuple: (org_index, swap_index) where both are numpy arrays, or (None, None) if no swapping needed
     """
-    n_tracks = len(trial_dims)
-    swap_index = np.arange(n_tracks)  # Default: no swap (map to self)
+    if label_meta_df is None:
+        return None, None
 
-    # Build mapping from trial name to index
-    name_to_idx = {}
-    for idx in range(n_tracks):
-        track_idx = trial_dims[idx]
-        name_to_idx[trial_names[track_idx]] = idx
+    # Check if we have trial column
+    if 'trial' not in label_meta_df.columns:
+        return None, None
 
-    # Find + and - strand pairs and set up swaps
-    has_stranded_tracks = False
-    for idx in range(n_tracks):
-        track_idx = trial_dims[idx]
-        name = trial_names[track_idx]
+    # Build swap index using 'dim' column (track index in predictions)
+    swap_index = []
+    org_index = label_meta_df['dim'].tolist()
 
-        if name.endswith('+'):
+    for i, row in label_meta_df.iterrows():
+        trial_name = row['trial']
+
+        if trial_name.endswith('+'):
             # Find corresponding minus track
-            minus_name = name[:-1] + '-'
-            if minus_name in name_to_idx:
-                swap_index[idx] = name_to_idx[minus_name]
-                has_stranded_tracks = True
-        elif name.endswith('-'):
-            # Find corresponding plus track
-            plus_name = name[:-1] + '+'
-            if plus_name in name_to_idx:
-                swap_index[idx] = name_to_idx[plus_name]
-                has_stranded_tracks = True
+            minus_name = trial_name[:-1] + '-'
+            matching = label_meta_df[label_meta_df['trial'] == minus_name]
 
-    return swap_index, has_stranded_tracks
+            if len(matching) > 0:
+                swap_index.append(int(matching.iloc[0]['dim']))
+            else:
+                swap_index.append(int(row['dim']))
+
+        elif trial_name.endswith('-'):
+            # Find corresponding plus track
+            plus_name = trial_name[:-1] + '+'
+            matching = label_meta_df[label_meta_df['trial'] == plus_name]
+
+            if len(matching) > 0:
+                swap_index.append(int(matching.iloc[0]['dim']))
+            else:
+                swap_index.append(int(row['dim']))
+        else:
+            # Don't change for other tracks
+            swap_index.append(int(row['dim']))
+
+    # Check if any swapping is needed
+    if swap_index == org_index:
+        return None, None
+
+    print(f"Built reverse complement swap index for stranded tracks")
+    return np.array(org_index), np.array(swap_index)
+
+
+def untransform_predictions(data, label_meta=None, scale=1.0, clip_soft=48.0, sum_stat="sum_three_quarter"):
+    """
+    Untransform model predictions back to original scale.
+
+    Reverses the forward transformations applied during data preprocessing:
+    1. Scale multiplication: y = scale * y
+    2. Soft clipping: if y > clip_soft: y = (clip_soft - 1) + sqrt(y - clip_soft + 1)
+    3. Three-quarter power: y = y^(3/4) for sum_three_quarter
+
+    Args:
+        data: numpy array of predictions to untransform
+        label_meta: DataFrame with transformation parameters per trial (scale, clip_soft, sum_stat)
+        scale: scale factor applied in forward transform (default: 1.0)
+        clip_soft: soft clipping threshold (default: 48.0)
+        sum_stat: summary statistic used (default: "sum_three_quarter")
+
+    Returns:
+        Untransformed data in original scale
+    """
+    data = data.copy()
+
+    if label_meta is not None:
+        # do it for each trial based on label_meta
+        for i, row in label_meta.iterrows():
+            trial_scale = row.get('scale', 1.0)
+            trial_clip_soft = row.get('clip_soft', 48.0)
+            trial_sum_stat = row.get('sum_stat', 'sum_three_quarter')
+
+            # Step 1: Undo scale
+            if trial_scale != 1.0:
+                data[:, :, i] = data[:, :, i] / trial_scale
+
+            # Step 2: Undo soft clip
+            # Forward: if x > clip_soft: x = (clip_soft - 1) + sqrt(x - clip_soft + 1)
+            # Reverse: if x > clip_soft: x = clip_soft - 1 + (x - (clip_soft - 1))^2
+            if trial_clip_soft is not None:
+                clip_mask = data[:, :, i] > trial_clip_soft
+                data[clip_mask, i] = (trial_clip_soft - 1) + (data[clip_mask, i] - (trial_clip_soft - 1)) ** 2
+
+            # Step 3: Undo three-quarter power
+            # Forward: x = x^(3/4)
+            # Reverse: x = x^(4/3)
+            if trial_sum_stat == "sum_three_quarter":
+                data[:, :, i] = data[:, :, i] ** (4.0 / 3.0)
+            elif trial_sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
+                data[:, :, i] = (data[:, :, i] + 1) ** 2 - 1
+            elif trial_sum_stat in ['sum', 'mean', "avg"]:
+                # no transformation applied
+                pass
+            else:
+                raise ValueError(f"Unknown sum_stat: {trial_sum_stat}")
+    else:
+        # Step 1: Undo scale
+        if scale != 1.0:
+            data = data / scale
+
+        # Step 2: Undo soft clip
+        # Forward: if x > clip_soft: x = (clip_soft - 1) + sqrt(x - clip_soft + 1)
+        # Reverse: if x > clip_soft: x = clip_soft - 1 + (x - (clip_soft - 1))^2
+        if clip_soft is not None:
+            clip_mask = data > clip_soft
+            data[clip_mask] = (clip_soft - 1) + (data[clip_mask] - (clip_soft - 1)) ** 2
+
+        # Step 3: Undo three-quarter power
+        # Forward: x = x^(3/4)
+        # Reverse: x = x^(4/3)
+        if sum_stat == "sum_three_quarter":
+            data = data ** (4.0 / 3.0)
+        elif sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
+            data = (data + 1) ** 2 - 1
+        elif sum_stat in ['sum', 'mean', "avg"]:
+            # no transformation applied
+            pass
+        else:
+            raise ValueError(f"Unknown sum_stat: {sum_stat}")
+
+    return data
 
 
 def save_intermediate_results(
@@ -327,7 +413,9 @@ def vep_score(pred_mut, pred_wt, score_name):
 @click.option("-p", "--precision", type=click.Choice(["float32", "float64"]), default="float32", help="Numerical precision (float32 for speed, float64 for accuracy)")
 @click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
 @click.option("-s", "--score_names", multiple=True, help="Score names to compute (will read from HDF5 if not provided)")
-def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, save_interval, precision, use_head, score_names):
+@click.option("--untransform", is_flag=True, default=False, help="Untransform predictions back to original scale")
+@click.option("--label_meta", type=str, default="Data/source/GWAS/borzoi_label_meta.csv", help="Path to label metadata CSV file")
+def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, save_interval, precision, use_head, score_names, untransform, label_meta):
 
     # Sort task indices for optimal HDF5 access pattern
     task_indices = np.load(chunk_indices)
@@ -336,6 +424,30 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
     if not task_indices:
         print("No tasks to process in this chunk")
         return
+
+    # Load label metadata
+    label_meta_df = None
+    rc_orig_index = None
+    rc_swap_index = None
+    if label_meta:
+        label_meta_path = Path(label_meta)
+        if not label_meta_path.is_absolute():
+            # If relative path, resolve from ROOT
+            label_meta_path = ROOT / label_meta
+
+        if label_meta_path.exists():
+            print(f"Loading label metadata from {label_meta_path}")
+            label_meta_df = pd.read_csv(label_meta_path, index_col=None)
+
+            if untransform:
+                print(f"Untransform enabled: will reverse transformations using label metadata")
+
+            # Build reverse complement swap index for stranded tracks
+            rc_orig_index, rc_swap_index = build_rc_swap_index(label_meta_df)
+        else:
+            print(f"Warning: Label metadata file not found at {label_meta_path}")
+            if untransform:
+                raise ValueError(f"--untransform requires valid --label_meta file")
 
     model, dna_tokenizer, config = get_model(model_path, device, config_path)
 
@@ -362,14 +474,7 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
 
     dataset = VariantDataset(hdf5_file, task_indices, dna_tokenizer)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True, drop_last=False, persistent_workers=True)
-    trial_dims, trial_names = load_label_meta_from_h5(hdf5_file)
-
-    # Build reverse complement swap index for stranded tracks
-    rc_swap_index, has_stranded_tracks = build_rc_swap_index(trial_names, trial_dims)
-    if has_stranded_tracks:
-        print(f"Built reverse complement swap index for {np.sum(rc_swap_index != np.arange(len(rc_swap_index)))} stranded track pairs")
-    else:
-        print("No stranded tracks found, reverse complement will not swap any tracks")
+    trial_dims = load_label_meta_from_h5(hdf5_file)
 
     print(f"Computing variant effects for chunk {chunk_id}...")
     start_time = time.time()
@@ -400,8 +505,8 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             wt_rev_input = dtype_fn(wt_rev_batch.permute(0, 2, 1).to(device))
             mut_rev_input = dtype_fn(mut_rev_batch.permute(0, 2, 1).to(device))
 
-            pred_wt = model(wt_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
-            pred_mut = model(mut_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
+            pred_wt_fwd = model(wt_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
+            pred_mut_fwd = model(mut_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
             pred_wt_rev = model(wt_rev_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
             pred_mut_rev = model(mut_rev_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
 
@@ -410,21 +515,21 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             pred_mut_rev = np.flip(pred_mut_rev, axis=1)
 
             # Swap stranded tracks (+ and -) for reverse complement
-            if has_stranded_tracks:
-                pred_wt_rev[:, :, :] = pred_wt_rev[:, :, rc_swap_index]
-                pred_mut_rev[:, :, :] = pred_mut_rev[:, :, rc_swap_index]
-                
-            # average the forward and backward predictions
-            pred_mut = (pred_mut + pred_mut_rev) / 2.0
-            pred_wt = (pred_wt + pred_wt_rev) / 2.0
+            if rc_swap_index is not None:
+                pred_wt_rev[:, :, rc_orig_index] = pred_wt_rev[:, :, rc_swap_index]
+                pred_mut_rev[:, :, rc_orig_index] = pred_mut_rev[:, :, rc_swap_index]
+
+            # Average the forward and reverse predictions
+            pred_wt = (pred_wt_fwd + pred_wt_rev) / 2.0
+            pred_mut = (pred_mut_fwd + pred_mut_rev) / 2.0
+
+            # Untransform predictions if requested
+            if untransform:
+                pred_wt = untransform_predictions(pred_wt, label_meta=label_meta_df)
+                pred_mut = untransform_predictions(pred_mut, label_meta=label_meta_df)
 
             # Calculate different scores based on score_names
             for score_name in score_names:
-                # Previously used separate forward and reverse scores, which is traitGym implementation
-                # scores_fwd = vep_score(pred_mut, pred_wt, score_name)
-                # scores_rev = vep_score(pred_mut_rev, pred_wt_rev, score_name)
-                # scores = (scores_fwd + scores_rev) / 2.0  # shape: (B, T)
-                # use the averaged predictions to calculate scores
                 scores = vep_score(pred_mut, pred_wt, score_name)
                 all_success_res[score_name].append(scores)
         all_success.append(task_ids[masks])
