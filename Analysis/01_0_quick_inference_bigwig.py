@@ -40,6 +40,9 @@ import os
 import sys
 import warnings
 from pathlib import Path
+import multiprocessing
+from multiprocessing import Pool
+from functools import partial
 
 import h5py
 import numpy as np
@@ -77,6 +80,162 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _process_saturation_chunk(gpu_id, positions, chr, ref_seq_str, s_idx, start_pos, checkpoint_path, config_path,
+                                use_head, gene_exons, gene_name):
+    """
+    Helper function to process a chunk of positions for saturation mutagenesis on a specific GPU.
+    This function must be at module level to be picklable for multiprocessing.
+
+    Args:
+        gpu_id: GPU device ID to use
+        positions: List of positions to process
+        chr: Chromosome
+        ref_seq_str: Reference sequence string
+        s_idx: Start index in reference sequence
+        start_pos: Original starting position of the region (for calculating offset)
+        checkpoint_path: Path to model checkpoint
+        config_path: Path to config file
+        use_head: Which prediction head to use
+        gene_exons: Optional list of (start, end) tuples for gene exons
+        gene_name: Optional gene name
+
+    Returns:
+        List of result dictionaries
+    """
+    import logging
+
+    # Reduce logging verbosity in worker processes
+    logger = logging.getLogger(__name__)
+    logging.getLogger().setLevel(logging.WARNING)  # Suppress INFO logs from worker
+
+    # Set device for this process
+    device = f'cuda:{gpu_id}'
+    print(f"GPU {gpu_id}: Starting processing of {len(positions)} positions", flush=True)
+
+    # Initialize inference engine for this GPU
+    inference = RegionInference(checkpoint_path, config_path, device=device)
+    print(f"GPU {gpu_id}: Model loaded successfully", flush=True)
+
+    nucleotides = ['A', 'C', 'G', 'T']
+    chunk_results = []
+
+    # Process positions with progress bar for this GPU
+    for pos in tqdm(positions, desc=f"GPU {gpu_id}", position=gpu_id, leave=True):
+        # Calculate the index in the reference sequence
+        # s_idx is the start index of the region in the reference sequence
+        # pos - start_pos gives us the offset from the original start position
+        pos_idx = s_idx + (pos - start_pos)
+
+        # Get reference allele
+        ref_allele = ref_seq_str[pos_idx]
+
+        if ref_allele == 'N':
+            continue
+
+        # Test all alternative alleles
+        for alt_allele in nucleotides:
+            if alt_allele == ref_allele:
+                continue
+
+            # Predict variant effect
+            ref_pred, alt_pred, window_start, window_end = inference.predict_variant_effect(
+                chr, pos, ref_allele, alt_allele, use_head
+            )
+
+            # Untransform predictions
+            ref_pred = inference.untransform_all_predictions(ref_pred, type='pred')
+            alt_pred = inference.untransform_all_predictions(alt_pred, type='pred')
+
+            # Calculate difference
+            diff = alt_pred - ref_pred
+
+            # Calculate local window mask (within +-500bp)
+            local_window_radius = 500
+            n_windows = ref_pred.shape[0]
+            window_centers = []
+            for w_idx in range(n_windows):
+                window_center = window_start + w_idx * inference.window_size + inference.window_size // 2
+                window_centers.append(window_center)
+
+            local_window_mask = np.array([abs(w_center - pos) <= local_window_radius
+                                         for w_center in window_centers])
+
+            # Calculate gene window mask if gene exons provided
+            gene_window_mask = None
+            if gene_exons is not None:
+                gene_window_mask = []
+                for w_idx in range(n_windows):
+                    window_start_pos = window_start + w_idx * inference.window_size
+                    window_end_pos = window_start_pos + inference.window_size
+
+                    overlaps_exon = False
+                    for exon_start, exon_end in gene_exons:
+                        if not (window_end_pos <= exon_start or window_start_pos >= exon_end):
+                            overlaps_exon = True
+                            break
+                    gene_window_mask.append(overlaps_exon)
+
+                gene_window_mask = np.array(gene_window_mask)
+
+            # Calculate statistics for each track
+            for track_idx, track_name in enumerate(inference.label_names):
+                # Get dimension index
+                if inference.label_meta is not None and 'dim' in inference.label_meta.columns:
+                    matching_rows = inference.label_meta[inference.label_meta['trial'] == track_name]
+                    if len(matching_rows) > 0:
+                        dim_idx = int(matching_rows.iloc[0]['dim'])
+                    else:
+                        dim_idx = track_idx
+                else:
+                    dim_idx = track_idx
+
+                diff_track = diff[:, dim_idx]
+
+                # Local statistics
+                if np.any(local_window_mask):
+                    diff_local = diff_track[local_window_mask]
+                    diff_local_mean = float(np.mean(diff_local))
+                    diff_local_max = float(np.max(np.abs(diff_local)))
+                else:
+                    diff_local_mean = float(np.mean(diff_track))
+                    diff_local_max = float(np.max(np.abs(diff_track)))
+
+                # Gene statistics
+                diff_gene_sum = None
+                diff_gene_mean = None
+                gene_length_bins = None
+                if gene_window_mask is not None and np.any(gene_window_mask):
+                    diff_gene = diff_track[gene_window_mask]
+                    diff_gene_sum = float(np.sum(diff_gene))
+                    diff_gene_mean = float(np.mean(diff_gene))
+                    gene_length_bins = int(np.sum(gene_window_mask))
+
+                result = {
+                    'position': pos,
+                    'ref': ref_allele,
+                    'alt': alt_allele,
+                    'track_name': track_name,
+                    'ref_pred_mean': float(np.mean(ref_pred[:, dim_idx])),
+                    'alt_pred_mean': float(np.mean(alt_pred[:, dim_idx])),
+                    'diff_mean': float(np.mean(diff_track)),
+                    'ref_pred_max': float(np.max(ref_pred[:, dim_idx])),
+                    'alt_pred_max': float(np.max(alt_pred[:, dim_idx])),
+                    'diff_max': float(np.max(np.abs(diff_track))),
+                    'diff_local_mean': diff_local_mean,
+                    'diff_local_max': diff_local_max,
+                    'diff_gene_sum': diff_gene_sum,
+                    'diff_gene_mean': diff_gene_mean,
+                    'gene_length': gene_length_bins,
+                    'gene_name': gene_name,
+                    'window_start': window_start,
+                    'window_end': window_end,
+                }
+                chunk_results.append(result)
+
+    print(f"GPU {gpu_id}: Completed processing. Generated {len(chunk_results)} results", flush=True)
+    return chunk_results
+
+
 class RegionInference:
     """Handles model inference for genomic regions."""
 
@@ -95,6 +254,9 @@ class RegionInference:
         # Load config
         if config_path is None:
             config_path = ROOT / "Model" / "config.yaml"
+
+        # Store config_path for multiprocessing
+        self.config_path = str(config_path)
 
         # Check if config_path is a saved YAML file or a Hydra config directory
         config_path = Path(config_path)
@@ -479,7 +641,7 @@ class RegionInference:
         return ref_pred, alt_pred, real_start, real_end
 
     def run_saturation_mutagenesis(self, chr, start_pos, end_pos, use_head='regression', output_dir=None,
-                                   gene_exons=None, gene_name=None):
+                                   gene_exons=None, gene_name=None, num_gpus=1):
         """
         Run saturation mutagenesis on a region (all possible single nucleotide variants).
 
@@ -491,6 +653,7 @@ class RegionInference:
             output_dir: Output directory to save results
             gene_exons: Optional list of (start, end) tuples for gene exons (0-based)
             gene_name: Optional gene name
+            num_gpus: Number of GPUs to use for parallel processing (default: 1)
 
         Returns:
             pandas DataFrame with columns:
@@ -513,7 +676,7 @@ class RegionInference:
                 - window_start: start of prediction window
                 - window_end: end of prediction window
         """
-        logger.info(f"Running saturation mutagenesis on {chr}:{start_pos}-{end_pos}")
+        logger.info(f"Running saturation mutagenesis on {chr}:{start_pos}-{end_pos} using {num_gpus} GPU(s)")
 
         # Get reference sequence for the region
         token_dict = self.fasta(
@@ -552,116 +715,192 @@ class RegionInference:
         n_positions = end_pos - start_pos + 1
         logger.info(f"Testing {n_positions} positions with up to 3 alternative alleles each")
 
-        for i in tqdm(range(n_positions), desc="Saturation mutagenesis"):
-            pos = start_pos + i
-            pos_idx = s_idx + i  # Index in the fetched sequence
+        # Multi-GPU processing
+        if num_gpus > 1:
+            # Get number of available GPUs
+            import torch
+            num_available_gpus = torch.cuda.device_count()
+            if num_gpus > num_available_gpus:
+                logger.warning(f"Requested {num_gpus} GPUs but only {num_available_gpus} available. Using {num_available_gpus}.")
+                num_gpus = num_available_gpus
 
-            # Get reference allele at this position
-            ref_allele = ref_seq_str[pos_idx]
+            # Split positions into chunks for each GPU
+            positions = list(range(start_pos, end_pos + 1))
+            chunk_size = len(positions) // num_gpus
+            chunks = []
+            for i in range(num_gpus):
+                if i < num_gpus - 1:
+                    chunk = positions[i * chunk_size:(i + 1) * chunk_size]
+                else:
+                    # Last chunk gets remaining positions
+                    chunk = positions[i * chunk_size:]
+                if chunk:  # Only add non-empty chunks
+                    chunks.append(chunk)
 
-            if ref_allele == 'N':
-                logger.warning(f"Skipping position {pos} with reference allele 'N'")
-                continue
+            logger.info(f"Splitting {len(positions)} positions into {len(chunks)} chunks across {num_gpus} GPUs")
 
-            # Test all alternative alleles
-            for alt_allele in nucleotides:
-                if alt_allele == ref_allele:
-                    continue  # Skip if same as reference
+            # Prepare function for multiprocessing
+            process_func = partial(
+                _process_saturation_chunk,
+                chr=chr,
+                ref_seq_str=ref_seq_str,
+                s_idx=s_idx,
+                start_pos=start_pos,
+                checkpoint_path=self.checkpoint_path,
+                config_path=self.config_path,  # Pass the same config path used by main process
+                use_head=use_head,
+                gene_exons=gene_exons,
+                gene_name=gene_name
+            )
 
-                # Predict variant effect
-                ref_pred, alt_pred, window_start, window_end = self.predict_variant_effect(
-                    chr, pos, ref_allele, alt_allele, use_head
-                )
+            # Process chunks in parallel
+            # IMPORTANT: Use 'spawn' start method for CUDA compatibility
+            try:
+                multiprocessing.set_start_method('spawn', force=True)
+            except RuntimeError:
+                pass  # Already set
 
-                # Calculate difference
-                diff = alt_pred - ref_pred
+            logger.info("Starting multi-GPU processing...")
+            with Pool(processes=num_gpus) as pool:
+                chunk_results = pool.starmap(process_func, [(i, chunk) for i, chunk in enumerate(chunks)])
 
-                # Identify local windows within +-500bp of the variant position
-                # Each window has a center position
-                local_window_radius = 500  # bp
-                n_windows = ref_pred.shape[0]
-                window_centers = []
-                for w_idx in range(n_windows):
-                    window_center = window_start + w_idx * self.window_size + self.window_size // 2
-                    window_centers.append(window_center)
+            # Combine results from all chunks
+            for chunk_result in chunk_results:
+                all_results.extend(chunk_result)
 
-                # Find windows within +-500bp of variant position
-                local_window_mask = []
-                for w_center in window_centers:
-                    if abs(w_center - pos) <= local_window_radius:
-                        local_window_mask.append(True)
-                    else:
-                        local_window_mask.append(False)
+            logger.info(f"Multi-GPU processing complete. Collected {len(all_results)} results.")
 
-                local_window_mask = np.array(local_window_mask)
+        else:
+            # Single GPU processing (original code)
+            for i in tqdm(range(n_positions), desc="Saturation mutagenesis"):
+                pos = start_pos + i
+                pos_idx = s_idx + i  # Index in the fetched sequence
 
-                # Identify gene-overlapping windows if gene exons provided
-                gene_window_mask = None
-                if gene_exons is not None:
-                    gene_window_mask = []
+                # Get reference allele at this position
+                ref_allele = ref_seq_str[pos_idx]
+
+                if ref_allele == 'N':
+                    logger.warning(f"Skipping position {pos} with reference allele 'N'")
+                    continue
+
+                # Test all alternative alleles
+                for alt_allele in nucleotides:
+                    if alt_allele == ref_allele:
+                        continue  # Skip if same as reference
+
+                    # Predict variant effect
+                    ref_pred, alt_pred, window_start, window_end = self.predict_variant_effect(
+                        chr, pos, ref_allele, alt_allele, use_head
+                    )
+
+                    # Untransform predictions back to original scale
+                    ref_pred = self.untransform_all_predictions(ref_pred, type='pred')
+                    alt_pred = self.untransform_all_predictions(alt_pred, type='pred')
+
+                    # Calculate difference
+                    diff = alt_pred - ref_pred
+
+                    # Identify local windows within +-500bp of the variant position
+                    # Each window has a center position
+                    local_window_radius = 500  # bp
+                    n_windows = ref_pred.shape[0]
+                    window_centers = []
                     for w_idx in range(n_windows):
-                        window_start_pos = window_start + w_idx * self.window_size
-                        window_end_pos = window_start_pos + self.window_size
+                        window_center = window_start + w_idx * self.window_size + self.window_size // 2
+                        window_centers.append(window_center)
 
-                        # Check if this window overlaps with any exon
-                        overlaps_exon = False
-                        for exon_start, exon_end in gene_exons:
-                            # Check overlap: window and exon overlap if they don't not-overlap
-                            # Not-overlap: window_end <= exon_start or window_start >= exon_end
-                            if not (window_end_pos <= exon_start or window_start_pos >= exon_end):
-                                overlaps_exon = True
-                                break
+                    # Find windows within +-500bp of variant position
+                    local_window_mask = []
+                    for w_center in window_centers:
+                        if abs(w_center - pos) <= local_window_radius:
+                            local_window_mask.append(True)
+                        else:
+                            local_window_mask.append(False)
 
-                        gene_window_mask.append(overlaps_exon)
+                    local_window_mask = np.array(local_window_mask)
 
-                    gene_window_mask = np.array(gene_window_mask)
+                    # Identify gene-overlapping windows if gene exons provided
+                    gene_window_mask = None
+                    if gene_exons is not None:
+                        gene_window_mask = []
+                        for w_idx in range(n_windows):
+                            window_start_pos = window_start + w_idx * self.window_size
+                            window_end_pos = window_start_pos + self.window_size
 
-                # Average predictions over windows for each track
-                for track_idx, track_name in enumerate(self.label_names):
-                    # Global statistics (all windows)
-                    diff_track = diff[:, track_idx]
+                            # Check if this window overlaps with any exon
+                            overlaps_exon = False
+                            for exon_start, exon_end in gene_exons:
+                                # Check overlap: window and exon overlap if they don't not-overlap
+                                # Not-overlap: window_end <= exon_start or window_start >= exon_end
+                                if not (window_end_pos <= exon_start or window_start_pos >= exon_end):
+                                    overlaps_exon = True
+                                    break
 
-                    # Local statistics (windows within +-500bp)
-                    if np.any(local_window_mask):
-                        diff_local = diff_track[local_window_mask]
-                        diff_local_mean = float(np.mean(diff_local))
-                        diff_local_max = float(np.max(np.abs(diff_local)))
-                    else:
-                        # Fallback if no local windows found
-                        diff_local_mean = float(np.mean(diff_track))
-                        diff_local_max = float(np.max(np.abs(diff_track)))
+                            gene_window_mask.append(overlaps_exon)
 
-                    # Gene statistics (windows overlapping gene exons)
-                    diff_gene_sum = None
-                    diff_gene_mean = None
-                    gene_length_bins = None
-                    if gene_window_mask is not None and np.any(gene_window_mask):
-                        diff_gene = diff_track[gene_window_mask]
-                        diff_gene_sum = float(np.sum(diff_gene))
-                        diff_gene_mean = float(np.mean(diff_gene))
-                        gene_length_bins = int(np.sum(gene_window_mask))
+                        gene_window_mask = np.array(gene_window_mask)
 
-                    result = {
-                        'position': pos,
-                        'ref': ref_allele,
-                        'alt': alt_allele,
-                        'track_name': track_name,
-                        'ref_pred_mean': float(np.mean(ref_pred[:, track_idx])),
-                        'alt_pred_mean': float(np.mean(alt_pred[:, track_idx])),
-                        'diff_mean': float(np.mean(diff_track)),
-                        'ref_pred_max': float(np.max(ref_pred[:, track_idx])),
-                        'alt_pred_max': float(np.max(alt_pred[:, track_idx])),
-                        'diff_max': float(np.max(np.abs(diff_track))),
-                        'diff_local_mean': diff_local_mean,
-                        'diff_local_max': diff_local_max,
-                        'diff_gene_sum': diff_gene_sum,
-                        'diff_gene_mean': diff_gene_mean,
-                        'gene_length': gene_length_bins,
-                        'gene_name': gene_name,
-                        'window_start': window_start,
-                        'window_end': window_end,
-                    }
-                    all_results.append(result)
+                    # Average predictions over windows for each track
+                    for track_idx, track_name in enumerate(self.label_names):
+                        # Get the correct dimension index from label_meta
+                        if self.label_meta is not None and 'dim' in self.label_meta.columns:
+                            # Find the row for this track name
+                            matching_rows = self.label_meta[self.label_meta['trial'] == track_name]
+                            if len(matching_rows) > 0:
+                                dim_idx = int(matching_rows.iloc[0]['dim'])
+                            else:
+                                # Fallback to sequential index if not found
+                                logger.warning(f"Track {track_name} not found in label_meta, using sequential index")
+                                dim_idx = track_idx
+                        else:
+                            # Fallback to sequential index if no label_meta
+                            logger.warning("label_meta is not available or does not contain 'dim' column, using sequential index")
+                            dim_idx = track_idx
+
+                        # Global statistics (all windows)
+                        diff_track = diff[:, dim_idx]
+
+                        # Local statistics (windows within +-500bp)
+                        if np.any(local_window_mask):
+                            diff_local = diff_track[local_window_mask]
+                            diff_local_mean = float(np.mean(diff_local))
+                            diff_local_max = float(np.max(np.abs(diff_local)))
+                        else:
+                            # Fallback if no local windows found
+                            diff_local_mean = float(np.mean(diff_track))
+                            diff_local_max = float(np.max(np.abs(diff_track)))
+
+                        # Gene statistics (windows overlapping gene exons)
+                        diff_gene_sum = None
+                        diff_gene_mean = None
+                        gene_length_bins = None
+                        if gene_window_mask is not None and np.any(gene_window_mask):
+                            diff_gene = diff_track[gene_window_mask]
+                            diff_gene_sum = float(np.sum(diff_gene))
+                            diff_gene_mean = float(np.mean(diff_gene))
+                            gene_length_bins = int(np.sum(gene_window_mask))
+
+                        result = {
+                            'position': pos,
+                            'ref': ref_allele,
+                            'alt': alt_allele,
+                            'track_name': track_name,
+                            'ref_pred_mean': float(np.mean(ref_pred[:, dim_idx])),
+                            'alt_pred_mean': float(np.mean(alt_pred[:, dim_idx])),
+                            'diff_mean': float(np.mean(diff_track)),
+                            'ref_pred_max': float(np.max(ref_pred[:, dim_idx])),
+                            'alt_pred_max': float(np.max(alt_pred[:, dim_idx])),
+                            'diff_max': float(np.max(np.abs(diff_track))),
+                            'diff_local_mean': diff_local_mean,
+                            'diff_local_max': diff_local_max,
+                            'diff_gene_sum': diff_gene_sum,
+                            'diff_gene_mean': diff_gene_mean,
+                            'gene_length': gene_length_bins,
+                            'gene_name': gene_name,
+                            'window_start': window_start,
+                            'window_end': window_end,
+                        }
+                        all_results.append(result)
 
         # Convert to DataFrame
         results_df = pd.DataFrame(all_results)
@@ -1069,6 +1308,10 @@ Examples:
     parser.add_argument('--device', type=str, default='cuda',
                        help='Device to use (cuda or cpu)')
 
+    # Multi-GPU support for saturation mutagenesis
+    parser.add_argument('--num-gpus', type=int, default=1,
+                       help='Number of GPUs to use for saturation mutagenesis (default: 1)')
+
     args = parser.parse_args()
 
     # Validate input: need at least --gene or one of the mutually exclusive options
@@ -1134,7 +1377,7 @@ Examples:
         # Run saturation mutagenesis
         results_df = inference.run_saturation_mutagenesis(
             chr, start_pos, end_pos, output_dir=output_dir,
-            gene_exons=gene_exons, gene_name=gene_name
+            gene_exons=gene_exons, gene_name=gene_name, num_gpus=args.num_gpus
         )
 
         logger.info(f"Saturation mutagenesis complete")
