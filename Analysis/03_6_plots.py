@@ -14,7 +14,7 @@ os.chdir(PWD)
 sys.path.append(PWD)
 # %%
 # read Single Brain Fine Mapped eQTL results
-eqtl_res = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/var_eff/variant_effects_by_gene.tsv', sep='\t')
+eqtl_res = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/var_eff/variant_effects_by_gene_single_brain.tsv', sep='\t')
 
 # %% load eqtl_ref
 eqtl_finemap = pd.read_excel('Data/source/Jang2025_SingleBrain/FineMapped.xlsx', sheet_name='Table12_Fine-mapping', skiprows=2)
@@ -129,5 +129,10 @@ for key, df in res_mats.items():
 res_mats = {}
 for key in ['direction', 'effect_size_pearson', 'effect_size_spearman']:
     res_mats[key] = pd.read_csv(f'Data/source/Jang2025_SingleBrain/{key}_comparison_matrix.csv', index_col=0)
+
+# %%
+# read Meta Brain Fine Mapped eQTL results
+eqtl_res = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/var_eff/variant_effects_by_gene.tsv', sep='\t')
+eqtl_finemap = pd.read_csv('Data/source/MetaBrain/2021-07-23-basalganglia-EUR-30PCs-TopEffects.txt.gz', sep='\t', compression='gzip')
 
 # %%

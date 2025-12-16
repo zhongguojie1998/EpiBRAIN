@@ -17,6 +17,11 @@ Usage examples:
         --input Res/bigwig/rs356182_SNCA_sat_muta/ \
         --track "BasalGanglia-STR-D1-MSN_RNAminus"
 
+    # Show log2 fold change instead of difference
+    python 03_6_visualize_mutagenesis.py \
+        --input Res/bigwig/rs356182_SNCA_sat_muta/ \
+        --log2fc
+
     # Use different value column
     python 03_6_visualize_mutagenesis.py \
         --input Res/bigwig/rs356182_SNCA_sat_muta/ \
@@ -33,6 +38,7 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
 
@@ -56,8 +62,79 @@ def load_saturation_mutagenesis_results(results_file):
     return df
 
 
+def compute_log2fc(df, value_column):
+    """
+    Compute log2 fold change from reference and alternative predictions.
+
+    Args:
+        df: DataFrame with saturation mutagenesis results
+        value_column: The diff column name (e.g., 'diff_gene_sum')
+
+    Returns:
+        DataFrame with additional log2fc column
+    """
+    # Map diff columns to their ref/alt counterparts
+    column_mapping = {
+        'diff_gene_sum': ('ref_gene_sum', 'alt_gene_sum'),
+        'diff_gene_mean': ('ref_gene_mean', 'alt_gene_mean'),
+        'diff_local_mean': ('ref_local_mean', 'alt_local_mean'),
+        'diff_local_max': ('ref_local_max', 'alt_local_max'),
+        'diff_mean': ('ref_pred_mean', 'alt_pred_mean'),
+        'diff_max': ('ref_pred_max', 'alt_pred_max'),
+    }
+
+    if value_column not in column_mapping:
+        print(f"Warning: No ref/alt mapping for {value_column}, cannot compute log2fc")
+        return df
+
+    ref_col, alt_col = column_mapping[value_column]
+
+    # Check if columns exist
+    if ref_col not in df.columns or alt_col not in df.columns:
+        # Try alternative column names for gene stats
+        if 'gene_sum' in value_column or 'gene_mean' in value_column:
+            # These might not exist if no gene was provided
+            print(f"Warning: Columns {ref_col} and {alt_col} not found")
+            print("Gene-specific statistics require --gene parameter in saturation mutagenesis")
+            return df
+        # Try to infer from diff column by computing ref and alt from diff
+        # alt = ref + diff, but we don't have ref directly...
+        print(f"Warning: Columns {ref_col} and {alt_col} not found, cannot compute log2fc")
+        return df
+
+    # Compute log2 fold change: log2(alt/ref)
+    # Handle edge cases: ref=0, alt=0, negative values
+    df = df.copy()
+
+    ref_vals = df[ref_col].values
+    alt_vals = df[alt_col].values
+
+    # Add small pseudocount to avoid log(0) and division by zero
+    # Using 1e-10 as pseudocount
+    pseudocount = 1e-10
+
+    # For values that can be negative (like predictions), we need to handle differently
+    # Option 1: Use abs() and track sign
+    # Option 2: Shift to positive range
+    # Option 3: Only compute for positive values
+
+    # Let's use a simple approach: log2((alt + offset) / (ref + offset))
+    # where offset ensures both values are positive
+    min_val = min(ref_vals.min(), alt_vals.min())
+    if min_val < 0:
+        offset = abs(min_val) + pseudocount
+    else:
+        offset = pseudocount
+
+    log2fc = np.log2((alt_vals + offset) / (ref_vals + offset))
+
+    df['log2fc'] = log2fc
+
+    return df
+
+
 def create_heatmap(data, track_name, value_column, output_file, figsize=(12, 4),
-                   cmap='coolwarm', center=0, vmin=None, vmax=None):
+                   cmap='coolwarm', center=0, vmin=None, vmax=None, value_label=None):
     """
     Create heatmap for saturation mutagenesis results.
 
@@ -71,6 +148,7 @@ def create_heatmap(data, track_name, value_column, output_file, figsize=(12, 4),
         center: Center value for diverging colormap
         vmin: Minimum value for colormap
         vmax: Maximum value for colormap
+        value_label: Label for colorbar (default: value_column)
     """
     # Pivot data: rows = alternative alleles, columns = positions
     pivot_data = data.pivot(index='alt', columns='position', values=value_column)
@@ -81,6 +159,10 @@ def create_heatmap(data, track_name, value_column, output_file, figsize=(12, 4),
     # Create figure
     fig, ax = plt.subplots(figsize=figsize)
 
+    # Use value_label if provided, otherwise use value_column
+    if value_label is None:
+        value_label = value_column
+
     # Create heatmap
     sns.heatmap(
         pivot_data,
@@ -88,7 +170,7 @@ def create_heatmap(data, track_name, value_column, output_file, figsize=(12, 4),
         center=center,
         vmin=vmin,
         vmax=vmax,
-        cbar_kws={'label': value_column},
+        cbar_kws={'label': value_label},
         xticklabels=True,
         yticklabels=True,
         ax=ax
@@ -121,8 +203,11 @@ Examples:
   # Visualize specific track
   python 03_6_visualize_mutagenesis.py --input Res/bigwig/rs356182_SNCA_sat_muta/ --track "BasalGanglia-STR-D1-MSN_RNAminus"
 
-  # Use different value column
-  python 03_6_visualize_mutagenesis.py --input Res/bigwig/rs356182_SNCA_sat_muta/ --value diff_local_mean
+  # Show log2 fold change instead of difference
+  python 03_6_visualize_mutagenesis.py --input Res/bigwig/rs356182_SNCA_sat_muta/ --log2fc
+
+  # Use different value column with log2fc
+  python 03_6_visualize_mutagenesis.py --input Res/bigwig/rs356182_SNCA_sat_muta/ --value diff_local_mean --log2fc
 
   # Filter to specific modalities
   python 03_6_visualize_mutagenesis.py --input Res/bigwig/rs356182_SNCA_sat_muta/ --filter-modality "RNAminus"
@@ -148,6 +233,10 @@ Examples:
                        choices=['diff_gene_sum', 'diff_gene_mean', 'diff_local_mean',
                                'diff_local_max', 'diff_mean', 'diff_max'],
                        help='Value column to use for heatmap (default: diff_gene_sum)')
+
+    # Log2 fold change option
+    parser.add_argument('--log2fc', action='store_true',
+                       help='Show log2 fold change (alt/ref) instead of difference (alt-ref)')
 
     # Visualization options
     parser.add_argument('--figsize', type=str, default='12,4',
@@ -198,13 +287,30 @@ Examples:
     print(f"Input: {results_file}")
     print(f"Output: {output_dir}")
     print(f"Value column: {args.value}")
+    if args.log2fc:
+        print(f"Mode: Log2 fold change (alt/ref)")
+    else:
+        print(f"Mode: Difference (alt-ref)")
     print()
 
     df = load_saturation_mutagenesis_results(results_file)
 
+    # Compute log2fc if requested
+    if args.log2fc:
+        print("Computing log2 fold change...")
+        df = compute_log2fc(df, args.value)
+        if 'log2fc' not in df.columns:
+            print("Error: Failed to compute log2fc")
+            sys.exit(1)
+        value_column_to_plot = 'log2fc'
+        value_label = f'log2(alt/ref) [{args.value}]'
+    else:
+        value_column_to_plot = args.value
+        value_label = args.value
+
     # Check if value column exists
-    if args.value not in df.columns:
-        print(f"Error: Value column '{args.value}' not found in results")
+    if value_column_to_plot not in df.columns:
+        print(f"Error: Value column '{value_column_to_plot}' not found in results")
         print(f"Available columns: {df.columns.tolist()}")
         sys.exit(1)
 
@@ -248,25 +354,29 @@ Examples:
             continue
 
         # Check if value column has non-null values
-        if track_data[args.value].isna().all():
-            print(f"  Warning: All values are null for {args.value}, skipping")
+        if track_data[value_column_to_plot].isna().all():
+            print(f"  Warning: All values are null for {value_column_to_plot}, skipping")
             continue
 
         # Create output filename
         safe_track_name = track.replace('/', '_').replace('\\', '_')
-        output_file = output_dir / f"heatmap_{safe_track_name}.pdf"
+        if args.log2fc:
+            output_file = output_dir / f"heatmap_{safe_track_name}_log2fc.pdf"
+        else:
+            output_file = output_dir / f"heatmap_{safe_track_name}.pdf"
 
         # Create heatmap
         create_heatmap(
-            track_data[['position', 'alt', args.value]],
+            track_data[['position', 'alt', value_column_to_plot]],
             track,
-            args.value,
+            value_column_to_plot,
             output_file,
             figsize=figsize,
             cmap=args.cmap,
             center=args.center,
             vmin=args.vmin,
-            vmax=args.vmax
+            vmax=args.vmax,
+            value_label=value_label
         )
 
     print()

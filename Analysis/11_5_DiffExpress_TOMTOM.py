@@ -169,7 +169,7 @@ def write_meme_format(pwms, output_meme_file, background=(0.25, 0.25, 0.25, 0.25
         logger.info(f"MEME file written successfully")
 
 
-def run_tomtom(meme_file, output_dir, meme_db, dist='pearson', thresh=0.1, logger=None):
+def run_tomtom(meme_file, output_dir, meme_db, dist='pearson', thresh=1.0, logger=None):
     """
     Run TOMTOM to compare motifs against a database.
 
@@ -178,7 +178,7 @@ def run_tomtom(meme_file, output_dir, meme_db, dist='pearson', thresh=0.1, logge
         output_dir: Output directory for TOMTOM results
         meme_db: Path to MEME format database file
         dist: Distance metric (default: pearson)
-        thresh: Significance threshold (default: 0.1)
+        thresh: Significance threshold (default: 1.0 for e-value)
         logger: Logger instance
 
     Returns:
@@ -190,10 +190,12 @@ def run_tomtom(meme_file, output_dir, meme_db, dist='pearson', thresh=0.1, logge
         logger.info(f"  Database: {meme_db}")
         logger.info(f"  Output directory: {output_dir}")
         logger.info(f"  Distance metric: {dist}")
-        logger.info(f"  Threshold: {thresh}")
+        logger.info(f"  Threshold (e-value): {thresh}")
 
-    # Build TOMTOM command
-    cmd = f"tomtom -dist {dist} -thresh {thresh} -oc {output_dir} {meme_file} {meme_db}"
+    # Build TOMTOM command - use e-value threshold
+    # -evalue is a flag (no value) that switches to e-value mode
+    # -thresh <value> sets the threshold
+    cmd = f"tomtom -dist {dist} -evalue -thresh {thresh} -oc {output_dir} {meme_file} {meme_db}"
 
     if logger:
         logger.info(f"Running command: {cmd}")
@@ -227,7 +229,7 @@ def run_tomtom(meme_file, output_dir, meme_db, dist='pearson', thresh=0.1, logge
 @click.option("--meme_db", required=True, type=str, help="Path to MEME format motif database")
 @click.option("--ic_threshold", type=float, default=0.3, help="Information content threshold (default: 0.3)")
 @click.option("--tomtom_dist", type=str, default="pearson", help="TOMTOM distance metric (default: pearson)")
-@click.option("--tomtom_thresh", type=float, default=0.1, help="TOMTOM significance threshold (default: 0.1)")
+@click.option("--tomtom_thresh", type=float, default=1.0, help="TOMTOM e-value threshold (default: 1.0)")
 def main(modisco_h5, modisco_dir, output_dir, meme_db, ic_threshold, tomtom_dist, tomtom_thresh):
     """
     Extract motifs from TF-MoDISco results and run TOMTOM comparison.

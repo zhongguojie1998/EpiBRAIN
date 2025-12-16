@@ -22,24 +22,36 @@ usage() {
     echo "  --variant-name NAME         Variant name/RS ID (default: chr_pos_ref_alt)"
     echo "  --gene GENE                 Gene symbol (default: auto-detect from GTF)"
     echo "  --disease DISEASE           Disease name (e.g., Schizophrenia)"
-    echo "  --gene-region REGION        Gene region in format chr:start-end (default: variant ± 262144bp)"
-    echo "  --sat-region REGION         Saturation mutagenesis region chr:start-end (default: ±20bp around variant)"
+    echo "  --midpoint POSITION         Central position for analysis in format chr:pos"
+    echo "                              - Step 1: Switches to region inference mode (full gene region centered at midpoint)"
+    echo "                              - Step 2: Inference context centered at midpoint (mutations still at variant ±20bp)"
+    echo "                              - Steps 3,5,6: Inference/visualization centered at midpoint"
+    echo "                              - Step 6 zoom: Always shows variant location (±100bp), not midpoint"
+    echo "                              - Default: variant position for step 1-2; gene center from GTF for steps 3,5,6"
+    echo "  --gene-region REGION        Gene region in format chr:start-end (default: midpoint/gene-center ± 262144bp)"
+    echo "  --sat-region REGION         Saturation mutagenesis region chr:start-end (default: variant ±20bp)"
     echo "  --trial-pos TRIAL_POS       Trial position for motif interpretation (default: derived from --track)"
     echo "  --exp-name NAME             Experiment name (default: full_finetune_original_loss_celltype_head_dim8_linear)"
     echo "  --checkpoint CHK            Checkpoint number (default: 20)"
     echo "  --output-base DIR           Base output directory (default: Analysis/figures)"
     echo "  --gtf-file PATH             GTF annotation file (default: Data/source/gencode.v48.annotation.gtf.gz)"
     echo "  --num-gpus NUM              Number of GPUs to use for saturation mutagenesis (default: 4)"
-    echo "  --skip-steps STEPS          Comma-separated list of steps to skip (1-6)"
+    echo "  --method METHOD             Attribution method for Step 5 (DeepLift, gradient_input, gradient_input_smooth; default: DeepLift)"
+    echo "  --tomtom-db PATH            Path to MEME motif database for TOMTOM (required for Step 7)"
+    echo "  --tomtom-region REGION      Region for TOMTOM analysis (default: variant ± 10bp)"
+    echo "  --skip-steps STEPS          Comma-separated list of steps to skip (1-7)"
     echo "  -h, --help                  Show this help message"
     echo ""
     echo "Pipeline Steps:"
-    echo "  Step 1: Quick inference - Predict effects of the variant"
-    echo "  Step 2: Saturation mutagenesis - Test all possible SNVs in region (±20bp)"
+    echo "  Step 1: Quick inference - Predict effects across region"
+    echo "          (with --midpoint: full gene region; without: small window around variant)"
+    echo "  Step 2: Saturation mutagenesis - Test all possible SNVs at variant ±20bp"
+    echo "          (inference context can be centered elsewhere with --midpoint)"
     echo "  Step 3: Genome track visualization - Visualize predictions across gene region"
-    echo "  Step 4: Mutagenesis visualization - Visualize saturation mutagenesis results"
-    echo "  Step 5: Motif interpretation - Identify regulatory motifs affected by variant"
-    echo "  Step 6: Motif plotting - Generate full and zoomed motif interpretation plots"
+    echo "  Step 4: Mutagenesis visualization - Visualize saturation mutagenesis results (log2 fold change)"
+    echo "  Step 5: Motif interpretation - Identify regulatory motifs (uses --method)"
+    echo "  Step 6: Motif plotting - Generate full region plot and zoomed plot at variant (±100bp)"
+    echo "  Step 7: TOMTOM analysis - Match motifs to known TF binding sites (optional, requires --tomtom-db)"
     echo ""
     echo "Example:"
     echo "  # Minimal usage (auto-detect gene, derive trial-pos from track):"
@@ -52,6 +64,15 @@ usage() {
     echo "  # Use 8 GPUs for saturation mutagenesis:"
     echo "  $0 --variant chr11:113400106:G:T --track BasalGanglia-STR-D1-MSN_RNAminus \\"
     echo "     --num-gpus 8"
+    echo ""
+    echo "  # For large genes, specify a midpoint to center the analysis:"
+    echo "  $0 --variant chr12:2236129:G:A --track MiniAtlas-L34IT_RNAminus \\"
+    echo "     --variant-name rs1006737 --gene CACNA1C --disease Schizophrenia \\"
+    echo "     --midpoint chr12:2300000"
+    echo ""
+    echo "  # Use gradient-based attribution instead of DeepLift:"
+    echo "  $0 --variant chr11:113400106:G:T --track BasalGanglia-STR-D1-MSN_RNAminus \\"
+    echo "     --method gradient_input"
     echo ""
     echo "Note: Track 'BasalGanglia-STR-D1-MSN_RNAminus' will auto-derive trial-pos as 'STR-D1-MSN_RNAminus'"
     exit 1
@@ -79,6 +100,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --disease)
             DISEASE="$2"
+            shift 2
+            ;;
+        --midpoint)
+            MIDPOINT="$2"
             shift 2
             ;;
         --gene-region)
@@ -113,6 +138,18 @@ while [[ $# -gt 0 ]]; do
             NUM_GPUS="$2"
             shift 2
             ;;
+        --method)
+            METHOD="$2"
+            shift 2
+            ;;
+        --tomtom-db)
+            TOMTOM_DB="$2"
+            shift 2
+            ;;
+        --tomtom-region)
+            TOMTOM_REGION="$2"
+            shift 2
+            ;;
         --skip-steps)
             SKIP_STEPS="$2"
             shift 2
@@ -139,14 +176,44 @@ CHECKPOINT=${CHECKPOINT:-20}
 OUTPUT_BASE=${OUTPUT_BASE:-"Analysis/figures"}
 GTF_FILE=${GTF_FILE:-"Data/source/gencode.v48.annotation.gtf.gz"}
 NUM_GPUS=${NUM_GPUS:-4}
+METHOD=${METHOD:-"DeepLift"}
+
+# Validate method
+case "$METHOD" in
+    DeepLift|gradient_input|gradient_input_smooth)
+        # Valid method
+        ;;
+    *)
+        echo "Error: Invalid method '$METHOD'"
+        echo "Valid methods: DeepLift, gradient_input, gradient_input_smooth"
+        exit 1
+        ;;
+esac
 
 # Parse variant to extract chromosome and position
 IFS=':' read -r CHR POS REF ALT <<< "$VARIANT"
+
+# Parse midpoint if provided
+if [ -n "$MIDPOINT" ]; then
+    IFS=':' read -r MIDPOINT_CHR MIDPOINT_POS <<< "$MIDPOINT"
+    echo "Midpoint specified: $MIDPOINT (will be used as center for analysis)"
+    # Validate that midpoint chromosome matches variant chromosome
+    if [ "$MIDPOINT_CHR" != "$CHR" ]; then
+        echo "Warning: Midpoint chromosome ($MIDPOINT_CHR) differs from variant chromosome ($CHR)"
+    fi
+fi
 
 # Auto-generate variant name if not provided
 if [ -z "$VARIANT_NAME" ]; then
     VARIANT_NAME="${CHR}_${POS}_${REF}_${ALT}"
     echo "Variant name not provided, using: $VARIANT_NAME"
+fi
+
+# Set default TOMTOM region if not provided (variant ± 10bp)
+if [ -z "$TOMTOM_REGION" ]; then
+    TOMTOM_REGION_START=$((POS - 10))
+    TOMTOM_REGION_END=$((POS + 10))
+    TOMTOM_REGION="${CHR}:${TOMTOM_REGION_START}-${TOMTOM_REGION_END}"
 fi
 
 # Auto-detect gene from GTF if not provided
@@ -219,47 +286,55 @@ else
 fi
 
 # Calculate saturation mutagenesis region if not provided (±20bp around variant)
+# Note: This is the mutation region, NOT the inference region
 if [ -z "$SAT_REGION" ]; then
     SAT_START=$((POS - 20))
     SAT_END=$((POS + 20))
     SAT_REGION="${CHR}:${SAT_START}-${SAT_END}"
 fi
 
-# Calculate gene region if not provided (centered on gene center ± 262144bp)
+# Calculate gene region if not provided (centered on midpoint or gene center ± 262144bp)
 if [ -z "$GENE_REGION" ]; then
-    echo "Extracting gene coordinates from GTF..."
-
-    # Use zcat if file is gzipped, otherwise cat
-    if [[ "$GTF_FILE" == *.gz ]]; then
-        CAT_CMD="zcat"
+    # If midpoint is specified, use it directly
+    if [ -n "$MIDPOINT" ]; then
+        echo "Using midpoint as center for gene region: $MIDPOINT_POS"
+        REGION_CENTER=$MIDPOINT_POS
     else
-        CAT_CMD="cat"
-    fi
+        # Extract gene coordinates from GTF to find gene center
+        echo "Extracting gene coordinates from GTF..."
 
-    # Extract gene start and end from GTF file
-    GENE_COORDS=$($CAT_CMD "$GTF_FILE" | \
-        awk -v gene="$GENE" -v chr="$CHR" '
-        $1 == chr && $3 == "gene" {
-            match($0, /gene_name "([^"]+)"/, arr)
-            if (arr[1] == gene) {
-                print $4, $5
-                exit
+        # Use zcat if file is gzipped, otherwise cat
+        if [[ "$GTF_FILE" == *.gz ]]; then
+            CAT_CMD="zcat"
+        else
+            CAT_CMD="cat"
+        fi
+
+        # Extract gene start and end from GTF file
+        GENE_COORDS=$($CAT_CMD "$GTF_FILE" | \
+            awk -v gene="$GENE" -v chr="$CHR" '
+            $1 == chr && $3 == "gene" {
+                match($0, /gene_name "([^"]+)"/, arr)
+                if (arr[1] == gene) {
+                    print $4, $5
+                    exit
+                }
             }
-        }
-    ')
+        ')
 
-    if [ -z "$GENE_COORDS" ]; then
-        echo "Warning: Could not find gene $GENE in GTF, using variant position ± 262144bp"
-        GENE_REGION_START=$((POS - 262144))
-        GENE_REGION_END=$((POS + 262144))
-    else
-        read GENE_GTF_START GENE_GTF_END <<< "$GENE_COORDS"
-        GENE_CENTER=$(( (GENE_GTF_START + GENE_GTF_END) / 2 ))
-        echo "Gene $GENE center: $GENE_CENTER (from GTF: $GENE_GTF_START-$GENE_GTF_END)"
-
-        GENE_REGION_START=$((GENE_CENTER - 262144))
-        GENE_REGION_END=$((GENE_CENTER + 262144))
+        if [ -z "$GENE_COORDS" ]; then
+            echo "Warning: Could not find gene $GENE in GTF, using variant position ± 262144bp"
+            REGION_CENTER=$POS
+        else
+            read GENE_GTF_START GENE_GTF_END <<< "$GENE_COORDS"
+            GENE_CENTER=$(( (GENE_GTF_START + GENE_GTF_END) / 2 ))
+            echo "Gene $GENE center: $GENE_CENTER (from GTF: $GENE_GTF_START-$GENE_GTF_END)"
+            REGION_CENTER=$GENE_CENTER
+        fi
     fi
+
+    GENE_REGION_START=$((REGION_CENTER - 262144))
+    GENE_REGION_END=$((REGION_CENTER + 262144))
 
     # Ensure start is not negative
     if [ $GENE_REGION_START -lt 0 ]; then
@@ -287,6 +362,7 @@ echo "========================================="
 echo "Variant:       $VARIANT"
 echo "Variant Name:  $VARIANT_NAME"
 echo "Gene:          $GENE"
+echo "Midpoint:      ${MIDPOINT:-N/A (using defaults)}"
 echo "Gene Region:   $GENE_REGION"
 echo "Sat Region:    $SAT_REGION"
 echo "Track:         $TRACK"
@@ -295,48 +371,80 @@ echo "Disease:       ${DISEASE:-N/A}"
 echo "Experiment:    $EXP_NAME"
 echo "Checkpoint:    $CHECKPOINT"
 echo "Num GPUs:      $NUM_GPUS (for saturation mutagenesis)"
+echo "Method:        $METHOD (for motif interpretation)"
 echo "Output Dir:    $ANALYSIS_DIR"
 echo "========================================="
 echo ""
 
 # Step 1: Quick inference for the variant
 if ! should_skip 1; then
-    echo "[Step 1/6] Running quick inference for variant..."
     INFERENCE_DIR="${ANALYSIS_DIR}/inference"
-    python Analysis/01_0_quick_inference_bigwig.py \
-        --variant "$VARIANT" \
-        --exp_name "$EXP_NAME" \
-        --chk "$CHECKPOINT" \
-        --output "$INFERENCE_DIR"
+
+    # If midpoint is specified, run BOTH region and variant inference
+    # Region inference: gives us full genomic context for ref predictions
+    # Variant inference: gives us alt/diff predictions for the specific variant
+    if [ -n "$MIDPOINT" ]; then
+        echo "[Step 1/7] Running region inference across full gene region (centered at midpoint)..."
+        echo "  Inference region: $GENE_REGION"
+        python Analysis/01_0_quick_inference_bigwig.py \
+            --region "$GENE_REGION" \
+            --exp_name "$EXP_NAME" \
+            --chk "$CHECKPOINT" \
+            --output "$INFERENCE_DIR"
+
+        echo "  Running variant inference for alt/diff predictions..."
+        python Analysis/01_0_quick_inference_bigwig.py \
+            --variant "$VARIANT" \
+            --exp_name "$EXP_NAME" \
+            --chk "$CHECKPOINT" \
+            --output "$INFERENCE_DIR"
+    else
+        echo "[Step 1/7] Running quick inference for variant..."
+        python Analysis/01_0_quick_inference_bigwig.py \
+            --variant "$VARIANT" \
+            --exp_name "$EXP_NAME" \
+            --chk "$CHECKPOINT" \
+            --output "$INFERENCE_DIR"
+    fi
     echo "✓ Step 1 complete. Output: $INFERENCE_DIR"
     echo ""
 else
-    echo "[Step 1/6] Skipped."
+    echo "[Step 1/7] Skipped."
     echo ""
 fi
 
 # Step 2: Saturation mutagenesis
 if ! should_skip 2; then
-    echo "[Step 2/6] Running saturation mutagenesis (using $NUM_GPUS GPUs)..."
+    echo "[Step 2/7] Running saturation mutagenesis (using $NUM_GPUS GPUs)..."
     SAT_OUTPUT_DIR="${ANALYSIS_DIR}/sat_mutagenesis"
 
-    python Analysis/01_0_quick_inference_bigwig.py \
-        --sat_mutagenesis "$SAT_REGION" \
-        --exp_name "$EXP_NAME" \
-        --chk "$CHECKPOINT" \
-        --output "$SAT_OUTPUT_DIR" \
-        --gene "$GENE" \
-        --num-gpus "$NUM_GPUS"
+    # Build command with optional region-center parameter
+    CMD="python Analysis/01_0_quick_inference_bigwig.py \
+        --sat_mutagenesis \"$SAT_REGION\" \
+        --exp_name \"$EXP_NAME\" \
+        --chk \"$CHECKPOINT\" \
+        --output \"$SAT_OUTPUT_DIR\" \
+        --gene \"$GENE\" \
+        --num-gpus \"$NUM_GPUS\""
+
+    # Add region-center if midpoint is specified
+    if [ -n "$MIDPOINT" ]; then
+        CMD="$CMD --region-center $MIDPOINT_POS"
+        echo "  Mutation region: $SAT_REGION"
+        echo "  Inference centered at: $MIDPOINT_POS"
+    fi
+
+    eval $CMD
     echo "✓ Step 2 complete. Output: $SAT_OUTPUT_DIR"
     echo ""
 else
-    echo "[Step 2/6] Skipped."
+    echo "[Step 2/7] Skipped."
     echo ""
 fi
 
 # Step 3: Visualization with pygenometrack
 if ! should_skip 3; then
-    echo "[Step 3/6] Running visualization with pygenometrack..."
+    echo "[Step 3/7] Running visualization with pygenometrack..."
     INFERENCE_DIR="${ANALYSIS_DIR}/inference"
     VIZ_OUTPUT="${ANALYSIS_DIR}/visualization.pdf"
     # Extract cell type pattern from full track name
@@ -361,50 +469,62 @@ if ! should_skip 3; then
     echo "✓ Step 3 complete. Output: $VIZ_OUTPUT"
     echo ""
 else
-    echo "[Step 3/6] Skipped."
+    echo "[Step 3/7] Skipped."
     echo ""
 fi
 
 # Step 4: Visualize mutagenesis
 if ! should_skip 4; then
-    echo "[Step 4/6] Running mutagenesis visualization..."
+    echo "[Step 4/7] Running mutagenesis visualization..."
     SAT_OUTPUT_DIR="${ANALYSIS_DIR}/sat_mutagenesis"
     python Analysis/03_6_visualize_mutagenesis.py \
         --input "$SAT_OUTPUT_DIR" \
-        --track "$TRACK"
+        --track "$TRACK" \
+        --log2fc
     echo "✓ Step 4 complete."
     echo ""
 else
-    echo "[Step 4/6] Skipped."
+    echo "[Step 4/7] Skipped."
     echo ""
 fi
 
 # Step 5: Motif interpretation
 if ! should_skip 5; then
-    echo "[Step 5/6] Running motif gene diff interpretation..."
-    python Analysis/02_motif_gene_diff_interpretation.py \
-        --gene_name "$GENE" \
-        --trial_pos "$TRIAL_POS" \
-        -e "$EXP_NAME" \
-        --chk "$CHECKPOINT" \
+    echo "[Step 5/7] Running motif gene diff interpretation..."
+    echo "  Attribution method: $METHOD"
+    # Build command with optional region_center parameter
+    CMD="python Analysis/02_motif_gene_diff_interpretation.py \
+        --gene_name \"$GENE\" \
+        --trial_pos \"$TRIAL_POS\" \
+        -e \"$EXP_NAME\" \
+        --chk \"$CHECKPOINT\" \
         -b random \
+        --method \"$METHOD\" \
         --log_base ./logs \
         --chk_base ./Chk \
         --res_base ./Res \
         --processor gpu \
         --num_processes 1 \
         --num_threads 1 \
-        --use_head regression
+        --use_head regression"
+
+    # Add region_center if midpoint is specified
+    if [ -n "$MIDPOINT" ]; then
+        CMD="$CMD --region_center $MIDPOINT_POS"
+        echo "  Using custom region center: $MIDPOINT_POS"
+    fi
+
+    eval $CMD
     echo "✓ Step 5 complete."
     echo ""
 else
-    echo "[Step 5/6] Skipped."
+    echo "[Step 5/7] Skipped."
     echo ""
 fi
 
 # Step 6: Motif interpretation plotting
 if ! should_skip 6; then
-    echo "[Step 6/6] Running motif interpretation plotting..."
+    echo "[Step 6/7] Running motif interpretation plotting..."
     # Parse gene region
     IFS=':' read -r GENE_CHR GENE_COORDS <<< "$GENE_REGION"
     IFS='-' read -r GENE_START GENE_END <<< "$GENE_COORDS"
@@ -437,10 +557,11 @@ if ! should_skip 6; then
         --output "$PLOT_OUTPUT_FULL"
 
     # Plot 2: Zoomed region around variant (±100bp)
+    # Always zoom to variant location, regardless of midpoint setting
     ZOOM_START=$((POS - 100))
     ZOOM_END=$((POS + 100))
     PLOT_OUTPUT_ZOOM="${ANALYSIS_DIR}/motif_interpretation_zoom.pdf"
-    echo "  Creating zoomed region plot (variant ±100bp)..."
+    echo "  Creating zoomed region plot (variant ±100bp: ${CHR}:${ZOOM_START}-${ZOOM_END})..."
     python Analysis/02_motif_interpretation_plot.py \
         --data_dir "$DATA_DIR" \
         --name_base "$NAME_BASE" \
@@ -455,7 +576,64 @@ if ! should_skip 6; then
     echo "  Zoomed plot: $PLOT_OUTPUT_ZOOM"
     echo ""
 else
-    echo "[Step 6/6] Skipped."
+    echo "[Step 6/7] Skipped."
+    echo ""
+fi
+
+# Step 7: TOMTOM analysis (optional, requires --tomtom-db)
+if ! should_skip 7; then
+    if [ -z "$TOMTOM_DB" ]; then
+        echo "[Step 7/7] TOMTOM analysis - Skipped (no --tomtom-db specified)"
+        echo ""
+    else
+        echo "[Step 7/7] Running TOMTOM analysis..."
+        echo "  Region: $TOMTOM_REGION"
+        echo "  Database: $TOMTOM_DB"
+
+        # Check if TOMTOM database exists
+        if [ ! -f "$TOMTOM_DB" ]; then
+            echo "  Error: TOMTOM database not found: $TOMTOM_DB"
+            echo "  Skipping TOMTOM analysis"
+            echo ""
+        else
+            # Use NAME_BASE and DATA_DIR from Step 6 context
+            # Parse gene region to construct NAME_BASE if Step 6 was skipped
+            if [ -z "$NAME_BASE" ]; then
+                IFS=':' read -r GENE_CHR GENE_COORDS <<< "$GENE_REGION"
+                IFS='-' read -r GENE_START GENE_END <<< "$GENE_COORDS"
+
+                TRIAL_POS_SHORT=$(echo "$TRIAL_POS" | sed 's/_RNA.*//')
+                TRIAL_STRAND=$(echo "$TRIAL_POS" | grep -o "RNA.*")
+
+                NAME_BASE="${GENE_CHR}_${GENE_START}_${GENE_END}_${GENE}_${TRIAL_POS_SHORT}"
+                if [ "$TRIAL_STRAND" = "RNAplus" ]; then
+                    NAME_BASE="${NAME_BASE}_plus"
+                else
+                    NAME_BASE="${NAME_BASE}_minus"
+                fi
+            fi
+
+            if [ -z "$DATA_DIR" ]; then
+                DATA_DIR="./Res/${EXP_NAME}/analysis_${CHECKPOINT}/raw_data/interp_diff"
+            fi
+
+            TOMTOM_OUTPUT_DIR="${ANALYSIS_DIR}/tomtom"
+
+            python Analysis/02_motif_region_tomtom.py \
+                --data_dir "$DATA_DIR" \
+                --name_base "$NAME_BASE" \
+                --baseline random \
+                --region "$TOMTOM_REGION" \
+                --output_dir "$TOMTOM_OUTPUT_DIR" \
+                --meme_db "$TOMTOM_DB"
+
+            echo "✓ Step 7 complete."
+            echo "  Results: $TOMTOM_OUTPUT_DIR/tomtom.html"
+            echo ""
+        fi
+    fi
+else
+    echo "[Step 7/7] Skipped."
     echo ""
 fi
 
@@ -470,7 +648,8 @@ echo "  ├── inference/                        (Step 1: variant inference b
 echo "  ├── sat_mutagenesis/                  (Step 2: saturation mutagenesis results)"
 echo "  ├── visualization.pdf                 (Step 3: genome track visualization)"
 echo "  ├── motif_interpretation_full.pdf     (Step 6: full region motif plot)"
-echo "  └── motif_interpretation_zoom.pdf     (Step 6: zoomed motif plot)"
+echo "  ├── motif_interpretation_zoom.pdf     (Step 6: zoomed motif plot)"
+echo "  └── tomtom/                           (Step 7: TOMTOM motif matching results)"
 echo ""
 echo "Note: Step 4 outputs are saved within sat_mutagenesis/ directory"
 echo "      Step 5 outputs are saved in ./Res/${EXP_NAME}/analysis_${CHECKPOINT}/"

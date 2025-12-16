@@ -140,7 +140,7 @@ def format_bin_range(bin_indices):
     return ';'.join(ranges)
 
 
-def get_gene_exon_regions(gene_name, gtf_file, window_size, n_window, context_length):
+def get_gene_exon_regions(gene_name, gtf_file, window_size, n_window, context_length, region_center=None):
     """
     Extract exon regions for a gene from GTF file and aggregate them into a single region.
 
@@ -150,6 +150,7 @@ def get_gene_exon_regions(gene_name, gtf_file, window_size, n_window, context_le
         window_size: Size of each bin
         n_window: Total number of bins
         context_length: Total context length
+        region_center: Optional custom center position for the analysis region (overrides gene center)
 
     Returns:
         List with single tuple: (chr, start, end, strand, bin_range_str, gene_name)
@@ -197,8 +198,14 @@ def get_gene_exon_regions(gene_name, gtf_file, window_size, n_window, context_le
 
     logger.info(f"  Gene span: {gene_obj.chrom}:{gene_start}-{gene_end}")
 
-    # Create a context window centered on the gene
-    region_start = max(0, gene_center - context_length // 2)
+    # Create a context window centered on the gene (or custom center if provided)
+    if region_center is not None:
+        logger.info(f"  Using custom region center: {region_center} (overriding gene center: {gene_center})")
+        center_pos = region_center
+    else:
+        center_pos = gene_center
+
+    region_start = max(0, center_pos - context_length // 2)
     region_end = region_start + context_length
 
     logger.info(f"  Context window: {gene_obj.chrom}:{region_start}-{region_end}")
@@ -824,6 +831,8 @@ def process_region_chunk(args):
 @click.option("--gtf_file", required=False, type=str,
               default="Data/source/gencode.v48.annotation.gtf.gz",
               help="Path to GTF annotation file")
+@click.option("--region_center", required=False, type=int, default=None,
+              help="Optional center position for analysis region (overrides gene center from GTF). Useful for large genes.")
 @click.option("--trial_pos", required=True, multiple=True, type=str,
               help="Positive track names (can be specified multiple times)")
 @click.option("--trial_neg", required=False, multiple=True, type=str,
@@ -859,6 +868,7 @@ def process_region_chunk(args):
 def main(
     gene_name,
     gtf_file,
+    region_center,
     trial_pos,
     trial_neg,
     exp_name,
@@ -913,7 +923,8 @@ def main(
         gtf_file,
         myconfig.data.preprocess.window_size,
         myconfig.data.preprocess.n_window,
-        myconfig.data.context_length
+        myconfig.data.context_length,
+        region_center=region_center
     )
 
     if len(regions) == 0:

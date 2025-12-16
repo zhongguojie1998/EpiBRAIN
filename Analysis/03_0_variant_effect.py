@@ -155,9 +155,11 @@ def process_vcf_chunk(args):
             wt_nt_fetched = onehot_to_str(wt_seq_onehot[s_idx:e_idx])
             if not ref == wt_nt_fetched:
                 logger.warning(
-                    f"Ref info isn't consistent with genome. {chr_name}: {pos}, given {ref}, fetched {wt_nt_fetched}"
+                    f"Ref info isn't consistent with genome. {chr_name}: {pos}, given {ref}, fetched {wt_nt_fetched}. Replacing with ref."
                 )
-                continue
+                # Replace wt_seq_onehot with ref nucleotide
+                ref_nt_onehot = str_to_one_hot(ref)
+                wt_seq_onehot[s_idx:e_idx] = ref_nt_onehot
 
             # get alt seq
             alt_nt_onehot = str_to_one_hot(alt)

@@ -203,12 +203,33 @@ def _process_saturation_chunk(gpu_id, positions, chr, ref_seq_str, s_idx, start_
                 # Gene statistics
                 diff_gene_sum = None
                 diff_gene_mean = None
+                ref_gene_sum = None
+                alt_gene_sum = None
+                ref_gene_mean = None
+                alt_gene_mean = None
                 gene_length_bins = None
                 if gene_window_mask is not None and np.any(gene_window_mask):
+                    ref_gene = ref_pred[gene_window_mask, dim_idx]
+                    alt_gene = alt_pred[gene_window_mask, dim_idx]
                     diff_gene = diff_track[gene_window_mask]
+                    ref_gene_sum = float(np.sum(ref_gene))
+                    alt_gene_sum = float(np.sum(alt_gene))
                     diff_gene_sum = float(np.sum(diff_gene))
+                    ref_gene_mean = float(np.mean(ref_gene))
+                    alt_gene_mean = float(np.mean(alt_gene))
                     diff_gene_mean = float(np.mean(diff_gene))
                     gene_length_bins = int(np.sum(gene_window_mask))
+
+                # Local statistics (also save ref and alt separately)
+                ref_local_mean = None
+                alt_local_mean = None
+                ref_local_max = None
+                alt_local_max = None
+                if local_window_mask is not None and np.any(local_window_mask):
+                    ref_local_mean = float(np.mean(ref_pred[local_window_mask, dim_idx]))
+                    alt_local_mean = float(np.mean(alt_pred[local_window_mask, dim_idx]))
+                    ref_local_max = float(np.max(ref_pred[local_window_mask, dim_idx]))
+                    alt_local_max = float(np.max(alt_pred[local_window_mask, dim_idx]))
 
                 result = {
                     'position': pos,
@@ -221,9 +242,17 @@ def _process_saturation_chunk(gpu_id, positions, chr, ref_seq_str, s_idx, start_
                     'ref_pred_max': float(np.max(ref_pred[:, dim_idx])),
                     'alt_pred_max': float(np.max(alt_pred[:, dim_idx])),
                     'diff_max': float(np.max(np.abs(diff_track))),
+                    'ref_local_mean': ref_local_mean,
+                    'alt_local_mean': alt_local_mean,
                     'diff_local_mean': diff_local_mean,
+                    'ref_local_max': ref_local_max,
+                    'alt_local_max': alt_local_max,
                     'diff_local_max': diff_local_max,
+                    'ref_gene_sum': ref_gene_sum,
+                    'alt_gene_sum': alt_gene_sum,
                     'diff_gene_sum': diff_gene_sum,
+                    'ref_gene_mean': ref_gene_mean,
+                    'alt_gene_mean': alt_gene_mean,
                     'diff_gene_mean': diff_gene_mean,
                     'gene_length': gene_length_bins,
                     'gene_name': gene_name,
@@ -641,19 +670,21 @@ class RegionInference:
         return ref_pred, alt_pred, real_start, real_end
 
     def run_saturation_mutagenesis(self, chr, start_pos, end_pos, use_head='regression', output_dir=None,
-                                   gene_exons=None, gene_name=None, num_gpus=1):
+                                   gene_exons=None, gene_name=None, num_gpus=1, region_center=None):
         """
         Run saturation mutagenesis on a region (all possible single nucleotide variants).
 
         Args:
             chr: Chromosome
-            start_pos: Start position (1-based, inclusive)
-            end_pos: End position (1-based, inclusive)
+            start_pos: Start position (1-based, inclusive) - where to start mutations
+            end_pos: End position (1-based, inclusive) - where to end mutations
             use_head: Which prediction head to use
             output_dir: Output directory to save results
             gene_exons: Optional list of (start, end) tuples for gene exons (0-based)
             gene_name: Optional gene name
             num_gpus: Number of GPUs to use for parallel processing (default: 1)
+            region_center: Optional center position for inference context window (default: midpoint of start_pos and end_pos)
+                          Useful for large genes where you want mutations at one location but inference centered elsewhere
 
         Returns:
             pandas DataFrame with columns:
@@ -667,9 +698,17 @@ class RegionInference:
                 - ref_pred_max: max reference prediction
                 - alt_pred_max: max alternative prediction
                 - diff_max: max absolute difference (global)
+                - ref_local_mean: mean reference prediction in windows within +-500bp
+                - alt_local_mean: mean alternative prediction in windows within +-500bp
                 - diff_local_mean: mean difference in windows within +-500bp of variant
+                - ref_local_max: max reference prediction in windows within +-500bp
+                - alt_local_max: max alternative prediction in windows within +-500bp
                 - diff_local_max: max absolute difference in windows within +-500bp of variant
+                - ref_gene_sum: sum of reference predictions in windows overlapping gene exons (if gene provided)
+                - alt_gene_sum: sum of alternative predictions in windows overlapping gene exons (if gene provided)
                 - diff_gene_sum: sum of differences in windows overlapping gene exons (if gene provided)
+                - ref_gene_mean: mean reference prediction in windows overlapping gene exons (if gene provided)
+                - alt_gene_mean: mean alternative prediction in windows overlapping gene exons (if gene provided)
                 - diff_gene_mean: mean difference in windows overlapping gene exons (if gene provided)
                 - gene_length: number of bins overlapping gene exons (if gene provided)
                 - gene_name: name of the gene (if gene provided)
@@ -679,16 +718,40 @@ class RegionInference:
         logger.info(f"Running saturation mutagenesis on {chr}:{start_pos}-{end_pos} using {num_gpus} GPU(s)")
 
         # Get reference sequence for the region
-        token_dict = self.fasta(
-            chr_name=chr,
-            start=start_pos - 1,  # Convert to 0-based
-            end=end_pos,  # End is exclusive
-            return_augs=False,
-            return_rela_idx=True
-        )
+        # If region_center is provided, fetch context centered at region_center
+        # Otherwise, center at midpoint of mutation region
+        if region_center is not None:
+            logger.info(f"Using custom region center for inference: {region_center}")
+            # Fetch a single position at region_center, FastaInterval will expand to context_length
+            token_dict = self.fasta(
+                chr_name=chr,
+                start=region_center - 1,  # Convert to 0-based
+                end=region_center,  # End is exclusive
+                return_augs=False,
+                return_rela_idx=True
+            )
+            # The fetched sequence is centered at region_center
+            # We need to find where start_pos and end_pos fall in this sequence
+            real_start, real_end = token_dict["real_region"]
+            # Calculate relative indices for the mutation region
+            s_idx = (start_pos - 1) - real_start  # 0-based index in fetched sequence
+            e_idx = end_pos - real_start  # Exclusive end index
+            logger.info(f"Inference window: {chr}:{real_start}-{real_end}")
+            logger.info(f"Mutation region indices in window: {s_idx} to {e_idx}")
+        else:
+            # Original behavior: center inference window at mutation region
+            token_dict = self.fasta(
+                chr_name=chr,
+                start=start_pos - 1,  # Convert to 0-based
+                end=end_pos,  # End is exclusive
+                return_augs=False,
+                return_rela_idx=True
+            )
+            real_start, real_end = token_dict["real_region"]
+            # Find the relative positions within the fetched sequence
+            s_idx, e_idx = token_dict["rela_idx"]
 
         ref_seq_onehot = token_dict["one_hot"]
-        real_start, real_end = token_dict["real_region"]
 
         # Convert one-hot to string for reference alleles
         def onehot_to_str(seq_onehot):
@@ -701,9 +764,6 @@ class RegionInference:
 
         # Get reference sequence string
         ref_seq_str = onehot_to_str(ref_seq_onehot)
-
-        # Find the relative positions within the fetched sequence
-        s_idx, e_idx = token_dict["rela_idx"]
 
         # All possible nucleotides
         nucleotides = ['A', 'C', 'G', 'T']
@@ -873,12 +933,33 @@ class RegionInference:
                         # Gene statistics (windows overlapping gene exons)
                         diff_gene_sum = None
                         diff_gene_mean = None
+                        ref_gene_sum = None
+                        alt_gene_sum = None
+                        ref_gene_mean = None
+                        alt_gene_mean = None
                         gene_length_bins = None
                         if gene_window_mask is not None and np.any(gene_window_mask):
+                            ref_gene = ref_pred[gene_window_mask, dim_idx]
+                            alt_gene = alt_pred[gene_window_mask, dim_idx]
                             diff_gene = diff_track[gene_window_mask]
+                            ref_gene_sum = float(np.sum(ref_gene))
+                            alt_gene_sum = float(np.sum(alt_gene))
                             diff_gene_sum = float(np.sum(diff_gene))
+                            ref_gene_mean = float(np.mean(ref_gene))
+                            alt_gene_mean = float(np.mean(alt_gene))
                             diff_gene_mean = float(np.mean(diff_gene))
                             gene_length_bins = int(np.sum(gene_window_mask))
+
+                        # Local statistics (also save ref and alt separately)
+                        ref_local_mean = None
+                        alt_local_mean = None
+                        ref_local_max = None
+                        alt_local_max = None
+                        if local_window_mask is not None and np.any(local_window_mask):
+                            ref_local_mean = float(np.mean(ref_pred[local_window_mask, dim_idx]))
+                            alt_local_mean = float(np.mean(alt_pred[local_window_mask, dim_idx]))
+                            ref_local_max = float(np.max(ref_pred[local_window_mask, dim_idx]))
+                            alt_local_max = float(np.max(alt_pred[local_window_mask, dim_idx]))
 
                         result = {
                             'position': pos,
@@ -891,9 +972,17 @@ class RegionInference:
                             'ref_pred_max': float(np.max(ref_pred[:, dim_idx])),
                             'alt_pred_max': float(np.max(alt_pred[:, dim_idx])),
                             'diff_max': float(np.max(np.abs(diff_track))),
+                            'ref_local_mean': ref_local_mean,
+                            'alt_local_mean': alt_local_mean,
                             'diff_local_mean': diff_local_mean,
+                            'ref_local_max': ref_local_max,
+                            'alt_local_max': alt_local_max,
                             'diff_local_max': diff_local_max,
+                            'ref_gene_sum': ref_gene_sum,
+                            'alt_gene_sum': alt_gene_sum,
                             'diff_gene_sum': diff_gene_sum,
+                            'ref_gene_mean': ref_gene_mean,
+                            'alt_gene_mean': alt_gene_mean,
                             'diff_gene_mean': diff_gene_mean,
                             'gene_length': gene_length_bins,
                             'gene_name': gene_name,
@@ -1269,7 +1358,7 @@ Examples:
     )
 
     # Input specification (mutually exclusive for primary modes)
-    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group = parser.add_mutually_exclusive_group(required=False)
     input_group.add_argument('--region', type=str, help='Genomic region (e.g., chr1:100000-200000)')
     input_group.add_argument('--variant', type=str, help='Variant (e.g., chr1:154426970:G:A)')
     input_group.add_argument('--sat_mutagenesis', type=str, help='Saturation mutagenesis region (e.g., chr1:154426970 or chr1:154426970-154426975)')
@@ -1277,6 +1366,10 @@ Examples:
     # Gene can be used alone or with saturation mutagenesis
     parser.add_argument('--gene', type=str, default=None,
                        help='Gene name (e.g., GRIN2A). Can be used alone for gene inference, or with --sat_mutagenesis to calculate gene-specific statistics.')
+
+    # Region center for saturation mutagenesis inference window
+    parser.add_argument('--region-center', type=int, default=None,
+                       help='Center position for inference context window in saturation mutagenesis (default: midpoint of mutation region). Useful for large genes.')
 
     # Model parameters - Method 1: Direct paths
     parser.add_argument('--checkpoint', type=str, default=None,
@@ -1377,7 +1470,8 @@ Examples:
         # Run saturation mutagenesis
         results_df = inference.run_saturation_mutagenesis(
             chr, start_pos, end_pos, output_dir=output_dir,
-            gene_exons=gene_exons, gene_name=gene_name, num_gpus=args.num_gpus
+            gene_exons=gene_exons, gene_name=gene_name, num_gpus=args.num_gpus,
+            region_center=args.region_center
         )
 
         logger.info(f"Saturation mutagenesis complete")
