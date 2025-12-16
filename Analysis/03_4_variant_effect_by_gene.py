@@ -387,7 +387,11 @@ def process_single_variant(variant_info, variant_dir, label_meta, pool_width, un
         return None
 
     # Process this variant using global worker variables
-    variant_results = process_variant_by_gene(variant_h5, _worker_gtf, _worker_genes_pr, label_meta, pool_width, untransform)
+    try:
+        variant_results = process_variant_by_gene(variant_h5, _worker_gtf, _worker_genes_pr, label_meta, pool_width, untransform)
+    except (OSError, Exception) as e:
+        print(f"Warning: Error processing {variant_name}: {str(e)[:100]}")
+        return None
 
     if len(variant_results) > 0:
         return variant_results

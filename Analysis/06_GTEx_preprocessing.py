@@ -39,7 +39,7 @@ for tissue in tissues:
     gtex[['closest_transcript', 'closest_gene', 'closest_distance', 'closest_strand']] = gtex.apply(get_closest_tss, axis=1, result_type='expand')
     #  filter to PIP ≥ 0.9
     positive = gtex[gtex['pip'] >= 0.9].copy()
-    negative = gtex[gtex['pip'] < 0.0001].copy()
+    negative = gtex[gtex['pip'] < 0.0001].copy() # PMID: 34099641
     if not positive.empty:
         positive.loc[positive.index, 'label'] = 'positive'
     if not negative.empty:

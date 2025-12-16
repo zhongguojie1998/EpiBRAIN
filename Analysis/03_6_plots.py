@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from scipy.stats import spearmanr, pearsonr
 from sklearn.metrics import f1_score
 import seaborn as sns
+import matplotlib.pyplot as plt
 load_dotenv()
 PWD = f'{os.environ["workingHOME"]}/BICAN'
 import sys
@@ -69,13 +70,13 @@ eqtl_finemap = pd.read_csv('Data/source/Jang2025_SingleBrain/finemapped_variants
 
 # %% filter the eqtl_res to snp-gene pairs
 # drop basal gangila cell types
-eqtl_res = eqtl_res[eqtl_res['track'].str.contains('MiniAtlas-')]
+eqtl_res = eqtl_res[eqtl_res['track'].str.contains('BasalGanglia-')]
 # remove the minus or plus from track names
 eqtl_res['track'] = eqtl_res['track'].str.replace('minus', '').str.replace('plus', '')
 # only keep the RNA results
 eqtl_res = eqtl_res[eqtl_res['track'].str.contains('RNA')]
 # add a column to indicate the eqtl cell type name
-eqtl_res['cell_type'] = eqtl_res['track'].str.replace('_RNA', '').str.replace('MiniAtlas-', '')
+eqtl_res['cell_type'] = eqtl_res['track'].str.replace('_RNA', '').str.replace('BasalGanglia-', '')
 # %% create three matrixes to explore the "direction" prediction result and "effect_size" prediction result (pearson+spearman)
 single_brain_cell_types = eqtl_finemap['QTL'].unique()
 bican_cell_types = eqtl_res['cell_type'].unique()
@@ -130,9 +131,96 @@ res_mats = {}
 for key in ['direction', 'effect_size_pearson', 'effect_size_spearman']:
     res_mats[key] = pd.read_csv(f'Data/source/Jang2025_SingleBrain/{key}_comparison_matrix.csv', index_col=0)
 
+# %% filter the eqtl result to largest fold change ones
+matching_celltypes = {
+    'Ast': 'Astrocyte',
+    'MG': 'Microglia',
+    'OD': 'Oligodendrocyte',
+    'OPC': 'OPC'
+}
+eqtl_finemap['cell_type'] = eqtl_finemap['QTL'].map(matching_celltypes)
+eqtl_finemap_filtered = eqtl_finemap[eqtl_finemap['cell_type'].notnull()].copy()
+eqtl_res_filtered = eqtl_res[eqtl_res['cell_type'].isin(matching_celltypes.values())].copy()
+eqtl_finemap_filtered['snp_geneID'] = eqtl_finemap_filtered['cell_type'] + ":" + eqtl_finemap_filtered['chr'] + ":" + eqtl_finemap_filtered['pos'].astype(int).astype(str) + ":" + eqtl_finemap_filtered['ref'] + ":" + eqtl_finemap_filtered['alt'] + ":" + eqtl_finemap_filtered['QTL gene ID']
+eqtl_res_filtered['snp_geneID'] = eqtl_res_filtered['cell_type'] + ":" + eqtl_res_filtered['chr'] + ":" + eqtl_res_filtered['pos'].astype(int).astype(str) + ":" + eqtl_res_filtered['ref'] + ":" + eqtl_res_filtered['alt'] + ":" + eqtl_res_filtered['gene_id'].str.replace('\\..*', '', regex=True)
+eqtl_finemap_filtered = eqtl_finemap_filtered.drop_duplicates(subset=['snp_geneID'])
+eqtl_res_filtered = eqtl_res_filtered.drop_duplicates(subset=['snp_geneID'])
+eqtl_finemap_filtered = eqtl_finemap_filtered.set_index('snp_geneID')
+eqtl_res_filtered = eqtl_res_filtered.set_index('snp_geneID')
+common_snp_geneID = eqtl_finemap_filtered.index.intersection(eqtl_res_filtered.index)
+eqtl_finemap_filtered = eqtl_finemap_filtered.loc[common_snp_geneID]
+eqtl_res_filtered = eqtl_res_filtered.loc[common_snp_geneID]
+# calculate lfdc
+eqtl_res_filtered['lfdc'] = np.log2(eqtl_res_filtered['alt_value']) - np.log2(eqtl_res_filtered['ref_value'])
+# calculate diff
+eqtl_res_filtered['diff'] = eqtl_res_filtered['alt_value'] - eqtl_res_filtered['ref_value']
+# calculate avg_variant_effect_logsum
+eqtl_res_filtered['avg_variant_effect_logsum'] = eqtl_res_filtered['variant_effect_logsum'] / eqtl_res_filtered['n_exons']
+# %% plot
+fig, ax = plt.subplots(figsize=(5, 4))
+ax.scatter(eqtl_finemap_filtered['fixed_beta'], eqtl_res_filtered['lfdc'], alpha=0.5)
+ax.set_xlabel('Finemap LFC')
+ax.set_ylabel('BICAN LFC')
+ax.set_title('Comparison of LFC between Finemap and BICAN')
+# %% check sign prediction, use > 0.25 and < -0.25 as threshold
+fig, ax = plt.subplots(figsize=(5, 4))
+finemap_sign = (eqtl_finemap_filtered['fixed_beta'] > 0).astype(int)
+# finemap_sign[eqtl_finemap_filtered['fixed_beta'] < -0.25] = 0
+# finemap_sign[(eqtl_finemap_filtered['fixed_beta'] > -0.25) & (eqtl_finemap_filtered['fixed_beta'] < 0.25)] = np.nan
+bican_sign = (eqtl_res_filtered['lfdc'] > 0).astype(int)
+# bican_sign[eqtl_res_filtered['lfdc'] < -0.05] = 0
+# bican_sign[(eqtl_res_filtered['lfdc'] > -0.05) & (eqtl_res_filtered['lfdc'] < 0.05)] = np.nan
+# drop nan
+valid_idx = (((eqtl_res_filtered['lfdc'] < -0.05) | (eqtl_res_filtered['lfdc'] > 0.05)))
+# valid_idx = (eqtl_finemap_filtered['PIP'] > 0.9) & (~pd.isna(eqtl_res_filtered['lfdc']))
+# calculate F1 score
+spearman_corr, _ = spearmanr(eqtl_finemap_filtered['fixed_beta'][valid_idx], eqtl_res_filtered['lfdc'][valid_idx])
+print(f'Spearman correlation: {spearman_corr}')
+sns.scatterplot(x=eqtl_finemap_filtered['fixed_beta'][valid_idx], y=eqtl_res_filtered['lfdc'][valid_idx], alpha=0.5)
+# add x=0 and y=0 lines
+ax.axhline(0, color='black', linestyle='--')
+ax.axvline(0, color='black', linestyle='--')
+ax.set_xlabel('eQTL beta (Finemapped variants)')
+ax.set_ylabel('Predicted LFC')
+# add spearman correlation text
+ax.text(0.05, 0.95, f'Spearman r={spearman_corr:.2f} (n={len(eqtl_res_filtered.loc[valid_idx])})', transform=ax.transAxes, verticalalignment='top')
+fig.savefig('figures/Jang2025_SingleBrain_finemapped_variants_lfdc_comparison.pdf')
+
+
 # %%
-# read Meta Brain Fine Mapped eQTL results
+# read Meat Brain Fine Mapped eQTL results
 eqtl_res = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/var_eff/variant_effects_by_gene.tsv', sep='\t')
 eqtl_finemap = pd.read_csv('Data/source/MetaBrain/2021-07-23-basalganglia-EUR-30PCs-TopEffects.txt.gz', sep='\t', compression='gzip')
+eqtl_res['snp_geneID'] = eqtl_res['chr'] + ":" + eqtl_res['pos'].astype(int).astype(str) + ":" + eqtl_res['ref'] + ":" + eqtl_res['alt'] + ":" + eqtl_res['gene_id']
+eqtl_finemap['snp_geneID'] = 'chr' + eqtl_finemap['SNPChr'].astype(int).astype(str) + ":" + eqtl_finemap['SNPPos'].astype(int).astype(str) + ":" + eqtl_finemap['SNPAlleles'].str.replace('/', ':') + ":" + eqtl_finemap['Gene']
 
+# %%
+# aggregate the variant effect results in all cell types
+# only keep RNA tracks
+eqtl_res = eqtl_res[(eqtl_res['track'].str.contains('RNA')) & (eqtl_res['track'].str.contains('BasalGanglia-'))]
+# for each snp_geneID, aggregate the variant effect results by summing up
+eqtl_res_agg = eqtl_res.groupby('snp_geneID').agg({'ref_value': 'sum',
+                                                   'alt_value': 'sum',
+                                                   'n_exons': 'first'}).reset_index()
+# %% plot 
+eqtl_res_agg['diff'] = np.log2(eqtl_res_agg['alt_value']) - np.log2(eqtl_res_agg['ref_value'])
+eqtl_res_agg = eqtl_res_agg.set_index('snp_geneID')
+eqtl_finemap = eqtl_finemap.set_index('snp_geneID')
+common_variants = eqtl_res_agg.index.intersection(eqtl_finemap.index)
+eqtl_res_agg = eqtl_res_agg.loc[common_variants]
+eqtl_finemap = eqtl_finemap.loc[common_variants]
+# %% filter low effect size variants
+eqtl_res_agg_plot = eqtl_res_agg[np.abs(eqtl_res_agg['diff']) > 0.05]
+eqtl_finemap_plot = eqtl_finemap.loc[eqtl_res_agg_plot.index]
+# %% plot
+fig, ax = plt.subplots(figsize=(5, 4))
+ax.scatter(eqtl_finemap_plot['MetaBeta'], eqtl_res_agg_plot['diff'], alpha=0.5)
+spearman_corr, _ = spearmanr(eqtl_finemap_plot['MetaBeta'], eqtl_res_agg_plot['diff'])
+ax.text(0.05, 0.95, f'Spearman r={spearman_corr:.2f} (n={len(eqtl_res_agg_plot)})', transform=ax.transAxes, verticalalignment='top')
+ax.axhline(0, color='black', linestyle='--')
+ax.axvline(0, color='black', linestyle='--')
+ax.set_xlabel('Finemap Beta')
+ax.set_ylabel('BICAN log2(Alt) - log2(Ref)')
+ax.set_title('Comparison of eQTL Effect between MetaBrain and BICAN')
+fig.savefig('figures/MetaBrain_top_variants_lfdc_comparison.pdf')
 # %%

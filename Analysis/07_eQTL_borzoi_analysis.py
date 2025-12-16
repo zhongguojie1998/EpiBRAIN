@@ -245,6 +245,15 @@ for organ in ['All', 'Brain', 'Basal_ganglia', 'Cortex']:
                                                      'AUROC': auroc, 'AUROC_SE': auroc_se, 'AUPRC': auprc, 'AUPRC_SE': auprc_se,
                                                      f'n_pos': positives, f'n_neg': negatives},
                                                     index=[0])], ignore_index=True)
+        # get overall all modality
+        modality_merged = np.linalg.norm(eqtl_scores, axis=1)
+        auroc, auroc_se, auprc, auprc_se, positives, negatives = compute_metrics(label, modality_merged, eqtl_organ_unique, group, n_bootstraps=50)
+        track_results = pd.concat([track_results,
+                                   pd.DataFrame({'identifier': f'borzoi_all', 'modality': 'ALL',
+                                                 'organ': organ, 'group': group,
+                                                 'AUROC': auroc, 'AUROC_SE': auroc_se, 'AUPRC': auprc, 'AUPRC_SE': auprc_se,
+                                                 f'n_pos': positives, f'n_neg': negatives},
+                                                index=[0])], ignore_index=True)
         track_results = pd.concat([track_results, track_anno])
 # %% add annotation
 track_results['mod'] = 'borzoi'

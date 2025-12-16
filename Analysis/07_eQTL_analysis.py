@@ -260,6 +260,14 @@ for organ in ['All', 'Brain', 'Basal_ganglia', 'Cortex']:
                                                      'AUROC': auroc, 'AUROC_SE': auroc_se, 'AUPRC': auprc, 'AUPRC_SE': auprc_se,
                                                      f'n_pos': positives, f'n_neg': negatives},
                                                     index=[0])], ignore_index=True)
+        # combine everything
+        modality_merged = np.linalg.norm(eqtl_scores, axis=1)
+        auroc, auroc_se, auprc, auprc_se, positives, negatives = compute_metrics(label, modality_merged, eqtl_organ_unique, group, n_bootstraps=50)
+        track_results = pd.concat([track_results,
+                                   pd.DataFrame({'exp': f'bican_all', 'modality': 'ALL', 'celltype': 'ALL',
+                                                 'organ': organ, 'group': group, 'AUROC': auroc, 'AUROC_SE': auroc_se, 
+                                                 'AUPRC': auprc, 'AUPRC_SE': auprc_se, f'n_pos': positives, f'n_neg': negatives},
+                                                index=[0])], ignore_index=True)
         track_results = pd.concat([track_results, track_anno])
 # %% add annotation
 track_results.loc[track_results['exp'].isna(), 'exp'] = track_results['trial'][track_results['exp'].isna()].copy()
@@ -415,4 +423,69 @@ ax.set_title(f'{organ} - AUROC by Variant Distance Groups')
 ax.legend(title='Distance Group', loc='upper right')
 fig.tight_layout()
 fig.savefig(f'figures/{organ}_overall_model_performance_by_variant_distance_groups_AUROC.pdf')
+# %% plot comparison with borzoi in each group
+exp_order = ['bican_all', 'borzoi_all']
+
+fig, ax = plt.subplots(figsize=(6, 4))
+bar_width = 0.35
+x_pos = np.arange(len(variant_groups))
+
+for exp_idx, exp in enumerate(exp_order):
+    auroc_values = []
+    auroc_se_values = []
+    bar_colors = []
+
+    # Get experiment type to determine color scheme
+    exp_type = exp_types.get(exp, 'borzoi')
+
+    for group_idx, group in enumerate(variant_groups):
+        if group not in data_by_group or len(data_by_group[group]) == 0:
+            auroc_values.append(0)
+            auroc_se_values.append(0)
+            bar_colors.append('gray')
+            continue
+
+        df = data_by_group[group]
+        exp_data = df[df['exp'] == exp]
+
+        if len(exp_data) > 0:
+            auroc_values.append(exp_data['AUROC'].values[0])
+            auroc_se_values.append(exp_data['AUROC_SE'].values[0])
+
+            # Get gradient color based on experiment type and variant group
+            if exp_type == 'borzoi':
+                bar_colors.append(borzoi_colors[group_idx])
+            elif exp_type == 'bican':
+                bar_colors.append(bican_colors[group_idx])
+            else:  # chrombpnet
+                bar_colors.append(atac_colors[group_idx])
+        else:
+            auroc_values.append(0)
+            auroc_se_values.append(0)
+            bar_colors.append('gray')
+
+    # Plot bars for this experiment with gradient colors
+    offset = (exp_idx - len(exp_order)/2 + 0.5) * bar_width
+    for i, (val, se, color) in enumerate(zip(auroc_values, auroc_se_values, bar_colors)):
+        if i == 0:  # Only add label once per experiment
+            ax.bar(x_pos[i] + offset, val, bar_width,
+                   yerr=se, capsize=3,
+                   label=exp, color=color,
+                   alpha=0.8, edgecolor='black', linewidth=0.5)
+        else:
+            ax.bar(x_pos[i] + offset, val, bar_width,
+                   yerr=se, capsize=3,
+                   color=color,
+                   alpha=0.8, edgecolor='black', linewidth=0.5)
+
+# Set x-axis labels
+ax.set_xticks(x_pos)
+ax.set_xticklabels(variant_groups, rotation=45, ha='right')
+ax.set_ylabel('AUROC')
+ax.set_ylim(ymin=0.4, ymax=1)
+ax.set_title(f'{organ} - AUROC by Variant Distance Groups')
+ax.legend(title='Experiment', loc='upper right')
+fig.tight_layout()
+fig.savefig(f'figures/{organ}_comparison_by_variant_groups_AUROC.pdf')
+
 # %%
