@@ -26,7 +26,7 @@ usage() {
     echo "                              - Step 1: Switches to region inference mode (full gene region centered at midpoint)"
     echo "                              - Step 2: Inference context centered at midpoint (mutations still at variant ±20bp)"
     echo "                              - Steps 3,5,6: Inference/visualization centered at midpoint"
-    echo "                              - Step 6 zoom: Always shows variant location (±100bp), not midpoint"
+    echo "                              - Step 6 zoom: Always shows variant location (±50bp), not midpoint"
     echo "                              - Default: variant position for step 1-2; gene center from GTF for steps 3,5,6"
     echo "  --gene-region REGION        Gene region in format chr:start-end (default: midpoint/gene-center ± 262144bp)"
     echo "  --sat-region REGION         Saturation mutagenesis region chr:start-end (default: variant ±20bp)"
@@ -40,6 +40,20 @@ usage() {
     echo "  --tomtom-db PATH                 Path to MEME motif database for TOMTOM (required for Step 7)"
     echo "  --tomtom-region REGION           Region for TOMTOM analysis (default: variant ± 10bp)"
     echo "  --tomtom-background-region REGION Region for calculating background nucleotide frequencies (default: variant ± 50bp)"
+    echo "  --track-height HEIGHT            BigWig track height for Step 3 visualization (default: 2)"
+    echo "  --gtf-height HEIGHT              GTF annotation track height for Step 3 visualization (default: 5)"
+    echo "  --spacer-height HEIGHT           Spacer height between tracks for Step 3 visualization (default: 0.2)"
+    echo "  --label-color COLOR              Color for label tracks in hex format (default: #1f77b4, blue)"
+    echo "  --ref-color COLOR                Color for reference tracks in hex format (default: #d62728, red)"
+    echo "  --alt-color COLOR                Color for alternative tracks in hex format (default: #2ca02c, green)"
+    echo "  --diff-color COLOR               Color for diff tracks in hex format (default: #9467bd, purple)"
+    echo "  --ref-alpha ALPHA                Transparency for reference tracks, 0.0-1.0 (default: 1.0, opaque)"
+    echo "  --alt-alpha ALPHA                Transparency for alternative tracks, 0.0-1.0 (default: 1.0, opaque)"
+    echo "  --alt-first                      Display alt track first, then overlay ref (default: ref first, then alt)"
+    echo "  --sat-mutagenesis-viz-plot-width WIDTH   Width of saturation mutagenesis plot in inches (default: 12.0)"
+    echo "  --sat-mutagenesis-viz-plot-height HEIGHT Height of saturation mutagenesis plot in inches (default: 4.0)"
+    echo "  --motif-viz-plot-width WIDTH             Width of motif interpretation plots in inches (default: 8.0)"
+    echo "  --motif-viz-plot-height HEIGHT           Height per subplot in motif plots in inches (default: 1.5)"
     echo "  --skip-steps STEPS               Comma-separated list of steps to skip (1-7)"
     echo "  -h, --help                       Show this help message"
     echo ""
@@ -74,6 +88,22 @@ usage() {
     echo "  # Use gradient-based attribution instead of DeepLift:"
     echo "  $0 --variant chr11:113400106:G:T --track BasalGanglia-STR-D1-MSN_RNAminus \\"
     echo "     --method gradient_input"
+    echo ""
+    echo "  # Customize visualization track heights:"
+    echo "  $0 --variant chr11:113400106:G:T --track BasalGanglia-STR-D1-MSN_RNAminus \\"
+    echo "     --track-height 3 --gtf-height 7 --spacer-height 0.3"
+    echo ""
+    echo "  # Swap ref/alt colors (alt=red, ref=green):"
+    echo "  $0 --variant chr11:113400106:G:T --track BasalGanglia-STR-D1-MSN_RNAminus \\"
+    echo "     --ref-color '#2ca02c' --alt-color '#d62728'"
+    echo ""
+    echo "  # Make ref/alt tracks semi-transparent for better overlay visibility:"
+    echo "  $0 --variant chr11:113400106:G:T --track BasalGanglia-STR-D1-MSN_RNAminus \\"
+    echo "     --ref-alpha 0.5 --alt-alpha 0.5"
+    echo ""
+    echo "  # Display alt track first, then overlay ref (default is ref first):"
+    echo "  $0 --variant chr11:113400106:G:T --track BasalGanglia-STR-D1-MSN_RNAminus \\"
+    echo "     --alt-first"
     echo ""
     echo "Note: Track 'BasalGanglia-STR-D1-MSN_RNAminus' will auto-derive trial-pos as 'STR-D1-MSN_RNAminus'"
     exit 1
@@ -155,6 +185,62 @@ while [[ $# -gt 0 ]]; do
             TOMTOM_BACKGROUND_REGION="$2"
             shift 2
             ;;
+        --track-height)
+            TRACK_HEIGHT="$2"
+            shift 2
+            ;;
+        --gtf-height)
+            GTF_HEIGHT="$2"
+            shift 2
+            ;;
+        --spacer-height)
+            SPACER_HEIGHT="$2"
+            shift 2
+            ;;
+        --label-color)
+            LABEL_COLOR="$2"
+            shift 2
+            ;;
+        --ref-color)
+            REF_COLOR="$2"
+            shift 2
+            ;;
+        --alt-color)
+            ALT_COLOR="$2"
+            shift 2
+            ;;
+        --diff-color)
+            DIFF_COLOR="$2"
+            shift 2
+            ;;
+        --ref-alpha)
+            REF_ALPHA="$2"
+            shift 2
+            ;;
+        --alt-alpha)
+            ALT_ALPHA="$2"
+            shift 2
+            ;;
+        --alt-first)
+            ALT_FIRST=true
+            shift
+            ;;
+        --sat-mutagenesis-viz-plot-width)
+            SAT_MUTAGENESIS_VIZ_PLOT_WIDTH="$2"
+            shift 2
+            ;;
+        --sat-mutagenesis-viz-plot-height)
+            SAT_MUTAGENESIS_VIZ_PLOT_HEIGHT="$2"
+            shift 2
+            ;;
+        --motif-viz-plot-width)
+            MOTIF_VIZ_PLOT_WIDTH="$2"
+            shift 2
+            ;;
+        --motif-viz-plot-height)
+            MOTIF_VIZ_PLOT_HEIGHT="$2"
+            shift 2
+            ;;
         --skip-steps)
             SKIP_STEPS="$2"
             shift 2
@@ -182,6 +268,19 @@ OUTPUT_BASE=${OUTPUT_BASE:-"Analysis/figures"}
 GTF_FILE=${GTF_FILE:-"Data/source/gencode.v48.annotation.gtf.gz"}
 NUM_GPUS=${NUM_GPUS:-4}
 METHOD=${METHOD:-"DeepLift"}
+TRACK_HEIGHT=${TRACK_HEIGHT:-2}
+GTF_HEIGHT=${GTF_HEIGHT:-5}
+SPACER_HEIGHT=${SPACER_HEIGHT:-0.2}
+LABEL_COLOR=${LABEL_COLOR:-"#1f77b4"}
+REF_COLOR=${REF_COLOR:-"#d62728"}
+ALT_COLOR=${ALT_COLOR:-"#2ca02c"}
+DIFF_COLOR=${DIFF_COLOR:-"#9467bd"}
+REF_ALPHA=${REF_ALPHA:-1.0}
+ALT_ALPHA=${ALT_ALPHA:-1.0}
+SAT_MUTAGENESIS_VIZ_PLOT_WIDTH=${SAT_MUTAGENESIS_VIZ_PLOT_WIDTH:-12.0}
+SAT_MUTAGENESIS_VIZ_PLOT_HEIGHT=${SAT_MUTAGENESIS_VIZ_PLOT_HEIGHT:-4.0}
+MOTIF_VIZ_PLOT_WIDTH=${MOTIF_VIZ_PLOT_WIDTH:-8.0}
+MOTIF_VIZ_PLOT_HEIGHT=${MOTIF_VIZ_PLOT_HEIGHT:-1.5}
 
 # Validate method
 case "$METHOD" in
@@ -368,6 +467,39 @@ should_skip() {
     return 1
 }
 
+# Helper function to calculate intersection of two regions
+intersect_regions() {
+    local region1=$1  # e.g., chr12:1000-5000
+    local region2=$2  # e.g., chr12:2000-6000
+
+    # Parse region1
+    IFS=':' read -r chr1 coords1 <<< "$region1"
+    IFS='-' read -r start1 end1 <<< "$coords1"
+
+    # Parse region2
+    IFS=':' read -r chr2 coords2 <<< "$region2"
+    IFS='-' read -r start2 end2 <<< "$coords2"
+
+    # Check chromosome match
+    if [ "$chr1" != "$chr2" ]; then
+        echo ""
+        return 1
+    fi
+
+    # Calculate intersection
+    local max_start=$((start1 > start2 ? start1 : start2))
+    local min_end=$((end1 < end2 ? end1 : end2))
+
+    # Check if regions overlap
+    if [ $max_start -ge $min_end ]; then
+        echo ""
+        return 1
+    fi
+
+    echo "${chr1}:${max_start}-${min_end}"
+    return 0
+}
+
 echo "========================================="
 echo "Variant Analysis Pipeline"
 echo "========================================="
@@ -412,6 +544,9 @@ if ! should_skip 1; then
             --exp_name "$EXP_NAME" \
             --chk "$CHECKPOINT" \
             --output "$INFERENCE_DIR"
+
+        # Track that we have data for the full gene region
+        ACTUAL_INFERENCE_REGION="$GENE_REGION"
     else
         echo "[Step 1/7] Running quick inference for variant..."
         python Analysis/01_0_quick_inference_bigwig.py \
@@ -419,12 +554,33 @@ if ! should_skip 1; then
             --exp_name "$EXP_NAME" \
             --chk "$CHECKPOINT" \
             --output "$INFERENCE_DIR"
+
+        # Variant inference generates data for a limited region around the variant
+        # Typically uses context_length (262144 bp window = ±131072 bp)
+        VARIANT_INFERENCE_START=$((POS - 131072))
+        VARIANT_INFERENCE_END=$((POS + 131072))
+        if [ $VARIANT_INFERENCE_START -lt 0 ]; then
+            VARIANT_INFERENCE_START=0
+        fi
+        ACTUAL_INFERENCE_REGION="${CHR}:${VARIANT_INFERENCE_START}-${VARIANT_INFERENCE_END}"
+        echo "  Inference data available for: $ACTUAL_INFERENCE_REGION"
     fi
     echo "✓ Step 1 complete. Output: $INFERENCE_DIR"
     echo ""
 else
     echo "[Step 1/7] Skipped."
     echo ""
+    # If Step 1 was skipped, we need to infer what region has data
+    if [ -n "$MIDPOINT" ]; then
+        ACTUAL_INFERENCE_REGION="$GENE_REGION"
+    else
+        VARIANT_INFERENCE_START=$((POS - 131072))
+        VARIANT_INFERENCE_END=$((POS + 131072))
+        if [ $VARIANT_INFERENCE_START -lt 0 ]; then
+            VARIANT_INFERENCE_START=0
+        fi
+        ACTUAL_INFERENCE_REGION="${CHR}:${VARIANT_INFERENCE_START}-${VARIANT_INFERENCE_END}"
+    fi
 fi
 
 # Step 2: Saturation mutagenesis
@@ -461,16 +617,63 @@ if ! should_skip 3; then
     echo "[Step 3/7] Running visualization with pygenometrack..."
     INFERENCE_DIR="${ANALYSIS_DIR}/inference"
     VIZ_OUTPUT="${ANALYSIS_DIR}/visualization.pdf"
+
+    # Calculate visualization region as intersection of:
+    # 1. Gene-centered region (gene midpoint ± 262144bp)
+    # 2. Variant-centered region (variant position ± 262144bp)
+
+    # Variant-centered region (where we have inference data)
+    VARIANT_VIZ_START=$((POS - 262144))
+    VARIANT_VIZ_END=$((POS + 262144))
+    if [ $VARIANT_VIZ_START -lt 0 ]; then
+        VARIANT_VIZ_START=0
+    fi
+    VARIANT_CENTERED_REGION="${CHR}:${VARIANT_VIZ_START}-${VARIANT_VIZ_END}"
+
+    # Intersect gene-centered region with variant-centered region
+    VIZ_REGION=$(intersect_regions "$GENE_REGION" "$VARIANT_CENTERED_REGION")
+
+    if [ -z "$VIZ_REGION" ]; then
+        echo "  Warning: No overlap between gene region and variant region"
+        echo "    Gene region:    $GENE_REGION"
+        echo "    Variant region: $VARIANT_CENTERED_REGION"
+        echo "  Using variant region for visualization"
+        VIZ_REGION="$VARIANT_CENTERED_REGION"
+    else
+        echo "  Visualization region: $VIZ_REGION"
+        echo "    Gene-centered:    $GENE_REGION"
+        echo "    Variant-centered: $VARIANT_CENTERED_REGION"
+        echo "    Intersection:     $VIZ_REGION"
+    fi
+
     # Extract cell type pattern from full track name
     # Example: BasalGanglia-STR-D1-MSN_RNAminus -> BasalGanglia-STR-D1-MSN*
     # Keep region and cell type, replace assay type with wildcard
     CELL_TYPE_PATTERN=$(echo "$TRACK" | sed 's/_.*/*/')
-    python Analysis/00_visualize_data_pygenometrack.py \
-        --inference-dir "$INFERENCE_DIR" \
-        --region "$GENE_REGION" \
-        --output "$VIZ_OUTPUT" \
-        --tracks "$CELL_TYPE_PATTERN" \
-        --highlight "${CHR}:${POS}"
+
+    # Build visualization command
+    VIZ_CMD="python Analysis/00_visualize_data_pygenometrack.py \
+        --inference-dir \"$INFERENCE_DIR\" \
+        --region \"$VIZ_REGION\" \
+        --output \"$VIZ_OUTPUT\" \
+        --tracks \"$CELL_TYPE_PATTERN\" \
+        --highlight \"${CHR}:${POS}\" \
+        --height \"$TRACK_HEIGHT\" \
+        --gtf-height \"$GTF_HEIGHT\" \
+        --spacer-height \"$SPACER_HEIGHT\" \
+        --label-color \"$LABEL_COLOR\" \
+        --ref-color \"$REF_COLOR\" \
+        --alt-color \"$ALT_COLOR\" \
+        --diff-color \"$DIFF_COLOR\" \
+        --ref-alpha \"$REF_ALPHA\" \
+        --alt-alpha \"$ALT_ALPHA\""
+
+    # Add --alt-first flag if set
+    if [ "$ALT_FIRST" = true ]; then
+        VIZ_CMD="$VIZ_CMD --alt-first"
+    fi
+
+    eval $VIZ_CMD
 
     # Append variant information to the existing line in visualization_vlines.bed
     VLINES_BED="${ANALYSIS_DIR}/visualization_vlines.bed"
@@ -491,10 +694,12 @@ fi
 if ! should_skip 4; then
     echo "[Step 4/7] Running mutagenesis visualization..."
     SAT_OUTPUT_DIR="${ANALYSIS_DIR}/sat_mutagenesis"
+    SAT_FIGSIZE="${SAT_MUTAGENESIS_VIZ_PLOT_WIDTH},${SAT_MUTAGENESIS_VIZ_PLOT_HEIGHT}"
     python Analysis/03_6_visualize_mutagenesis.py \
         --input "$SAT_OUTPUT_DIR" \
         --track "$TRACK" \
-        --log2fc
+        --log2fc \
+        --figsize "$SAT_FIGSIZE"
     echo "✓ Step 4 complete."
     echo ""
 else
@@ -568,14 +773,16 @@ if ! should_skip 6; then
         --data_dir "$DATA_DIR" \
         --name_base "$NAME_BASE" \
         --baseline random \
-        --output "$PLOT_OUTPUT_FULL"
+        --output "$PLOT_OUTPUT_FULL" \
+        --motif-viz-plot-width "$MOTIF_VIZ_PLOT_WIDTH" \
+        --motif-viz-plot-height "$MOTIF_VIZ_PLOT_HEIGHT"
 
-    # Plot 2: Zoomed region around variant (±100bp)
+    # Plot 2: Zoomed region around variant (±50bp)
     # Always zoom to variant location, regardless of midpoint setting
-    ZOOM_START=$((POS - 100))
-    ZOOM_END=$((POS + 100))
+    ZOOM_START=$((POS - 50))
+    ZOOM_END=$((POS + 50))
     PLOT_OUTPUT_ZOOM="${ANALYSIS_DIR}/motif_interpretation_zoom.pdf"
-    echo "  Creating zoomed region plot (variant ±100bp: ${CHR}:${ZOOM_START}-${ZOOM_END})..."
+    echo "  Creating zoomed region plot (variant ±50bp: ${CHR}:${ZOOM_START}-${ZOOM_END})..."
     python Analysis/02_motif_interpretation_plot.py \
         --data_dir "$DATA_DIR" \
         --name_base "$NAME_BASE" \
@@ -583,7 +790,9 @@ if ! should_skip 6; then
         --output "$PLOT_OUTPUT_ZOOM" \
         --start "$ZOOM_START" \
         --end "$ZOOM_END" \
-        --show_sequence
+        --show_sequence \
+        --motif-viz-plot-width "$MOTIF_VIZ_PLOT_WIDTH" \
+        --motif-viz-plot-height "$MOTIF_VIZ_PLOT_HEIGHT"
 
     echo "✓ Step 6 complete."
     echo "  Full plot:   $PLOT_OUTPUT_FULL"

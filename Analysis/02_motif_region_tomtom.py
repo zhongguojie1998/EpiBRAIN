@@ -474,9 +474,9 @@ def main(data_dir, name_base, baseline, region, background_region, output_dir, m
 
         logger.info(f"    Extracted PWM: {pwm.shape[0]} bp")
 
-        # Clip by information content
+        # Clip by information content (always use uniform background for clipping)
         if ic_threshold > 0:
-            pwm_clipped = clip_pwm_by_information_content(pwm, threshold=ic_threshold, background=background)
+            pwm_clipped = clip_pwm_by_information_content(pwm, threshold=ic_threshold)
             if pwm_clipped is None:
                 logger.warning(f"    No positions pass IC threshold {ic_threshold}, using full PWM")
                 pwm_clipped = pwm

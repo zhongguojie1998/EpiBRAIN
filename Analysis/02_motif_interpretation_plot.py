@@ -20,8 +20,12 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.patches import Rectangle
-from matplotlib.ticker import FuncFormatter
+from matplotlib.patches import Rectangle, PathPatch
+from matplotlib.ticker import FuncFormatter, FormatStrFormatter
+from matplotlib.text import TextPath
+from matplotlib.font_manager import FontProperties
+import matplotlib as mpl
+import matplotlib.transforms
 from vizsequence.viz_sequence import plot_weights_given_ax
 
 ROOT = Path(__file__).parent.parent
@@ -30,6 +34,42 @@ sys.path.append(str(ROOT / "Analysis"))
 os.chdir(ROOT)
 
 from utils.logging import BaseLogger
+
+
+# Helper function to draw a letter at a given position
+def dna_letter_at(letter, x, y, yscale=1, ax=None, color=None, alpha=1.0):
+    """Draw a DNA letter at a given position."""
+    # Define letter heights and colors
+    fp = FontProperties(family="DejaVu Sans", weight="bold")
+    globscale = 1.35
+    LETTERS = {
+        "T": TextPath((-0.305, 0), "T", size=1, prop=fp),
+        "G": TextPath((-0.384, 0), "G", size=1, prop=fp),
+        "A": TextPath((-0.35, 0), "A", size=1, prop=fp),
+        "C": TextPath((-0.366, 0), "C", size=1, prop=fp),
+    }
+    COLOR_SCHEME = {
+        'G': 'orange',
+        'A': 'green',
+        'C': 'blue',
+        'T': 'red',
+    }
+
+    text = LETTERS[letter]
+
+    # Choose color
+    chosen_color = COLOR_SCHEME[letter]
+    if color is not None:
+        chosen_color = color
+
+    # Draw letter onto axis
+    t = mpl.transforms.Affine2D().scale(1*globscale, yscale*globscale) + \
+        mpl.transforms.Affine2D().translate(x, y) + ax.transData
+    p = PathPatch(text, lw=0, fc=chosen_color, alpha=alpha, transform=t)
+    if ax is not None:
+        ax.add_artist(p)
+
+    return p
 
 
 def create_genomic_position_formatter(x_min, x_max):
@@ -178,7 +218,7 @@ def clean_trial_name(trial_str, keep_suffix=True):
 
 def plot_sequence_attribution(ax, seq_onehot, attribution, x_coords):
     """
-    Plot DNA sequence with attribution scores in a logo-style visualization using vizsequence.
+    Plot DNA sequence with attribution scores in a logo-style visualization.
 
     Args:
         ax: Matplotlib axis to plot on
@@ -188,27 +228,51 @@ def plot_sequence_attribution(ax, seq_onehot, attribution, x_coords):
     """
     # Multiply attribution by one-hot to get actual sequence attribution
     # Shape: [L, 4] for A, C, G, T
-    seq_attr = attribution * seq_onehot
+    importance_scores = attribution * seq_onehot
 
-    # Use vizsequence to plot the sequence logo - let it handle everything
-    plot_weights_given_ax(
-        ax=ax,
-        array=seq_attr,
-        height_padding_factor=0.2,
-        length_padding=0.5,
-        subticks_frequency=max(1, len(seq_attr) // 10) if len(seq_attr) > 40 else 1,
-        ylabel="Attribution"
-    )
+    # Transpose to [4, L] for plotting (ACGT x positions)
+    importance_scores = importance_scores.T
 
-    # Reduce font sizes for cleaner display
+    # Extract reference sequence
+    ref_seq = ""
+    for j in range(importance_scores.shape[1]):
+        argmax_nt = np.argmax(np.abs(importance_scores[:, j]))
+
+        if argmax_nt == 0:
+            ref_seq += "A"
+        elif argmax_nt == 1:
+            ref_seq += "C"
+        elif argmax_nt == 2:
+            ref_seq += "G"
+        elif argmax_nt == 3:
+            ref_seq += "T"
+
+    # Draw letters
+    for i in range(len(ref_seq)):
+        mutability_score = np.sum(importance_scores[:, i])
+        dna_letter_at(ref_seq[i], i + 0.5, 0, mutability_score, ax, color=None)
+
+    # Set plot properties
+    ax.set_xticks([])
+    ax.yaxis.set_major_formatter(FormatStrFormatter('%.3f'))
+    ax.set_xlim((0, len(ref_seq)))
+
+    # Set y-axis limits
+    y_min = np.min(importance_scores) - 0.1 * np.max(np.abs(importance_scores))
+    y_max = np.max(importance_scores) + 0.1 * np.max(np.abs(importance_scores))
+    ax.set_ylim(y_min, y_max)
+
+    # Add horizontal line at y=0
+    ax.axhline(y=0., color='black', linestyle='-', linewidth=1)
+
+    # Set font sizes
     ax.tick_params(axis='both', labelsize=7)
-    ax.yaxis.label.set_fontsize(9)
-    ax.xaxis.label.set_fontsize(8)
+    ax.set_ylabel("Attribution", fontsize=9)
 
     return None
 
 
-def plot_interpretation(data, output_file, dpi=300, start_idx=None, end_idx=None, show_sequence=True):
+def plot_interpretation(data, output_file, dpi=300, start_idx=None, end_idx=None, show_sequence=True, plot_width=8.0, plot_height=1.5):
     """
     Generate interpretation plot from loaded data.
 
@@ -303,7 +367,7 @@ def plot_interpretation(data, output_file, dpi=300, start_idx=None, end_idx=None
     n = len(plot_data) + 1
     height_ratios = [1] * len(plot_data) + [0.1]
     _, axes = plt.subplots(  # fig is accessed implicitly by plt.savefig
-        nrows=n, ncols=1, figsize=(8, n * 1.5), sharex=False,  # Don't share x-axis since some may be smoothed
+        nrows=n, ncols=1, figsize=(plot_width, n * plot_height), sharex=False,  # Don't share x-axis since some may be smoothed
         gridspec_kw={"height_ratios": height_ratios}
     )
 
@@ -451,6 +515,20 @@ def main():
         help="Show sequence attribution plots (can be slow for large regions)"
     )
 
+    parser.add_argument(
+        "--motif-viz-plot-width",
+        type=float,
+        default=8.0,
+        help="Width of the motif visualization plot in inches (default: 8.0)"
+    )
+
+    parser.add_argument(
+        "--motif-viz-plot-height",
+        type=float,
+        default=1.5,
+        help="Height per subplot in inches (default: 1.5)"
+    )
+
     args = parser.parse_args()
 
     logger = BaseLogger(name="PlotScript", level=logging.INFO)
@@ -472,7 +550,7 @@ def main():
     logger.info("Generating plot...")
     if args.show_sequence:
         logger.info("Sequence attribution plots enabled")
-    plot_interpretation(data, args.output, dpi=args.dpi, start_idx=args.start, end_idx=args.end, show_sequence=args.show_sequence)
+    plot_interpretation(data, args.output, dpi=args.dpi, start_idx=args.start, end_idx=args.end, show_sequence=args.show_sequence, plot_width=args.motif_viz_plot_width, plot_height=args.motif_viz_plot_height)
 
     logger.info("Done!")
 

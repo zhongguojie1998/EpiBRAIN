@@ -1236,8 +1236,14 @@ class RegionInference:
             # Untransform this track
             if type == 'pred':
                 untransformed[:, dim_idx] = self.untransform_predictions(untransformed[:, dim_idx], track_name)
+                # Multiply BasalGanglia ATAC tracks by 100
+                if track_name.startswith('BasalGanglia-') and 'ATAC' in track_name:
+                    untransformed[:, dim_idx] = untransformed[:, dim_idx] * 100
             else:
                 untransformed[:, track_idx] = self.untransform_predictions(untransformed[:, track_idx], track_name)
+                # Multiply BasalGanglia ATAC tracks by 100
+                if track_name.startswith('BasalGanglia-') and 'ATAC' in track_name:
+                    untransformed[:, track_idx] = untransformed[:, track_idx] * 100
         return untransformed
 
     def export_to_bigwig(self, predictions, chr, window_start, track_names, output_dir, prefix="pred"):

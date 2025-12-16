@@ -163,6 +163,10 @@ def create_heatmap(data, track_name, value_column, output_file, figsize=(12, 4),
     if value_label is None:
         value_label = value_column
 
+    # Create x-tick labels to show every 2 base pairs
+    positions = pivot_data.columns.tolist()
+    xticklabels = [pos if i % 2 == 0 else '' for i, pos in enumerate(positions)]
+
     # Create heatmap
     sns.heatmap(
         pivot_data,
@@ -171,7 +175,7 @@ def create_heatmap(data, track_name, value_column, output_file, figsize=(12, 4),
         vmin=vmin,
         vmax=vmax,
         cbar_kws={'label': value_label},
-        xticklabels=True,
+        xticklabels=xticklabels,
         yticklabels=True,
         ax=ax
     )

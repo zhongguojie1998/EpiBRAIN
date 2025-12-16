@@ -348,13 +348,15 @@ def get_common_suffix(track_names, modality_suffixes=None):
     return None
 
 
-def get_track_color(track_name, default_color="#1f77b4"):
+def get_track_color(track_name, default_color="#1f77b4", label_color="#1f77b4", ref_color="#d62728"):
     """
     Determine track color based on track name.
 
     Args:
         track_name: Name of the track
         default_color: Default color if no pattern matches
+        label_color: Color for label tracks
+        ref_color: Color for ref/pred tracks
 
     Returns:
         Color string in hex format
@@ -362,9 +364,9 @@ def get_track_color(track_name, default_color="#1f77b4"):
     track_lower = track_name.lower()
 
     if "label" in track_lower:
-        return "#1f77b4"  # Blue
+        return label_color
     elif "pred" in track_lower:
-        return "#d62728"  # Red
+        return ref_color
     else:
         return default_color
 
@@ -373,7 +375,8 @@ def create_tracks_config(bigwig_files, output_file, height=2, default_color="#1f
                          label_min=None, label_max=None, pred_min=None, pred_max=None,
                          minmax_per_modality=None,
                          gtf_file=None, gtf_height=5, fontsize=10, gtf_fontsize=10,
-                         axis_fontsize=12, spacer_height=0.2):
+                         axis_fontsize=12, spacer_height=0.2,
+                         label_color="#1f77b4", ref_color="#d62728"):
     """
     Create pyGenomeTracks configuration file from bigwig files.
 
@@ -439,7 +442,7 @@ def create_tracks_config(bigwig_files, output_file, height=2, default_color="#1f
         track_lower = track_name.lower()
 
         # FIRST: Determine color based on original track name (before removing suffixes)
-        track_color = get_track_color(track_name, default_color)
+        track_color = get_track_color(track_name, default_color, label_color, ref_color)
 
         # FIRST: Determine min/max values based on track type and modality (before removing suffixes)
         # Determine track type
@@ -784,6 +787,26 @@ Examples:
     parser.add_argument("--color", type=str, default="#1f77b4",
                         help="Default track color (default: #1f77b4). Note: tracks with 'label' → blue, 'pred' → red")
 
+    # Track-specific color settings
+    parser.add_argument("--label-color", type=str, default="#1f77b4",
+                        help="Color for label tracks (default: #1f77b4, blue)")
+    parser.add_argument("--ref-color", type=str, default="#d62728",
+                        help="Color for reference/pred tracks (default: #d62728, red)")
+    parser.add_argument("--alt-color", type=str, default="#2ca02c",
+                        help="Color for alternative tracks (default: #2ca02c, green)")
+    parser.add_argument("--diff-color", type=str, default="#9467bd",
+                        help="Color for diff tracks (default: #9467bd, purple)")
+
+    # Track transparency settings
+    parser.add_argument("--ref-alpha", type=float, default=1.0,
+                        help="Transparency for reference tracks, 0.0-1.0 (default: 1.0, opaque)")
+    parser.add_argument("--alt-alpha", type=float, default=1.0,
+                        help="Transparency for alternative tracks, 0.0-1.0 (default: 1.0, opaque)")
+
+    # Track order settings
+    parser.add_argument("--alt-first", action="store_true",
+                        help="Display alt track first, then overlay ref (default: ref first, then alt)")
+
     # Font size settings
     parser.add_argument("--fontsize", type=int, default=10,
                         help="Font size for track titles (default: 10)")
@@ -1000,7 +1023,7 @@ Examples:
                     config_lines.append(f"file = {bw_file.absolute()}")
                     config_lines.append(f"title = {display_name}")
                     config_lines.append(f"height = {args.height}")
-                    config_lines.append(f"color = #1f77b4")  # Blue
+                    config_lines.append(f"color = {args.label_color}")
                     config_lines.append(f"fontsize = {args.fontsize}")
                     if min_val is not None:
                         config_lines.append(f"min_value = {min_val}")
@@ -1046,46 +1069,62 @@ Examples:
                         if track_lower_temp.endswith(common_suffix):
                             track_name = track_name[:-len(common_suffix)]
 
-                    # Add pred (reference) track
-                    if base_name in pred_map:
-                        bw_file = pred_map[base_name]
-                        display_name = f"{track_name} (ref)"
+                    # Determine track order based on --alt-first flag
+                    if args.alt_first:
+                        # Alt first, then ref overlaid
+                        first_track = ('alt', alt_map, args.alt_color, args.alt_alpha, alt_min_val, alt_max_val)
+                        second_track = ('ref', pred_map, args.ref_color, args.ref_alpha, pred_min_val, pred_max_val)
+                    else:
+                        # Ref first, then alt overlaid (default)
+                        first_track = ('ref', pred_map, args.ref_color, args.ref_alpha, pred_min_val, pred_max_val)
+                        second_track = ('alt', alt_map, args.alt_color, args.alt_alpha, alt_min_val, alt_max_val)
+
+                    # Add first track (no overlay)
+                    track_type, track_map, track_color, track_alpha, min_val, max_val = first_track
+                    if base_name in track_map:
+                        bw_file = track_map[base_name]
+                        display_name = f"{track_name} ({track_type})"
                         track_num += 1
-                        print(f"  {track_num}. {display_name} → red (alpha=0.5)")
+                        alpha_desc = f"alpha={track_alpha}" if track_alpha < 1.0 else ""
+                        print(f"  {track_num}. {display_name} → {track_color} {alpha_desc}".strip())
 
                         config_lines.append(f"[{display_name}]")
                         config_lines.append(f"file = {bw_file.absolute()}")
                         config_lines.append(f"title = {track_name} (ref/alt)")
                         config_lines.append(f"height = {args.height}")
-                        config_lines.append(f"color = #d62728")  # Red
-                        config_lines.append(f"alpha = 0.5")  # Transparency for overlay
+                        config_lines.append(f"color = {track_color}")
+                        if track_alpha < 1.0:
+                            config_lines.append(f"alpha = {track_alpha}")
                         config_lines.append(f"fontsize = {args.fontsize}")
-                        if pred_min_val is not None:
-                            config_lines.append(f"min_value = {pred_min_val}")
-                        if pred_max_val is not None:
-                            config_lines.append(f"max_value = {pred_max_val}")
+                        if min_val is not None:
+                            config_lines.append(f"min_value = {min_val}")
+                        if max_val is not None:
+                            config_lines.append(f"max_value = {max_val}")
                         config_lines.append("file_type = bigwig")
                         config_lines.append("number_of_bins = 700")
                         config_lines.append("")
 
-                    # Add alt (alternative) track with overlay
-                    if base_name in alt_map:
-                        bw_file = alt_map[base_name]
-                        display_name = f"{track_name} (alt)"
+                    # Add second track (overlaid on first)
+                    track_type, track_map, track_color, track_alpha, min_val, max_val = second_track
+                    if base_name in track_map:
+                        bw_file = track_map[base_name]
+                        display_name = f"{track_name} ({track_type})"
                         track_num += 1
-                        print(f"  {track_num}. {display_name} → green (alpha=0.5, overlaid)")
+                        alpha_desc = f"alpha={track_alpha}" if track_alpha < 1.0 else ""
+                        print(f"  {track_num}. {display_name} → {track_color} {alpha_desc} (overlaid)".strip())
 
                         config_lines.append(f"[{display_name}]")
                         config_lines.append(f"file = {bw_file.absolute()}")
                         config_lines.append(f"title =")  # Empty title for overlay
                         config_lines.append(f"height = {args.height}")
-                        config_lines.append(f"color = #2ca02c")  # Green
-                        config_lines.append(f"alpha = 0.5")  # Transparency for overlay
+                        config_lines.append(f"color = {track_color}")
+                        if track_alpha < 1.0:
+                            config_lines.append(f"alpha = {track_alpha}")
                         config_lines.append(f"fontsize = {args.fontsize}")
-                        if alt_min_val is not None:
-                            config_lines.append(f"min_value = {alt_min_val}")
-                        if alt_max_val is not None:
-                            config_lines.append(f"max_value = {alt_max_val}")
+                        if min_val is not None:
+                            config_lines.append(f"min_value = {min_val}")
+                        if max_val is not None:
+                            config_lines.append(f"max_value = {max_val}")
                         config_lines.append("file_type = bigwig")
                         config_lines.append("overlay_previous = share-y")
                         config_lines.append("number_of_bins = 700")
@@ -1131,7 +1170,7 @@ Examples:
                     config_lines.append(f"file = {bw_file.absolute()}")
                     config_lines.append(f"title = {display_name}")
                     config_lines.append(f"height = {args.height}")
-                    config_lines.append(f"color = #9467bd")  # Purple
+                    config_lines.append(f"color = {args.diff_color}")
                     config_lines.append(f"fontsize = {args.fontsize}")
                     if diff_min_val is not None:
                         config_lines.append(f"min_value = {diff_min_val}")
@@ -1342,7 +1381,7 @@ Examples:
                     track_name = track_name[len("MiniAtlas-"):]
 
                 # Set color based on folder type
-                track_color = "#1f77b4" if folder_type == 'label' else "#d62728"  # Blue for label, Red for pred
+                track_color = args.label_color if folder_type == 'label' else args.ref_color
 
                 # Get modality for min/max lookup
                 modality = get_modality_suffix(track_name_orig)
@@ -1535,7 +1574,8 @@ Examples:
                         gtf_file=gtf_file, gtf_height=args.gtf_height,
                         fontsize=args.fontsize, gtf_fontsize=args.gtf_fontsize,
                         axis_fontsize=args.axis_fontsize,
-                        spacer_height=args.spacer_height)
+                        spacer_height=args.spacer_height,
+                        label_color=args.label_color, ref_color=args.ref_color)
 
     # Generate plot
     output_image = Path(args.output)

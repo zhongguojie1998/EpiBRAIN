@@ -36,7 +36,7 @@ bin_level_results_orig = bin_level_results_orig[bin_level_results_orig['atlas_na
 
 # %% plot the density plots of PearsonR for each modality and atlas
 for res in [bin_level_results, bin_level_results_orig]:
-    fig, ax = plt.subplots(figsize=(6, 4))
+    fig, ax = plt.subplots(figsize=(5, 2))
     # calculate the average PearsonR for each modality and annotate on the legend
     modality_groups = res.groupby('modality')
     for modality, group in modality_groups:
