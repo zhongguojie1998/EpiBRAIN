@@ -36,11 +36,12 @@ usage() {
     echo "  --output-base DIR           Base output directory (default: Analysis/figures)"
     echo "  --gtf-file PATH             GTF annotation file (default: Data/source/gencode.v48.annotation.gtf.gz)"
     echo "  --num-gpus NUM              Number of GPUs to use for saturation mutagenesis (default: 4)"
-    echo "  --method METHOD             Attribution method for Step 5 (DeepLift, gradient_input, gradient_input_smooth; default: DeepLift)"
-    echo "  --tomtom-db PATH            Path to MEME motif database for TOMTOM (required for Step 7)"
-    echo "  --tomtom-region REGION      Region for TOMTOM analysis (default: variant ± 10bp)"
-    echo "  --skip-steps STEPS          Comma-separated list of steps to skip (1-7)"
-    echo "  -h, --help                  Show this help message"
+    echo "  --method METHOD                  Attribution method for Step 5 (DeepLift, gradient_input, gradient_input_smooth; default: DeepLift)"
+    echo "  --tomtom-db PATH                 Path to MEME motif database for TOMTOM (required for Step 7)"
+    echo "  --tomtom-region REGION           Region for TOMTOM analysis (default: variant ± 10bp)"
+    echo "  --tomtom-background-region REGION Region for calculating background nucleotide frequencies (default: variant ± 50bp)"
+    echo "  --skip-steps STEPS               Comma-separated list of steps to skip (1-7)"
+    echo "  -h, --help                       Show this help message"
     echo ""
     echo "Pipeline Steps:"
     echo "  Step 1: Quick inference - Predict effects across region"
@@ -150,6 +151,10 @@ while [[ $# -gt 0 ]]; do
             TOMTOM_REGION="$2"
             shift 2
             ;;
+        --tomtom-background-region)
+            TOMTOM_BACKGROUND_REGION="$2"
+            shift 2
+            ;;
         --skip-steps)
             SKIP_STEPS="$2"
             shift 2
@@ -214,6 +219,13 @@ if [ -z "$TOMTOM_REGION" ]; then
     TOMTOM_REGION_START=$((POS - 10))
     TOMTOM_REGION_END=$((POS + 10))
     TOMTOM_REGION="${CHR}:${TOMTOM_REGION_START}-${TOMTOM_REGION_END}"
+fi
+
+# Set default TOMTOM background region if not provided (variant ± 50bp)
+if [ -z "$TOMTOM_BACKGROUND_REGION" ]; then
+    TOMTOM_BACKGROUND_REGION_START=$((POS - 50))
+    TOMTOM_BACKGROUND_REGION_END=$((POS + 50))
+    TOMTOM_BACKGROUND_REGION="${CHR}:${TOMTOM_BACKGROUND_REGION_START}-${TOMTOM_BACKGROUND_REGION_END}"
 fi
 
 # Auto-detect gene from GTF if not provided
@@ -359,20 +371,22 @@ should_skip() {
 echo "========================================="
 echo "Variant Analysis Pipeline"
 echo "========================================="
-echo "Variant:       $VARIANT"
-echo "Variant Name:  $VARIANT_NAME"
-echo "Gene:          $GENE"
-echo "Midpoint:      ${MIDPOINT:-N/A (using defaults)}"
-echo "Gene Region:   $GENE_REGION"
-echo "Sat Region:    $SAT_REGION"
-echo "Track:         $TRACK"
-echo "Trial Pos:     $TRIAL_POS"
-echo "Disease:       ${DISEASE:-N/A}"
-echo "Experiment:    $EXP_NAME"
-echo "Checkpoint:    $CHECKPOINT"
-echo "Num GPUs:      $NUM_GPUS (for saturation mutagenesis)"
-echo "Method:        $METHOD (for motif interpretation)"
-echo "Output Dir:    $ANALYSIS_DIR"
+echo "Variant:            $VARIANT"
+echo "Variant Name:       $VARIANT_NAME"
+echo "Gene:               $GENE"
+echo "Midpoint:           ${MIDPOINT:-N/A (using defaults)}"
+echo "Gene Region:        $GENE_REGION"
+echo "Sat Region:         $SAT_REGION"
+echo "Track:              $TRACK"
+echo "Trial Pos:          $TRIAL_POS"
+echo "Disease:            ${DISEASE:-N/A}"
+echo "Experiment:         $EXP_NAME"
+echo "Checkpoint:         $CHECKPOINT"
+echo "Num GPUs:           $NUM_GPUS (for saturation mutagenesis)"
+echo "Method:             $METHOD (for motif interpretation)"
+echo "TOMTOM Region:      $TOMTOM_REGION"
+echo "TOMTOM Background:  $TOMTOM_BACKGROUND_REGION"
+echo "Output Dir:         $ANALYSIS_DIR"
 echo "========================================="
 echo ""
 
@@ -588,6 +602,7 @@ if ! should_skip 7; then
     else
         echo "[Step 7/7] Running TOMTOM analysis..."
         echo "  Region: $TOMTOM_REGION"
+        echo "  Background: $TOMTOM_BACKGROUND_REGION"
         echo "  Database: $TOMTOM_DB"
 
         # Check if TOMTOM database exists
@@ -624,6 +639,7 @@ if ! should_skip 7; then
                 --name_base "$NAME_BASE" \
                 --baseline random \
                 --region "$TOMTOM_REGION" \
+                --background-region "$TOMTOM_BACKGROUND_REGION" \
                 --output_dir "$TOMTOM_OUTPUT_DIR" \
                 --meme_db "$TOMTOM_DB"
 

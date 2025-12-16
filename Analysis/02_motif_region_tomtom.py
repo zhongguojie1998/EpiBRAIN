@@ -19,12 +19,13 @@ Usage:
         --output_dir ./tomtom_results \
         --meme_db /path/to/motif_database.meme
 
-    # Extract multiple regions
+    # Extract multiple regions with custom background frequencies
     python 02_motif_region_tomtom.py \
         --data_dir ./Res/exp/analysis_20/raw_data/interp_diff \
         --name_base chr12_40144409_40668697_LRRK2_STR-D1-MSN_minus \
         --baseline random \
         --region chr12:40208950-40208975,chr12:40210000-40210025 \
+        --background-region chr12:40000000-41000000 \
         --output_dir ./tomtom_results \
         --meme_db /path/to/motif_database.meme
 """
@@ -141,6 +142,50 @@ def extract_pwm_from_attribution(attribution, sequence, region_start, region_end
             pwm = pwm / row_sums
 
     return pwm
+
+
+def calculate_background_frequencies(sequence, region_start, region_end, region_start_bp, logger=None):
+    """
+    Calculate background nucleotide frequencies from a genomic region.
+
+    Args:
+        sequence: Sequence one-hot [length, 4] where columns are [A, C, G, T]
+        region_start: Start position of background region (genomic coordinate)
+        region_end: End position of background region (genomic coordinate)
+        region_start_bp: Start position of the data (genomic coordinate)
+        logger: Logger instance
+
+    Returns:
+        tuple: Background frequencies (A, C, G, T) or None if region is invalid
+    """
+    # Calculate bp indices into the data array
+    start_bp_idx = region_start - region_start_bp
+    end_bp_idx = region_end - region_start_bp
+
+    # Check if indices are valid
+    if start_bp_idx < 0 or end_bp_idx > len(sequence):
+        if logger:
+            logger.warning(f"Background region {region_start}-{region_end} is outside data range")
+        return None
+    if start_bp_idx >= end_bp_idx:
+        if logger:
+            logger.warning(f"Invalid background region: start >= end")
+        return None
+
+    # Extract sequence for region
+    region_seq = sequence[start_bp_idx:end_bp_idx]
+
+    # Calculate frequencies (columns are A, C, G, T)
+    freq_A = region_seq[:, 0].mean()
+    freq_C = region_seq[:, 1].mean()
+    freq_G = region_seq[:, 2].mean()
+    freq_T = region_seq[:, 3].mean()
+
+    if logger:
+        logger.info(f"  Calculated background frequencies from {region_end - region_start} bp:")
+        logger.info(f"    A: {freq_A:.4f}, C: {freq_C:.4f}, G: {freq_G:.4f}, T: {freq_T:.4f}")
+
+    return (freq_A, freq_C, freq_G, freq_T)
 
 
 def clip_pwm_by_information_content(pwm, threshold=0.2, background=(0.25, 0.25, 0.25, 0.25)):
@@ -271,6 +316,8 @@ def run_tomtom(meme_file, output_dir, meme_db, dist='pearson', thresh=1.0, use_e
               help="Baseline type (e.g., random, shuffle)")
 @click.option("--region", "-r", required=True, type=str,
               help="Genomic region(s) to extract (e.g., chr12:40208950-40208975 or multiple: region1,region2,...)")
+@click.option("--background-region", type=str, default=None,
+              help="Genomic region to use for calculating background nucleotide frequencies (e.g., chr12:40000000-41000000). If not provided, uniform frequencies (0.25 each) are used.")
 @click.option("--output_dir", "-o", required=True, type=str,
               help="Output directory for MEME file and TOMTOM results")
 @click.option("--meme_db", required=True, type=str,
@@ -287,7 +334,7 @@ def run_tomtom(meme_file, output_dir, meme_db, dist='pearson', thresh=1.0, use_e
               help="TOMTOM significance threshold (default: 1.0 for e-value)")
 @click.option("--tomtom_use_qvalue", is_flag=True, default=False,
               help="Use q-value threshold instead of e-value (default: use e-value)")
-def main(data_dir, name_base, baseline, region, output_dir, meme_db, normalize,
+def main(data_dir, name_base, baseline, region, background_region, output_dir, meme_db, normalize,
          clip_threshold, ic_threshold, tomtom_dist, tomtom_thresh, tomtom_use_qvalue):
     """
     Extract PWMs from motif interpretation for specific regions and run TOMTOM.
@@ -363,6 +410,34 @@ def main(data_dir, name_base, baseline, region, output_dir, meme_db, normalize,
         logger.error("Cannot determine window coordinates")
         sys.exit(1)
 
+    # Calculate background frequencies if background region is provided
+    background = (0.25, 0.25, 0.25, 0.25)  # Default uniform frequencies
+    if background_region:
+        logger.info(f"\nCalculating background frequencies from region: {background_region}")
+        try:
+            bg_chr, bg_start, bg_end = parse_region(background_region)
+
+            # Check chromosome match
+            if bg_chr != window_chr:
+                logger.warning(f"Background region chromosome ({bg_chr}) does not match data chromosome ({window_chr})")
+                logger.warning("Using default uniform background frequencies")
+            else:
+                # Calculate frequencies
+                bg_freqs = calculate_background_frequencies(
+                    sequence, bg_start, bg_end, window_start, logger=logger
+                )
+
+                if bg_freqs is not None:
+                    background = bg_freqs
+                    logger.info("Using calculated background frequencies")
+                else:
+                    logger.warning("Failed to calculate background frequencies, using default uniform frequencies")
+        except Exception as e:
+            logger.warning(f"Error processing background region: {e}")
+            logger.warning("Using default uniform background frequencies")
+    else:
+        logger.info("\nUsing default uniform background frequencies: A=0.25, C=0.25, G=0.25, T=0.25")
+
     # Parse regions
     regions = region.split(',')
     logger.info(f"Extracting {len(regions)} region(s):")
@@ -401,7 +476,7 @@ def main(data_dir, name_base, baseline, region, output_dir, meme_db, normalize,
 
         # Clip by information content
         if ic_threshold > 0:
-            pwm_clipped = clip_pwm_by_information_content(pwm, threshold=ic_threshold)
+            pwm_clipped = clip_pwm_by_information_content(pwm, threshold=ic_threshold, background=background)
             if pwm_clipped is None:
                 logger.warning(f"    No positions pass IC threshold {ic_threshold}, using full PWM")
                 pwm_clipped = pwm
@@ -425,7 +500,7 @@ def main(data_dir, name_base, baseline, region, output_dir, meme_db, normalize,
 
     # Write MEME file
     meme_file = os.path.join(output_dir, f"{name_base}_{baseline}_regions.meme")
-    write_meme_format(pwms, meme_file, logger=logger)
+    write_meme_format(pwms, meme_file, background=background, logger=logger)
 
     # Run TOMTOM
     logger.info("")
