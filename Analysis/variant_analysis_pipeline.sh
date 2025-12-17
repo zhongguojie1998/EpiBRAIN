@@ -26,7 +26,7 @@ usage() {
     echo "                              - Step 1: Switches to region inference mode (full gene region centered at midpoint)"
     echo "                              - Step 2: Inference context centered at midpoint (mutations still at variant ±20bp)"
     echo "                              - Steps 3,5,6: Inference/visualization centered at midpoint"
-    echo "                              - Step 6 zoom: Always shows variant location (±50bp), not midpoint"
+    echo "                              - Step 6 zoom: Shows variant location ±50bp (or custom --motif-viz-zoom-midpoint)"
     echo "                              - Default: variant position for step 1-2; gene center from GTF for steps 3,5,6"
     echo "  --gene-region REGION        Gene region in format chr:start-end (default: midpoint/gene-center ± 262144bp)"
     echo "  --sat-region REGION         Saturation mutagenesis region chr:start-end (default: variant ±20bp)"
@@ -52,8 +52,11 @@ usage() {
     echo "  --alt-first                      Display alt track first, then overlay ref (default: ref first, then alt)"
     echo "  --sat-mutagenesis-viz-plot-width WIDTH   Width of saturation mutagenesis plot in inches (default: 12.0)"
     echo "  --sat-mutagenesis-viz-plot-height HEIGHT Height of saturation mutagenesis plot in inches (default: 4.0)"
+    echo "  --sat-mutagenesis-vmin VALUE             Minimum value for heatmap colorscale (default: auto)"
+    echo "  --sat-mutagenesis-vmax VALUE             Maximum value for heatmap colorscale (default: auto)"
     echo "  --motif-viz-plot-width WIDTH             Width of motif interpretation plots in inches (default: 8.0)"
     echo "  --motif-viz-plot-height HEIGHT           Height per subplot in motif plots in inches (default: 1.5)"
+    echo "  --motif-viz-zoom-midpoint POSITION       Midpoint for Step 6 zoom plot in format chr:pos (default: variant position)"
     echo "  --skip-steps STEPS               Comma-separated list of steps to skip (1-7)"
     echo "  -h, --help                       Show this help message"
     echo ""
@@ -65,7 +68,7 @@ usage() {
     echo "  Step 3: Genome track visualization - Visualize predictions across gene region"
     echo "  Step 4: Mutagenesis visualization - Visualize saturation mutagenesis results (log2 fold change)"
     echo "  Step 5: Motif interpretation - Identify regulatory motifs (uses --method)"
-    echo "  Step 6: Motif plotting - Generate full region plot and zoomed plot at variant (±100bp)"
+    echo "  Step 6: Motif plotting - Generate full region plot and zoomed plot (±50bp, centered at variant or custom midpoint)"
     echo "  Step 7: TOMTOM analysis - Match motifs to known TF binding sites (optional, requires --tomtom-db)"
     echo ""
     echo "Example:"
@@ -233,12 +236,24 @@ while [[ $# -gt 0 ]]; do
             SAT_MUTAGENESIS_VIZ_PLOT_HEIGHT="$2"
             shift 2
             ;;
+        --sat-mutagenesis-vmin)
+            SAT_MUTAGENESIS_VMIN="$2"
+            shift 2
+            ;;
+        --sat-mutagenesis-vmax)
+            SAT_MUTAGENESIS_VMAX="$2"
+            shift 2
+            ;;
         --motif-viz-plot-width)
             MOTIF_VIZ_PLOT_WIDTH="$2"
             shift 2
             ;;
         --motif-viz-plot-height)
             MOTIF_VIZ_PLOT_HEIGHT="$2"
+            shift 2
+            ;;
+        --motif-viz-zoom-midpoint)
+            MOTIF_VIZ_ZOOM_MIDPOINT="$2"
             shift 2
             ;;
         --skip-steps)
@@ -695,11 +710,24 @@ if ! should_skip 4; then
     echo "[Step 4/7] Running mutagenesis visualization..."
     SAT_OUTPUT_DIR="${ANALYSIS_DIR}/sat_mutagenesis"
     SAT_FIGSIZE="${SAT_MUTAGENESIS_VIZ_PLOT_WIDTH},${SAT_MUTAGENESIS_VIZ_PLOT_HEIGHT}"
-    python Analysis/03_6_visualize_mutagenesis.py \
-        --input "$SAT_OUTPUT_DIR" \
-        --track "$TRACK" \
+
+    # Build command with optional vmin/vmax parameters
+    SAT_VIZ_CMD="python Analysis/03_6_visualize_mutagenesis.py \
+        --input \"$SAT_OUTPUT_DIR\" \
+        --track \"$TRACK\" \
         --log2fc \
-        --figsize "$SAT_FIGSIZE"
+        --figsize \"$SAT_FIGSIZE\""
+
+    if [ -n "$SAT_MUTAGENESIS_VMIN" ]; then
+        SAT_VIZ_CMD="$SAT_VIZ_CMD --vmin $SAT_MUTAGENESIS_VMIN"
+    fi
+
+    if [ -n "$SAT_MUTAGENESIS_VMAX" ]; then
+        SAT_VIZ_CMD="$SAT_VIZ_CMD --vmax $SAT_MUTAGENESIS_VMAX"
+    fi
+
+    eval "$SAT_VIZ_CMD"
+
     echo "✓ Step 4 complete."
     echo ""
 else
@@ -777,12 +805,23 @@ if ! should_skip 6; then
         --motif-viz-plot-width "$MOTIF_VIZ_PLOT_WIDTH" \
         --motif-viz-plot-height "$MOTIF_VIZ_PLOT_HEIGHT"
 
-    # Plot 2: Zoomed region around variant (±50bp)
-    # Always zoom to variant location, regardless of midpoint setting
-    ZOOM_START=$((POS - 50))
-    ZOOM_END=$((POS + 50))
-    PLOT_OUTPUT_ZOOM="${ANALYSIS_DIR}/motif_interpretation_zoom.pdf"
-    echo "  Creating zoomed region plot (variant ±50bp: ${CHR}:${ZOOM_START}-${ZOOM_END})..."
+    # Plot 2: Zoomed region around variant or custom midpoint (±50bp)
+    # Use custom zoom midpoint if provided, otherwise use variant location
+    if [ -n "$MOTIF_VIZ_ZOOM_MIDPOINT" ]; then
+        # Parse custom midpoint (format: chr:pos)
+        ZOOM_CHR=$(echo "$MOTIF_VIZ_ZOOM_MIDPOINT" | cut -d':' -f1)
+        ZOOM_CENTER=$(echo "$MOTIF_VIZ_ZOOM_MIDPOINT" | cut -d':' -f2)
+        ZOOM_START=$((ZOOM_CENTER - 50))
+        ZOOM_END=$((ZOOM_CENTER + 50))
+        PLOT_OUTPUT_ZOOM="${ANALYSIS_DIR}/motif_interpretation_zoom.pdf"
+        echo "  Creating zoomed region plot (custom midpoint ±50bp: ${ZOOM_CHR}:${ZOOM_START}-${ZOOM_END})..."
+    else
+        # Default to variant position
+        ZOOM_START=$((POS - 50))
+        ZOOM_END=$((POS + 50))
+        PLOT_OUTPUT_ZOOM="${ANALYSIS_DIR}/motif_interpretation_zoom.pdf"
+        echo "  Creating zoomed region plot (variant ±50bp: ${CHR}:${ZOOM_START}-${ZOOM_END})..."
+    fi
     python Analysis/02_motif_interpretation_plot.py \
         --data_dir "$DATA_DIR" \
         --name_base "$NAME_BASE" \

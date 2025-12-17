@@ -38,9 +38,14 @@ import sys
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import matplotlib
 import numpy as np
 import pandas as pd
 import seaborn as sns
+
+# Set font type to TrueType (Type 42) for editable text in Adobe Illustrator
+matplotlib.rcParams['pdf.fonttype'] = 42
+matplotlib.rcParams['ps.fonttype'] = 42
 
 
 def load_saturation_mutagenesis_results(results_file):

@@ -669,6 +669,89 @@ class RegionInference:
 
         return ref_pred, alt_pred, real_start, real_end
 
+    def predict_crispri_effect(self, chr, crispri_start, crispri_end, use_head='regression'):
+        """
+        Predict effect of in silico CRISPRi silencing by replacing a region with pad tokens.
+
+        Args:
+            chr: Chromosome
+            crispri_start: Start position of CRISPRi target region (1-based, inclusive)
+            crispri_end: End position of CRISPRi target region (1-based, inclusive)
+            use_head: Which prediction head to use
+
+        Returns:
+            tuple: (ref_pred, crispri_pred, window_start, window_end)
+                ref_pred: Reference predictions
+                crispri_pred: CRISPRi (silenced) predictions
+                window_start, window_end: Coordinates of the prediction window
+        """
+        logger.info(f"Predicting CRISPRi effect: silencing {chr}:{crispri_start}-{crispri_end}")
+
+        # Calculate the center of the CRISPRi region for inference window
+        center_pos = (crispri_start + crispri_end) // 2
+
+        # Get sequence centered on CRISPRi region
+        token_dict = self.fasta(
+            chr_name=chr,
+            start=center_pos - self.seq_len // 2,
+            end=center_pos + self.seq_len // 2,
+            return_augs=False,
+            return_rela_idx=True
+        )
+
+        ref_seq_onehot = token_dict["one_hot"]
+        real_start, real_end = token_dict["real_region"]
+
+        logger.info(f"Inference window: {chr}:{real_start}-{real_end}")
+
+        # Calculate indices of CRISPRi region within the sequence
+        # crispri_start/end are 1-based, real_start is 0-based
+        crispri_start_idx = max(0, crispri_start - real_start)
+        crispri_end_idx = min(len(ref_seq_onehot), crispri_end - real_start)
+
+        logger.info(f"CRISPRi region indices in sequence: {crispri_start_idx}-{crispri_end_idx}")
+
+        # Create CRISPRi sequence by replacing target region with pad tokens (0.25 for all nucleotides)
+        crispri_seq_onehot = ref_seq_onehot.clone()
+        crispri_seq_onehot[crispri_start_idx:crispri_end_idx] = 0.25
+
+        # Create reverse complement sequences for augmentation
+        ref_seq_onehot_rev = one_hot_reverse_complement(ref_seq_onehot)
+        crispri_seq_onehot_rev = one_hot_reverse_complement(crispri_seq_onehot)
+
+        logger.info(f"Predicting reference and CRISPRi sequences for {chr}:{real_start}-{real_end}")
+
+        # Predict both sequences with reverse complement augmentation
+        with torch.no_grad():
+            # Forward strand predictions
+            ref_tensor_fwd = ref_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(self.device)
+            ref_pred_fwd = self.model(ref_tensor_fwd, use_head).detach().cpu().numpy().squeeze(0)
+
+            crispri_tensor_fwd = crispri_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(self.device)
+            crispri_pred_fwd = self.model(crispri_tensor_fwd, use_head).detach().cpu().numpy().squeeze(0)
+
+            # Reverse strand predictions
+            ref_tensor_rev = ref_seq_onehot_rev.unsqueeze(0).permute(0, 2, 1).to(self.device)
+            ref_pred_rev = self.model(ref_tensor_rev, use_head).detach().cpu().numpy().squeeze(0)
+
+            crispri_tensor_rev = crispri_seq_onehot_rev.unsqueeze(0).permute(0, 2, 1).to(self.device)
+            crispri_pred_rev = self.model(crispri_tensor_rev, use_head).detach().cpu().numpy().squeeze(0)
+
+            # Flip predictions along sequence dimension (reverse order)
+            ref_pred_rev = np.flip(ref_pred_rev, axis=0)
+            crispri_pred_rev = np.flip(crispri_pred_rev, axis=0)
+
+            # Swap RNAplus and RNAminus tracks for reverse complement
+            if self.rc_swap_index is not None:
+                ref_pred_rev[:, self.rc_orig_index] = ref_pred_rev[:, self.rc_swap_index]
+                crispri_pred_rev[:, self.rc_orig_index] = crispri_pred_rev[:, self.rc_swap_index]
+
+            # Average forward and reverse predictions
+            ref_pred = (ref_pred_fwd + ref_pred_rev) / 2.0
+            crispri_pred = (crispri_pred_fwd + crispri_pred_rev) / 2.0
+
+        return ref_pred, crispri_pred, real_start, real_end
+
     def run_saturation_mutagenesis(self, chr, start_pos, end_pos, use_head='regression', output_dir=None,
                                    gene_exons=None, gene_name=None, num_gpus=1, region_center=None):
         """
@@ -1360,6 +1443,9 @@ Examples:
 
   # Saturation mutagenesis with gene-specific statistics
   python 01_0_quick_inference_bigwig.py --sat_mutagenesis chr12:40208963 --gene LRRK2 --exp_name my_exp --chk best --output outputs/saturation_LRRK2
+
+  # In silico CRISPRi experiment (silence a region)
+  python 01_0_quick_inference_bigwig.py --crispri chr1:100000-100050 --exp_name my_exp --chk best --output outputs/crispri_chr1_100000
         """
     )
 
@@ -1368,6 +1454,7 @@ Examples:
     input_group.add_argument('--region', type=str, help='Genomic region (e.g., chr1:100000-200000)')
     input_group.add_argument('--variant', type=str, help='Variant (e.g., chr1:154426970:G:A)')
     input_group.add_argument('--sat_mutagenesis', type=str, help='Saturation mutagenesis region (e.g., chr1:154426970 or chr1:154426970-154426975)')
+    input_group.add_argument('--crispri', type=str, help='CRISPRi silencing region (e.g., chr1:100000-100050) - replaces region with pad tokens')
 
     # Gene can be used alone or with saturation mutagenesis
     parser.add_argument('--gene', type=str, default=None,
@@ -1414,8 +1501,8 @@ Examples:
     args = parser.parse_args()
 
     # Validate input: need at least --gene or one of the mutually exclusive options
-    if not args.gene and not args.region and not args.variant and not args.sat_mutagenesis:
-        parser.error("Must specify at least one of: --gene, --region, --variant, or --sat_mutagenesis")
+    if not args.gene and not args.region and not args.variant and not args.sat_mutagenesis and not args.crispri:
+        parser.error("Must specify at least one of: --gene, --region, --variant, --sat_mutagenesis, or --crispri")
 
     # Resolve model paths
     # Method 1: Direct checkpoint path
@@ -1605,6 +1692,66 @@ Examples:
         logger.info(f"Variant: {chr}:{pos}:{ref}>{alt}")
         logger.info(f"Window: {chr}:{window_start}-{window_end}")
 
+    elif args.crispri:
+        # CRISPRi mode - in silico gene silencing
+        logger.info(f"Mode: CRISPRi silencing for {args.crispri}")
+
+        # Parse CRISPRi region (format: chr:start-end)
+        if ':' not in args.crispri or '-' not in args.crispri:
+            logger.error(f"Invalid CRISPRi region format: {args.crispri}")
+            logger.error("Expected format: chr:start-end (e.g., chr1:100000-100050)")
+            sys.exit(1)
+
+        chr_region = args.crispri.split(':')
+        chr = chr_region[0]
+        start_end = chr_region[1].split('-')
+        crispri_start = int(start_end[0])
+        crispri_end = int(start_end[1])
+
+        logger.info(f"CRISPRi target region: {chr}:{crispri_start}-{crispri_end}")
+
+        # Predict CRISPRi effect
+        ref_pred, crispri_pred, window_start, window_end = inference.predict_crispri_effect(
+            chr, crispri_start, crispri_end
+        )
+
+        # Untransform predictions back to original scale
+        ref_pred_untransformed = inference.untransform_all_predictions(ref_pred)
+        crispri_pred_untransformed = inference.untransform_all_predictions(crispri_pred)
+
+        # Export reference predictions
+        inference.export_to_bigwig(
+            ref_pred_untransformed, chr, window_start,
+            inference.label_names, output_dir, prefix="pred"
+        )
+
+        # Export CRISPRi predictions
+        inference.export_to_bigwig(
+            crispri_pred_untransformed, chr, window_start,
+            inference.label_names, output_dir, prefix="crispri"
+        )
+
+        # Export labels if requested
+        if not args.no_labels:
+            labels = inference.get_labels_for_region(chr, window_start, window_end)
+            if labels is not None:
+                labels_untransformed = inference.untransform_all_predictions(labels, type='label')
+                inference.export_to_bigwig(
+                    labels_untransformed, chr, window_start,
+                    inference.label_names, output_dir, prefix="label"
+                )
+
+        # Calculate and export difference (crispri - ref) using untransformed predictions
+        diff = crispri_pred_untransformed - ref_pred_untransformed
+        inference.export_to_bigwig(
+            diff, chr, window_start,
+            inference.label_names, output_dir, prefix="diff"
+        )
+
+        logger.info(f"CRISPRi effect prediction complete")
+        logger.info(f"Target region: {chr}:{crispri_start}-{crispri_end}")
+        logger.info(f"Window: {chr}:{window_start}-{window_end}")
+
     # Print summary
     logger.info("="*80)
     logger.info("Summary")
@@ -1638,6 +1785,24 @@ Examples:
         print(f"    --bigwig-dir {output_dir}/alt \\")
         print(f"    --region {chr}:{pos-5000}-{pos+5000} \\")
         print(f"    --output {output_dir}/alt_visualization.pdf")
+    elif args.crispri:
+        print(f"  python Analysis/00_visualize_data_pygenometrack.py \\")
+        print(f"    --bigwig-dir {output_dir}/pred \\")
+        print(f"    --region {chr}:{window_start}-{window_end} \\")
+        print(f"    --output {output_dir}/visualization.pdf")
+        print()
+        print("  Or compare reference vs CRISPRi:")
+        print(f"  # Reference")
+        print(f"  python Analysis/00_visualize_data_pygenometrack.py \\")
+        print(f"    --bigwig-dir {output_dir}/pred \\")
+        print(f"    --region {chr}:{crispri_start-5000}-{crispri_end+5000} \\")
+        print(f"    --output {output_dir}/ref_visualization.pdf")
+        print()
+        print(f"  # CRISPRi silenced")
+        print(f"  python Analysis/00_visualize_data_pygenometrack.py \\")
+        print(f"    --bigwig-dir {output_dir}/crispri \\")
+        print(f"    --region {chr}:{crispri_start-5000}-{crispri_end+5000} \\")
+        print(f"    --output {output_dir}/crispri_visualization.pdf")
     elif args.sat_mutagenesis:
         print(f"  # View results in output directory:")
         print(f"  cat {output_dir}/saturation_mutagenesis_results.tsv")

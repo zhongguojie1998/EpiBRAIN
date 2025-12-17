@@ -35,6 +35,10 @@ os.chdir(ROOT)
 
 from utils.logging import BaseLogger
 
+# Set font type to TrueType (Type 42) for editable text in Adobe Illustrator
+mpl.rcParams['pdf.fonttype'] = 42
+mpl.rcParams['ps.fonttype'] = 42
+
 
 # Helper function to draw a letter at a given position
 def dna_letter_at(letter, x, y, yscale=1, ax=None, color=None, alpha=1.0):
@@ -340,16 +344,17 @@ def plot_interpretation(data, output_file, dpi=300, start_idx=None, end_idx=None
     plot_type = []  # 'line' or 'sequence'
     plot_x = []  # Store x-coordinates for each plot
 
-    # Add importance scores at bp resolution
-    for baseline_type, importance_data in importance_scores:
-        # Importance data is already at bp resolution
-        # Slice to requested range
-        importance_bp = importance_data[start_bp_idx:end_bp_idx]
+    # Add importance scores at bp resolution (skip if showing sequence)
+    if not show_sequence:
+        for baseline_type, importance_data in importance_scores:
+            # Importance data is already at bp resolution
+            # Slice to requested range
+            importance_bp = importance_data[start_bp_idx:end_bp_idx]
 
-        plot_data.append(importance_bp)
-        plot_x.append(x_bp)
-        plot_title.append(f"Importance Score ({baseline_type} baseline)")
-        plot_type.append('line')
+            plot_data.append(importance_bp)
+            plot_x.append(x_bp)
+            plot_title.append(f"Importance Score ({baseline_type} baseline)")
+            plot_type.append('line')
 
     # Add sequence attribution plots (if requested)
     if show_sequence:
@@ -549,7 +554,7 @@ def main():
     # Generate plot
     logger.info("Generating plot...")
     if args.show_sequence:
-        logger.info("Sequence attribution plots enabled")
+        logger.info("Sequence attribution plots enabled (importance line plot hidden)")
     plot_interpretation(data, args.output, dpi=args.dpi, start_idx=args.start, end_idx=args.end, show_sequence=args.show_sequence, plot_width=args.motif_viz_plot_width, plot_height=args.motif_viz_plot_height)
 
     logger.info("Done!")

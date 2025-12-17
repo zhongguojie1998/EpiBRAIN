@@ -43,6 +43,7 @@ SKIP_03=false
 SKIP_09=false
 SKIP_10=false
 SKIP_11=false
+SKIP_12=false
 ONLY_SECTION=""
 
 while [[ $# -gt 0 ]]; do
@@ -53,6 +54,7 @@ while [[ $# -gt 0 ]]; do
         --skip-09) SKIP_09=true; shift ;;
         --skip-10) SKIP_10=true; shift ;;
         --skip-11) SKIP_11=true; shift ;;
+        --skip-12) SKIP_12=true; shift ;;
         --only-*)
             ONLY_SECTION="${1#--only-}"
             shift
@@ -478,6 +480,71 @@ if should_run_section "11"; then
 fi
 
 # ==============================================================================
+# Section 12: Variant Analysis Pipeline Example
+# ==============================================================================
+
+if ! $SKIP_12; then
+    print_section_header "Section 12: Variant Analysis Pipeline Example"
+
+    echo "This is an example of running the variant_analysis_pipeline.sh with custom visualization options."
+    echo "Analyzing variant rs6581593 (chr12:40208963:C>T) in LRRK2 gene associated with Parkinson's disease."
+    echo ""
+    echo "Command:"
+    echo "bash Analysis/variant_analysis_pipeline.sh \\"
+    echo "    --variant chr12:40208963:C:T \\"
+    echo "    --track BasalGanglia-Microglia_RNAminus \\"
+    echo "    --variant-name rs6581593 \\"
+    echo "    --gene LRRK2 \\"
+    echo "    --disease Parkinsons \\"
+    echo "    --skip-steps 1,2,3,5,7 \\"
+    echo "    --method gradient_input \\"
+    echo "    --tomtom-db Data/source/meme-5.4.1/motif_databases/HOCOMOCO/H12CORE_meme_format.meme \\"
+    echo "    --tomtom-region chr12:40208962-40208969 \\"
+    echo "    --track-height 1.5 \\"
+    echo "    --gtf-height 2 \\"
+    echo "    --spacer-height 0.1 \\"
+    echo "    --ref-color '#2ca02c' \\"
+    echo "    --alt-color '#d62728' \\"
+    echo "    --alt-first \\"
+    echo "    --ref-alpha 0.9 \\"
+    echo "    --alt-alpha 0.9 \\"
+    echo "    --sat-mutagenesis-viz-plot-width 8 \\"
+    echo "    --motif-viz-plot-width 6 \\"
+    echo "    --sat-mutagenesis-viz-plot-height 3 \\"
+    echo "    --motif-viz-plot-height 1.5 \\"
+    echo "    --motif-viz-zoom-midpoint chr12:40208950"
+    echo ""
+
+    bash Analysis/variant_analysis_pipeline.sh \
+        --variant chr12:40208963:C:T \
+        --track BasalGanglia-Microglia_RNAminus \
+        --variant-name rs6581593 \
+        --gene LRRK2 \
+        --disease Parkinsons \
+        --skip-steps 1,2,3,5,7 \
+        --method gradient_input \
+        --tomtom-db Data/source/meme-5.4.1/motif_databases/HOCOMOCO/H12CORE_meme_format.meme \
+        --tomtom-region chr12:40208962-40208969 \
+        --track-height 1.5 \
+        --gtf-height 2 \
+        --spacer-height 0.1 \
+        --ref-color '#2ca02c' \
+        --alt-color '#d62728' \
+        --alt-first \
+        --ref-alpha 0.9 \
+        --alt-alpha 0.9 \
+        --sat-mutagenesis-viz-plot-width 8 \
+        --motif-viz-plot-width 6 \
+        --sat-mutagenesis-viz-plot-height 3 \
+        --motif-viz-plot-height 1.2 \
+        --motif-viz-zoom-midpoint chr12:40208950
+
+    echo "Section 12: Completed"
+else
+    echo "Section 12: Skipping variant analysis pipeline example"
+fi
+
+# ==============================================================================
 # Summary
 # ==============================================================================
 
@@ -493,6 +560,7 @@ else
     $SKIP_09 || echo "  ✓ Section 09: ABC Analysis (info provided)"
     $SKIP_10 || echo "  ✓ Section 10: Differential Peak (info provided)"
     $SKIP_11 || echo "  ✓ Section 11: Differential Expression (info provided)"
+    $SKIP_12 || echo "  ✓ Section 12: Variant Analysis Pipeline Example"
 fi
 
 echo ""
