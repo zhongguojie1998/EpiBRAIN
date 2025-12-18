@@ -12,6 +12,10 @@ import matplotlib.colors as mcolors
 from matplotlib.patches import Patch
 from sklearn.metrics import roc_auc_score, average_precision_score
 
+# Make text editable in Adobe Illustrator
+plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['ps.fonttype'] = 42
+
 PWD = f'{os.environ["workingHOME"]}/BICAN'
 sys.path.append(f'{PWD}')
 os.chdir(f'{PWD}')
@@ -464,19 +468,13 @@ for exp_idx, exp in enumerate(exp_order):
             auroc_se_values.append(0)
             bar_colors.append('gray')
 
-    # Plot bars for this experiment with gradient colors
+    # Plot bars for this experiment with gradient colors (no labels yet)
     offset = (exp_idx - len(exp_order)/2 + 0.5) * bar_width
     for i, (val, se, color) in enumerate(zip(auroc_values, auroc_se_values, bar_colors)):
-        if i == 0:  # Only add label once per experiment
-            ax.bar(x_pos[i] + offset, val, bar_width,
-                   yerr=se, capsize=3,
-                   label=exp, color=color,
-                   alpha=0.8, edgecolor='black', linewidth=0.5)
-        else:
-            ax.bar(x_pos[i] + offset, val, bar_width,
-                   yerr=se, capsize=3,
-                   color=color,
-                   alpha=0.8, edgecolor='black', linewidth=0.5)
+        ax.bar(x_pos[i] + offset, val, bar_width,
+               yerr=se, capsize=3,
+               color=color,
+               alpha=0.8, edgecolor='black', linewidth=0.5)
 
 # Set x-axis labels
 ax.set_xticks(x_pos)
@@ -484,7 +482,24 @@ ax.set_xticklabels(variant_groups, rotation=45, ha='right')
 ax.set_ylabel('AUROC')
 ax.set_ylim(ymin=0.4, ymax=1)
 ax.set_title(f'{organ} - AUROC by Variant Distance Groups')
-ax.legend(title='Experiment', loc='upper right')
+
+# Create custom legend with 3k-12k colors and clean labels
+from matplotlib.patches import Patch
+legend_color_idx = 2  # Index for '3k-12k' in variant_groups
+legend_elements = []
+for exp in exp_order:
+    exp_type = exp_types.get(exp, 'borzoi')
+    if exp_type == 'borzoi':
+        legend_color = borzoi_colors[legend_color_idx]
+    elif exp_type == 'bican':
+        legend_color = bican_colors[legend_color_idx]
+    else:  # chrombpnet
+        legend_color = atac_colors[legend_color_idx]
+    # Remove '_all' suffix from label
+    clean_label = exp.replace('_all', '')
+    legend_elements.append(Patch(facecolor=legend_color, edgecolor='black', label=clean_label, alpha=0.8))
+
+ax.legend(handles=legend_elements, title='Model', loc='upper right')
 fig.tight_layout()
 fig.savefig(f'figures/{organ}_comparison_by_variant_groups_AUROC.pdf')
 

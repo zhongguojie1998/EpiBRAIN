@@ -3,6 +3,7 @@ from pathlib import Path
 
 import click
 import h5py
+import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
 from tqdm import tqdm
@@ -233,26 +234,46 @@ def transfer_existing_predictions(source_h5_path, target_h5_path):
 
         # Transfer finished predictions
         print("Transferring finished predictions...")
-        for src_idx, (src_key, is_finished) in enumerate(tqdm(zip(src_index_keys, src_finished),
-                                                              total=len(src_index_keys),
-                                                              desc="Transferring")):
-            if not is_finished:
-                continue
 
-            src_key_str = src_key.decode() if isinstance(src_key, bytes) else src_key
+        # Find all finished indices at once
+        finished_src_indices = np.where(src_finished)[0]
+        print(f"Found {len(finished_src_indices)} finished predictions in source")
 
-            # Check if this variant exists in target
-            if src_key_str in tgt_index_lookup:
-                tgt_idx = tgt_index_lookup[src_key_str]
+        if len(finished_src_indices) > 0:
+            # Get keys for finished entries and map to target indices
+            src_indices_list = []
+            tgt_indices_list = []
 
-                # Copy predictions for each score type
-                for score_name in score_names:
-                    if score_name in src_results and score_name in tgt_results:
-                        tgt_results[score_name][tgt_idx, :] = src_results[score_name][src_idx, :]
+            for src_idx in tqdm(finished_src_indices, desc="Mapping indices"):
+                src_key = src_index_keys[src_idx]
+                src_key_str = src_key.decode() if isinstance(src_key, bytes) else src_key
 
-                # Mark as finished in target
-                tgt_variants["finished"][tgt_idx] = True
-                transferred_count += 1
+                # Check if this variant exists in target
+                if src_key_str in tgt_index_lookup:
+                    tgt_idx = tgt_index_lookup[src_key_str]
+                    src_indices_list.append(src_idx)
+                    tgt_indices_list.append(tgt_idx)
+
+            # Convert to numpy arrays for vectorized operations
+            src_indices = np.array(src_indices_list, dtype=np.int64)
+            tgt_indices = np.array(tgt_indices_list, dtype=np.int64)
+            transferred_count = len(src_indices)
+
+            print(f"Matched {transferred_count} predictions to transfer")
+
+            # Sort indices in increasing order (required by HDF5)
+            sort_order = np.argsort(tgt_indices)
+            src_indices = src_indices[sort_order]
+            tgt_indices = tgt_indices[sort_order]
+
+            # Copy predictions using vectorized operations
+            for score_name in score_names:
+                if score_name in src_results and score_name in tgt_results:
+                    print(f"Copying {score_name}...")
+                    tgt_results[score_name][tgt_indices, :] = src_results[score_name][src_indices, :]
+
+            # Mark as finished in target using vectorized assignment
+            tgt_variants["finished"][tgt_indices] = True
 
         print(f"Transferred {transferred_count} predictions")
 
@@ -315,8 +336,7 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
         print("Removed existing HDF5 file")
 
     # Initialize or load HDF5
-    file_was_new = not os.path.exists(hdf5_file)
-    if file_was_new:
+    if not os.path.exists(hdf5_file):
         print("Initializing HDF5 structure...")
         trial_names = init_hdf5_structure(hdf5_file, label_meta, list(score_names))
         existing_index = set()
@@ -332,11 +352,6 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
 
     print(f"Existing variants in index: {len(existing_index)}")
     print(f"Score names: {score_names}")
-
-    # Transfer predictions from existing HDF5 file if requested (only if file already existed)
-    if load_existing and not file_was_new:
-        transferred_count = transfer_existing_predictions(load_existing, hdf5_file)
-        print(f"Successfully transferred {transferred_count} predictions from {load_existing}")
 
     # Process each experiment separately to efficiently use existing_index
     new_variant_data = {"index_key": [], "rsid": [], "chr": [], "pos": [], "ref": [], "alt": [], "finished": []}
@@ -430,8 +445,8 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
                 for i in exp_df.columns:
                     exp_data_grp.create_dataset(i, data=exp_df[i].values, compression="gzip")
 
-    # Transfer predictions from existing HDF5 file if it wasn't done earlier (file was newly created)
-    if load_existing and file_was_new:
+    # Transfer predictions from existing HDF5 file after adding all variants
+    if load_existing:
         print("\nTransferring predictions from existing HDF5 file...")
         transferred_count = transfer_existing_predictions(load_existing, hdf5_file)
         print(f"Successfully transferred {transferred_count} predictions from {load_existing}")

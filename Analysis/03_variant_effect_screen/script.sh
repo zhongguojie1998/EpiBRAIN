@@ -240,8 +240,8 @@ if [ "$MERGE_ONLY" != "true" ]; then
         LOAD_EXISTING_FLAG="--load_existing $LOAD_EXISTING"
     fi
 
-    # Only run init_tasks if H5 file doesn't exist or force flag is on
-    if [ ! -f "$H5_FILE" ] || [ "$FORCE" = "true" ]; then
+    # Only run init_tasks if H5 file doesn't exist or force flag is on or load_existing is specified
+    if [ ! -f "$H5_FILE" ] || [ "$FORCE" = "true" ] || [ -n "$LOAD_EXISTING" ]; then
         if [ -n "$VCF_FILE" ]; then
             # VCF mode
             python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \

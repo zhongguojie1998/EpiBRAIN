@@ -36,7 +36,7 @@ bin_level_results_orig = bin_level_results_orig[bin_level_results_orig['atlas_na
 
 # %% plot the density plots of PearsonR for each modality and atlas
 for res in [bin_level_results, bin_level_results_orig]:
-    fig, ax = plt.subplots(figsize=(5, 2))
+    fig, ax = plt.subplots(figsize=(6, 4))
     # calculate the average PearsonR for each modality and annotate on the legend
     modality_groups = res.groupby('modality')
     for modality, group in modality_groups:
@@ -55,30 +55,8 @@ for res in [bin_level_results, bin_level_results_orig]:
     save_dir = 'figures/' + ('celltype_head/' if res is bin_level_results else 'original/')
     fig.savefig(save_dir + 'PearsonR_density_by_modality.pdf')
 
-# %% plot modality metrics box plots between atlases
-for res in [bin_level_results]:
-    fig, ax = plt.subplots(figsize=(6, 4))
-    # set the box thinner, drop outliers, smaller fliersize
-    sns.boxplot(data=res, x='modality', y='PearsonR', hue='atlas_name', 
-                ax=ax, width=0.4, showfliers=False)
-    # set y limit from 0 to 1
-    ax.set_ylim(0, 1)
-    # annotate average values on top of each box
-    modality_atlas_groups = res.groupby(['modality', 'atlas_name'])
-    for (modality, atlas_name), group in modality_atlas_groups:
-        mean_value = group['PearsonR'].mean()
-        max_value = group['PearsonR'].max()
-        ax.text(x=list(res['modality'].unique()).index(modality) + 
-                (0.2 if atlas_name == 'MiniAtlas' else 0), 
-                y=max_value * 1.05, s=f'{mean_value:.2f}', 
-                ha='center', va='bottom', fontsize=8, color='black')
-    plt.legend(title='Atlas Name', loc='lower left')
-    if res is bin_level_results:
-        ax.set_title('PearsonR by Modality and Atlas')
-    else:
-        ax.set_title('PearsonR by Modality and Atlas (No cell type head)')
-    fig.tight_layout()
-    fig.savefig('figures/' + ('celltype_head/' if res is bin_level_results else 'original/') + 'PearsonR_boxplot_by_modality_atlas.pdf')
+# %% plot modality metrics box plots between atlases - COMBINED SUBPLOT VERSION
+# This will be filled in after loading gene-level data
 
 # %% plot comparison between cell type head model and original model
 fig, ax = plt.subplots(figsize=(6, 4))
@@ -117,6 +95,8 @@ gene_level_results_atac = pd.read_csv('Res/full_finetune_original_loss_celltype_
 gene_level_results_atac = gene_level_results_atac.merge(cell_type_meta, left_on='trial', right_on='exp')
 gene_level_results_atac['modality'] = gene_level_results_atac['modality_x'].replace(
     {'RNA': 'RNA', 'RNAplus': 'RNA', 'RNAminus': 'RNA', 'K27Ac': 'H3K27ac', 'K27Me3': 'H3K27me3', 'K9Me3': 'H3K9me3'})
+# create barplot with reversed colors
+palette_reversed = {'BasalGanglia': sns.color_palette()[0], 'MiniAtlas': sns.color_palette()[1]}
 
 # %% plot modality metrics bar plots by cell type
 for res, use_celltype_head in zip([gene_level_results, gene_level_results_orig], [True, False]):
@@ -128,8 +108,6 @@ for res, use_celltype_head in zip([gene_level_results, gene_level_results_orig],
     celltype_groups['celltype'] = celltype_groups['celltype'].str.replace('_RNAminus', '').str.replace('_RNAplus', '')
     celltype_groups['atlas_name'] = celltype_groups['celltype'].apply(
         lambda x: 'BasalGanglia' if 'BasalGanglia' in x else 'MiniAtlas')
-    # create barplot with reversed colors
-    palette_reversed = {'BasalGanglia': sns.color_palette()[0], 'MiniAtlas': sns.color_palette()[1]}
     sns.barplot(data=celltype_groups, x='celltype', y='pearsonr_log', hue='atlas_name', ax=ax, palette=palette_reversed)
 
     # rotate x-axis labels for better readability
@@ -155,38 +133,154 @@ for res, use_celltype_head in zip([gene_level_results, gene_level_results_orig],
     ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha='right')
     fig.savefig(save_dir + 'Gene_level_PearsonR_boxplot_RNA_by_atlas.pdf')
 # %% comparison of gene level metrics between atac-only and full model
+from scipy.stats import ttest_rel
+
 res_full_model = gene_level_results[gene_level_results['modality'] == 'RNA']
 res_atac_only = gene_level_results_atac[gene_level_results_atac['modality'] == 'RNA']
 # merge on celltype and gene
 merged_res = res_full_model.merge(res_atac_only, on=['celltype', 'atlas_name'], suffixes=('_full', '_atac_only'))
-fig, ax = plt.subplots(figsize=(4, 4))
-# hue by atlas_name
-sns.scatterplot(data=merged_res, y='pearsonr_log_full', x='pearsonr_log_atac_only', ax=ax, hue='atlas_name', palette=palette_reversed, s=50, alpha=0.7)
+
+# ============================================================================
+# Separate scatter plot - saved individually
+# ============================================================================
+fig_scatter, ax_scatter = plt.subplots(figsize=(4, 4))
+sns.scatterplot(data=merged_res, y='pearsonr_log_full', x='pearsonr_log_atac_only',
+                ax=ax_scatter, hue='atlas_name', palette=palette_reversed, s=50, alpha=0.7)
 # add diagonal line
 max_val = max(merged_res['pearsonr_log_full'].max(), merged_res['pearsonr_log_atac_only'].max())
 min_val = min(merged_res['pearsonr_log_full'].min(), merged_res['pearsonr_log_atac_only'].min())
-ax.plot([min_val, max_val], [min_val, max_val], color='red', linestyle='--')
-ax.set_ylabel('Gene-level PearsonR (Full Model)')
-ax.set_xlabel('Gene-level PearsonR (ATAC-only Model)')
-fig.tight_layout()
-fig.savefig('figures/Gene_level_PearsonR_comparison_ATAC_vs_Full_model.pdf')
-# do a boxplot and show the p-value of paired t-test
-from scipy.stats import ttest_rel
-fig, ax = plt.subplots(figsize=(3, 4))
-# prepare data for boxplot
+ax_scatter.plot([min_val, max_val], [min_val, max_val], color='red', linestyle='--')
+ax_scatter.set_ylabel('Gene-level PearsonR (Full Model)')
+ax_scatter.set_xlabel('Gene-level PearsonR (ATAC-only Model)')
+ax_scatter.set_title('ATAC-only vs Full Model')
+fig_scatter.tight_layout()
+fig_scatter.savefig('figures/Gene_level_PearsonR_comparison_ATAC_vs_Full_model.pdf')
+
+# ============================================================================
+# Combined figure with 2 subplots (plot 1 wider than plot 3)
+# ============================================================================
+fig, axes = plt.subplots(1, 2, figsize=(9, 4), gridspec_kw={'width_ratios': [2.5, 1]})
+
+# ----------------------------------------------------------------------------
+# Subplot 1: Half-boxplot/half-violin plot (wider)
+# ----------------------------------------------------------------------------
+ax = axes[0]
+res = bin_level_results
+
+modalities = res['modality'].unique()
+# Add one more position for gene-level full model data
+positions = np.arange(len(modalities) + 1)
+
+# Prepare box data: bin-level by modality + gene-level full model
+box_data = [res[res['modality'] == mod]['PearsonR'].values for mod in modalities]
+# Add gene-level full model data from subplot 3
+box_data.append(merged_res['pearsonr_log_full'].values)
+
+# Prepare labels - simple modality names
+labels = list(modalities) + ['RNA']
+
+bp = ax.boxplot(box_data, positions=positions, widths=0.5,
+                patch_artist=True, showfliers=False,
+                boxprops=dict(facecolor='lightblue', alpha=0.7),
+                medianprops=dict(color='red', linewidth=1.5),
+                whiskerprops=dict(linewidth=1),
+                capprops=dict(linewidth=1))
+
+# Modify boxplot to show only left half
+for i, box in enumerate(bp['boxes']):
+    center = positions[i]
+    path = box.get_path()
+    vertices = path.vertices
+    vertices[:, 0] = np.clip(vertices[:, 0], -np.inf, center)
+
+# Clip whiskers and caps to left half
+for line in bp['whiskers'] + bp['caps']:
+    xdata = line.get_xdata()
+    center = np.mean(xdata)
+    line.set_xdata(np.clip(xdata, -np.inf, center))
+
+# Keep median lines on the left half
+for i, line in enumerate(bp['medians']):
+    center = positions[i // 1]
+    xdata = line.get_xdata()
+    line.set_xdata(np.clip(xdata, -np.inf, center))
+
+# Create violin plot
+violin_parts = ax.violinplot(box_data, positions=positions,
+                              widths=0.5, showmeans=False,
+                              showmedians=False, showextrema=False)
+
+# Modify violin patches to only show right half
+for pc in violin_parts['bodies']:
+    m = np.mean(pc.get_paths()[0].vertices[:, 0])
+    vertices = pc.get_paths()[0].vertices
+    vertices[:, 0] = np.clip(vertices[:, 0], m, np.inf)
+    pc.set_facecolor('steelblue')
+    pc.set_alpha(0.6)
+
+# Set x-axis labels
+ax.set_xticks(positions)
+ax.set_xticklabels(labels, fontsize=8)
+ax.set_xlabel('modality')
+ax.set_ylabel('PearsonR')
+ax.set_ylim(0, 1)
+
+# annotate average values on top of each box
+# For bin-level modalities
+modality_atlas_groups = res.groupby(['modality', 'atlas_name'])
+for (modality, atlas_name), group in modality_atlas_groups:
+    mean_value = group['PearsonR'].mean()
+    max_value = group['PearsonR'].max()
+    ax.text(x=list(modalities).index(modality) +
+            (0.2 if atlas_name == 'MiniAtlas' else 0),
+            y=max_value * 1.05, s=f'{mean_value:.2f}',
+            ha='center', va='bottom', fontsize=8, color='black')
+
+# For gene-level full model
+gene_mean = merged_res['pearsonr_log_full'].mean()
+gene_max = merged_res['pearsonr_log_full'].max()
+ax.text(x=len(modalities), y=gene_max * 1.05, s=f'{gene_mean:.2f}',
+        ha='center', va='bottom', fontsize=8, color='black')
+
+# Add shared annotation lines for grouping
+y_annot = 0.3  # y position for annotation lines
+
+# Line and annotation for 32-bp bin level (first 6 boxes)
+ax.plot([positions[0] - 0.3, positions[len(modalities)-1] + 0.3],
+        [y_annot, y_annot], 'k-', linewidth=1.5)
+ax.text((positions[0] + positions[len(modalities)-1]) / 2, y_annot - 0.02,
+        '32 bp\nbin level', ha='center', va='top', fontsize=9, fontweight='bold')
+
+# Line and annotation for gene-level (last box)
+ax.plot([positions[len(modalities)] - 0.3, positions[len(modalities)] + 0.3],
+        [y_annot, y_annot], 'k-', linewidth=1.5)
+ax.text(positions[len(modalities)], y_annot - 0.02,
+        'Gene\nlevel', ha='center', va='top', fontsize=9, fontweight='bold')
+
+# Adjust y-axis limit
+ax.set_ylim(0, 1)
+
+ax.set_title('PearsonR in Testing Data')
+
+# ----------------------------------------------------------------------------
+# Subplot 2: Boxplot with paired t-test (narrower)
+# ----------------------------------------------------------------------------
+ax = axes[1]
 data_to_plot = pd.DataFrame({
     'Full Model': merged_res['pearsonr_log_full'],
     'ATAC-only Model': merged_res['pearsonr_log_atac_only']
 })
 sns.boxplot(data=data_to_plot, ax=ax, width=0.4, showfliers=False)
-sns.despine(ax=ax, top=True, right=True)
+ax.set_ylabel('Gene-level PearsonR')
 # perform paired t-test
 t_stat, p_value = ttest_rel(merged_res['pearsonr_log_full'], merged_res['pearsonr_log_atac_only'])
-# print p-value on the plot
-ax.text(0.5, 1.05, f'Paired t-test\np-value: {p_value:.2e}',
+ax.text(0.5, 0.15, f'Paired t-test\np-value: {p_value:.2e}',
         transform=ax.transAxes, fontsize=10, verticalalignment='top', horizontalalignment='center')
+ax.set_title('Model Comparison')
+
+# Save combined figure
 fig.tight_layout()
-fig.savefig('figures/Gene_level_PearsonR_boxplot_comparison_ATAC_vs_Full_model.pdf')
+fig.savefig('figures/Combined_PearsonR_analysis.pdf')
 
 
 # %% get gene level raw counts
@@ -659,21 +753,13 @@ for mod, cmap in zip(['ATAC', 'K27Ac', 'K27Me3', 'K9Me3'], ['Blues', 'Oranges', 
     data = pd.DataFrame(cross_cell_type_data[mod])
     fig, ax = plt.subplots(figsize=(4, 4))
     # draw kde plot
-    sns.kdeplot(x=data['label_coeff_var'], y=data['pearsonr'], 
-                ax=ax, fill=True, cmap=cmap, levels=20, thresh=0.05)
-    ax.set_xlabel('Coefficient Variance across Cell Types')
-    ax.set_ylabel('PearsonR across Cell Types')
-    ax.set_title(f'BasalGanglia {mod}')
-    fig.tight_layout()
-    fig.savefig('figures/celltype_head/BasalGanglia_cross_cell_type_pearsonr_vs_coeff_var_' + mod + '.pdf')
-    # add modality column for later combined plotting
-    data['modality'] = mod
-    if data_together is None:
-        data_together = data
-    else:
-        data_together = pd.concat([data_together, data], axis=0)
-    fig.tight_layout()
-    fig.savefig('figures/celltype_head/BasalGanglia_cross_cell_type_pearsonr_vs_coeff_var_' + mod + '.pdf')
+    # sns.kdeplot(x=data['label_coeff_var'], y=data['pearsonr'], 
+    #             ax=ax, fill=True, cmap=cmap, levels=20, thresh=0.05)
+    # ax.set_xlabel('Coefficient Variance across Cell Types')
+    # ax.set_ylabel('PearsonR across Cell Types')
+    # ax.set_title(f'BasalGanglia {mod}')
+    # fig.tight_layout()
+    # fig.savefig('figures/celltype_head/BasalGanglia_cross_cell_type_pearsonr_vs_coeff_var_' + mod + '.pdf')
     # add modality column for later combined plotting
     data['modality'] = mod
     if data_together is None:
@@ -689,8 +775,9 @@ palette = {'ATAC': sns.color_palette('Blues', n_colors=10)[6],
            'K27Me3': sns.color_palette('Greens', n_colors=10)[6],
            'K9Me3': sns.color_palette('Purples', n_colors=10)[6]}
 # plot histogram with kde
-sns.kdeplot(data_toplot, x='pearsonr', hue='modality', ax=ax, palette=palette, fill=True, alpha=0.5, common_norm=False)
+sns.kdeplot(data_toplot, x='pearsonr', hue='modality', ax=ax, palette=palette, fill=True, alpha=0.5, common_norm=False, legend=False)
 ax.set_xlabel('PearsonR across Cell Types (Coeff Var > 1)')
+ax.set_title('cCRE level PearsonR Density across Cell Types')
 
 # Calculate and display average for each modality
 y_text_pos = 0.95
