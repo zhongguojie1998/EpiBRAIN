@@ -143,7 +143,7 @@ merged_res = res_full_model.merge(res_atac_only, on=['celltype', 'atlas_name'], 
 # ============================================================================
 # Separate scatter plot - saved individually
 # ============================================================================
-fig_scatter, ax_scatter = plt.subplots(figsize=(4, 4))
+fig_scatter, ax_scatter = plt.subplots(figsize=(6, 4))
 sns.scatterplot(data=merged_res, y='pearsonr_log_full', x='pearsonr_log_atac_only',
                 ax=ax_scatter, hue='atlas_name', palette=palette_reversed, s=50, alpha=0.7)
 # add diagonal line
@@ -626,14 +626,18 @@ y_text_pos = 0.95
 for i, mod in enumerate(['ATAC', 'K27Ac', 'K27Me3']):
     mod_data = data_toplot[data_toplot['modality'] == mod]
     sns.kdeplot(data=mod_data, x='pearsonr', ax=ax[i], fill=True, alpha=0.5, hue='label',
-                palette=palette)
+                palette=palette, legend=False)
+    # add modality label above non-ABC-linked annotation
+    mod_color = sns.color_palette('Blues' if mod == 'ATAC' else 'Oranges' if mod == 'K27Ac' else 'Greens', n_colors=10)[7]
+    ax[i].text(0.02, y_text_pos + 0.06, mod, transform=ax[i].transAxes, fontsize=12,
+               verticalalignment='top', fontweight='bold', color=mod_color)
     # print average values
     for j, (is_linked, group) in enumerate(mod_data.groupby('is_abc_linked')):
         mean_value = group['pearsonr'].mean()
-        ax[i].text(0.02, y_text_pos - j*0.08, f'{is_linked}: μ = {mean_value:.3f} (n={len(group)})',
+        label_text = 'ABC-linked' if is_linked else 'non-ABC-linked'
+        ax[i].text(0.02, y_text_pos - j*0.08, f'{label_text}: μ = {mean_value:.3f} (n={len(group)})',
                    transform=ax[i].transAxes, fontsize=10, verticalalignment='top',
                    color=palette[f'{mod}:{is_linked}'], fontweight='bold')
-    ax[i].set_title(f'MiniAtlas Cross Cell Types ({mod})')
 fig.tight_layout()
 fig.savefig('figures/celltype_head/MiniAtlas_cross_cell_type_pearsonr_kde_coeff_var_abc_linked_vs_nonlinked.pdf')
 
@@ -705,7 +709,14 @@ valid_indices = ~np.isnan(cross_cell_type_label).any(axis=1) & ~np.isnan(cross_c
 cross_cell_type_label = cross_cell_type_label[valid_indices]
 cross_cell_type_pred = cross_cell_type_pred[valid_indices]
 peak_bed = peak_bed.iloc[valid_indices, :].reset_index(drop=True)
-# %% calculate pearsonr across cell types for each modality for each peak, and filter to MiniAtlas only
+peak_bed.columns = ['chr', 'start', 'end', 'peak_id']
+# %% read ABC file
+abc_links = pd.read_csv('Data/source/ABC/BasalGanglia/merged_abc_results.with_annotations_v1_5kb_resolution_no_powerlaw_scale.tsv', sep='\t')
+abc_links['peak_id'] = abc_links['chr'] + ':' + abc_links['start'].astype(str) + '-' + abc_links['end'].astype(str)
+# filter to correspoinding cell types
+peak_bed['is_abc_linked'] = peak_bed['peak_id'].isin(abc_links['peak_id'])
+
+# %% calculate pearsonr across cell types for each modality for each peak, and filter to BasalGanglia only
 cross_cell_type_data = {}
 for mod in ['ATAC', 'K27Ac', 'K27Me3', 'K9Me3']:
     dims = cell_type_meta.index[(cell_type_meta['modality'] == mod) & (cell_type_meta['atlas_name'] == 'BasalGanglia')].tolist()
@@ -746,12 +757,13 @@ for mod in ['ATAC', 'K27Ac', 'K27Me3', 'K9Me3']:
         'label_var': label_vars,
         'label_coeff_var': label_vars / label_means,
         'pearsonr': pearsonr_array,
+        'is_abc_linked': peak_bed['is_abc_linked'].values
     }
 # %% plot scatter plots
 data_together = None
 for mod, cmap in zip(['ATAC', 'K27Ac', 'K27Me3', 'K9Me3'], ['Blues', 'Oranges', 'Greens', 'Purples']):
     data = pd.DataFrame(cross_cell_type_data[mod])
-    fig, ax = plt.subplots(figsize=(4, 4))
+    # fig, ax = plt.subplots(figsize=(4, 4))
     # draw kde plot
     # sns.kdeplot(x=data['label_coeff_var'], y=data['pearsonr'], 
     #             ax=ax, fill=True, cmap=cmap, levels=20, thresh=0.05)
@@ -790,6 +802,37 @@ for i, (mod, color) in enumerate(zip(['ATAC', 'K27Ac', 'K27Me3', 'K9Me3'],
             color=color, fontweight='bold')
 
 fig.savefig('figures/celltype_head/BasalGanglia_cross_cell_type_pearsonr_kde_coeff_var_all_modalities.pdf')
+
+# %% plot abc linked vs non linked boxplot
+data_toplot['label'] = data_toplot['modality'] + ":" + data_toplot['is_abc_linked'].astype(str)
+palette = {f'ATAC:False': sns.color_palette('Blues', n_colors=10)[6],
+           f'ATAC:True': sns.color_palette('Blues', n_colors=10)[9],
+           f'K27Ac:False': sns.color_palette('Oranges', n_colors=10)[6],
+           f'K27Ac:True': sns.color_palette('Oranges', n_colors=10)[9],
+           f'K27Me3:False': sns.color_palette('Greens', n_colors=10)[6],
+           f'K27Me3:True': sns.color_palette('Greens', n_colors=10)[9],
+           f'K9Me3:False': sns.color_palette('Purples', n_colors=10)[6],
+           f'K9Me3:True': sns.color_palette('Purples', n_colors=10)[9]}
+fig, ax = plt.subplots(nrows=4, ncols=1, figsize=(6, 9), sharex=True)
+y_text_pos = 0.95
+for i, mod in enumerate(['ATAC', 'K27Ac', 'K27Me3', 'K9Me3']):
+    mod_data = data_toplot[data_toplot['modality'] == mod]
+    sns.kdeplot(data=mod_data, x='pearsonr', ax=ax[i], fill=True, alpha=0.5, hue='label', common_norm=False,
+                palette=palette, legend=False)
+    # add modality label above non-ABC-linked annotation
+    color_map = {'ATAC': 'Blues', 'K27Ac': 'Oranges', 'K27Me3': 'Greens', 'K9Me3': 'Purples'}
+    mod_color = sns.color_palette(color_map[mod], n_colors=10)[7]
+    ax[i].text(0.02, y_text_pos + 0.02, mod, transform=ax[i].transAxes, fontsize=12,
+               verticalalignment='top', fontweight='bold', color=mod_color)
+    # print average values
+    for j, (is_linked, group) in enumerate(mod_data.groupby('is_abc_linked')):
+        mean_value = group['pearsonr'].mean()
+        label_text = 'ABC-linked' if is_linked else 'non-ABC-linked'
+        ax[i].text(0.02, y_text_pos - j*0.08 - 0.06, f'{label_text}: μ = {mean_value:.3f} (n={len(group)})',
+                   transform=ax[i].transAxes, fontsize=10, verticalalignment='top',
+                   color=palette[f'{mod}:{is_linked}'], fontweight='bold')
+fig.tight_layout()
+fig.savefig('figures/celltype_head/BasalGanglia_cross_cell_type_pearsonr_kde_coeff_var_abc_linked_vs_nonlinked.pdf')
 
 # %% peaks minus average then pearsonr
 cross_cell_type_label_centered = cross_cell_type_label[:, cell_type_meta.index[(cell_type_meta['atlas_name'] == 'BasalGanglia')].tolist()]
