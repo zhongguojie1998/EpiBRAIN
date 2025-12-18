@@ -26,7 +26,7 @@ usage() {
     echo "                              - Step 1: Switches to region inference mode (full gene region centered at midpoint)"
     echo "                              - Step 2: Inference context centered at midpoint (mutations still at variant ±20bp)"
     echo "                              - Steps 3,5,6: Inference/visualization centered at midpoint"
-    echo "                              - Step 6 zoom: Shows variant location ±50bp (or custom --motif-viz-zoom-midpoint)"
+    echo "                              - Step 6 zoom: Shows variant ±50bp (or custom --motif-viz-zoom-midpoint/--motif-viz-zoom-region)"
     echo "                              - Default: variant position for step 1-2; gene center from GTF for steps 3,5,6"
     echo "  --gene-region REGION        Gene region in format chr:start-end (default: midpoint/gene-center ± 262144bp)"
     echo "  --sat-region REGION         Saturation mutagenesis region chr:start-end (default: variant ±20bp)"
@@ -57,6 +57,7 @@ usage() {
     echo "  --motif-viz-plot-width WIDTH             Width of motif interpretation plots in inches (default: 8.0)"
     echo "  --motif-viz-plot-height HEIGHT           Height per subplot in motif plots in inches (default: 1.5)"
     echo "  --motif-viz-zoom-midpoint POSITION       Midpoint for Step 6 zoom plot in format chr:pos (default: variant position)"
+    echo "  --motif-viz-zoom-region REGION           Custom region for Step 6 zoom plot in format chr:start-end (overrides --motif-viz-zoom-midpoint)"
     echo "  --skip-steps STEPS               Comma-separated list of steps to skip (1-7)"
     echo "  -h, --help                       Show this help message"
     echo ""
@@ -68,7 +69,7 @@ usage() {
     echo "  Step 3: Genome track visualization - Visualize predictions across gene region"
     echo "  Step 4: Mutagenesis visualization - Visualize saturation mutagenesis results (log2 fold change)"
     echo "  Step 5: Motif interpretation - Identify regulatory motifs (uses --method)"
-    echo "  Step 6: Motif plotting - Generate full region plot and zoomed plot (±50bp, centered at variant or custom midpoint)"
+    echo "  Step 6: Motif plotting - Generate full region plot and zoomed plot (default: variant ±50bp, custom: --motif-viz-zoom-midpoint or --motif-viz-zoom-region)"
     echo "  Step 7: TOMTOM analysis - Match motifs to known TF binding sites (optional, requires --tomtom-db)"
     echo ""
     echo "Example:"
@@ -254,6 +255,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --motif-viz-zoom-midpoint)
             MOTIF_VIZ_ZOOM_MIDPOINT="$2"
+            shift 2
+            ;;
+        --motif-viz-zoom-region)
+            MOTIF_VIZ_ZOOM_REGION="$2"
             shift 2
             ;;
         --skip-steps)
@@ -805,9 +810,17 @@ if ! should_skip 6; then
         --motif-viz-plot-width "$MOTIF_VIZ_PLOT_WIDTH" \
         --motif-viz-plot-height "$MOTIF_VIZ_PLOT_HEIGHT"
 
-    # Plot 2: Zoomed region around variant or custom midpoint (±50bp)
-    # Use custom zoom midpoint if provided, otherwise use variant location
-    if [ -n "$MOTIF_VIZ_ZOOM_MIDPOINT" ]; then
+    # Plot 2: Zoomed region around variant, custom midpoint, or custom region
+    # Priority: custom region > custom midpoint > variant location
+    if [ -n "$MOTIF_VIZ_ZOOM_REGION" ]; then
+        # Parse custom region (format: chr:start-end)
+        ZOOM_CHR=$(echo "$MOTIF_VIZ_ZOOM_REGION" | cut -d':' -f1)
+        ZOOM_COORDS=$(echo "$MOTIF_VIZ_ZOOM_REGION" | cut -d':' -f2)
+        ZOOM_START=$(echo "$ZOOM_COORDS" | cut -d'-' -f1)
+        ZOOM_END=$(echo "$ZOOM_COORDS" | cut -d'-' -f2)
+        PLOT_OUTPUT_ZOOM="${ANALYSIS_DIR}/motif_interpretation_zoom.pdf"
+        echo "  Creating zoomed region plot (custom region: ${ZOOM_CHR}:${ZOOM_START}-${ZOOM_END})..."
+    elif [ -n "$MOTIF_VIZ_ZOOM_MIDPOINT" ]; then
         # Parse custom midpoint (format: chr:pos)
         ZOOM_CHR=$(echo "$MOTIF_VIZ_ZOOM_MIDPOINT" | cut -d':' -f1)
         ZOOM_CENTER=$(echo "$MOTIF_VIZ_ZOOM_MIDPOINT" | cut -d':' -f2)

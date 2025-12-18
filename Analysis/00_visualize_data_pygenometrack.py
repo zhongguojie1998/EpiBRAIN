@@ -587,6 +587,97 @@ def generate_plot(config_file, chrom, start, end, output_image, width=40, dpi=30
         return False
 
 
+def get_gene_coordinates(gene_name, gtf_file):
+    """
+    Look up gene coordinates from GTF file and return center +/- 262144bp region.
+
+    Args:
+        gene_name: Name of the gene to look up
+        gtf_file: Path to GTF file
+
+    Returns:
+        tuple: (chrom, start, end) for the region
+    """
+    import gzip
+
+    gtf_path = Path(gtf_file)
+    if not gtf_path.exists():
+        print(f"Error: GTF file not found: {gtf_file}")
+        sys.exit(1)
+
+    print(f"Looking up gene '{gene_name}' in {gtf_file}...")
+
+    # Track gene boundaries
+    gene_chrom = None
+    gene_start = None
+    gene_end = None
+
+    # Open GTF file (handle gzipped files)
+    open_func = gzip.open if gtf_file.endswith('.gz') else open
+
+    with open_func(gtf_path, 'rt') as f:
+        for line in f:
+            # Skip comments
+            if line.startswith('#'):
+                continue
+
+            fields = line.strip().split('\t')
+            if len(fields) < 9:
+                continue
+
+            feature_type = fields[2]
+            attributes = fields[8]
+
+            # Only look at gene features
+            if feature_type != 'gene':
+                continue
+
+            # Parse attributes to find gene_name
+            attr_dict = {}
+            for attr in attributes.split(';'):
+                attr = attr.strip()
+                if not attr:
+                    continue
+                parts = attr.split(' ', 1)
+                if len(parts) == 2:
+                    key = parts[0]
+                    value = parts[1].strip('"')
+                    attr_dict[key] = value
+
+            # Check if this is our gene
+            if attr_dict.get('gene_name') == gene_name:
+                chrom = fields[0]
+                start = int(fields[3])
+                end = int(fields[4])
+
+                # Initialize or expand gene boundaries
+                if gene_chrom is None:
+                    gene_chrom = chrom
+                    gene_start = start
+                    gene_end = end
+                else:
+                    gene_start = min(gene_start, start)
+                    gene_end = max(gene_end, end)
+
+    if gene_chrom is None:
+        print(f"Error: Gene '{gene_name}' not found in GTF file")
+        sys.exit(1)
+
+    # Calculate center point
+    gene_center = (gene_start + gene_end) // 2
+
+    # Create region: center +/- 524288/2 bp
+    window_size = 524288 // 2  # 262144 bp
+    region_start = max(0, gene_center - window_size)
+    region_end = gene_center + window_size
+
+    print(f"  Found gene: {gene_chrom}:{gene_start}-{gene_end}")
+    print(f"  Gene center: {gene_center}")
+    print(f"  Visualization region: {gene_chrom}:{region_start}-{region_end} (center +/- {window_size}bp)")
+
+    return gene_chrom, region_start, region_end
+
+
 def parse_region(region_str):
     """
     Parse region string in format 'chr11:113325659-113545400'
@@ -690,6 +781,12 @@ Examples:
       --chr chr1 --start 10000000 --end 10100000 \\
       --output plot.pdf
 
+  # Plot region around a gene (automatically centers on gene +/- 262144bp)
+  python 00_visualize_data_pygenometrack.py \\
+      --bigwig-dir bigwig_files/ \\
+      --gene LRRK2 \\
+      --output LRRK2_plot.pdf
+
   # Select specific tracks by pattern matching (comma-separated patterns)
   python 00_visualize_data_pygenometrack.py \\
       --bigwig-dir bigwig_files/ \\
@@ -741,6 +838,13 @@ Examples:
       --region chr16:9849470-9849870 \\
       --output GRIN2A_visualization.pdf
 
+  # Quick inference with gene name (automatically centers on gene)
+  python 00_visualize_data_pygenometrack.py \\
+      --inference-dir Analysis/figures/genes/LRRK2/ \\
+      --gene LRRK2 \\
+      --tracks "BasalGanglia-*K27Ac*" \\
+      --output Analysis/figures/genes/LRRK2/visualization.pdf
+
   # Variant effect visualization (creates 3 plots: ref, alt, diff)
   python 00_visualize_data_pygenometrack.py \\
       --inference-dir Analysis/inference_outputs/variant_rs1234 \\
@@ -756,9 +860,11 @@ Examples:
     input_group.add_argument("--inference-dir",
                         help="Quick inference output directory (auto-detects pred/, label/, alt/, diff/ folders)")
 
-    # Region specification (either --region OR --chr/--start/--end)
+    # Region specification (either --region OR --chr/--start/--end OR --gene)
     parser.add_argument("--region", type=str,
-                        help="Genomic region (e.g., 'chr11:113325659-113545400'). Overrides --chr/--start/--end")
+                        help="Genomic region (e.g., 'chr11:113325659-113545400'). Overrides --chr/--start/--end and --gene")
+    parser.add_argument("--gene", type=str,
+                        help="Gene name to visualize (e.g., 'LRRK2'). Will automatically center on gene +/- 262144bp. Requires --gtf to be available.")
     parser.add_argument("--chr", type=str,
                         help="Chromosome (e.g., 'chr1' or '1')")
     parser.add_argument("--start", type=int,
@@ -845,16 +951,20 @@ Examples:
 
     # Parse region coordinates
     if args.region:
-        # Region format overrides individual coordinates
+        # Region format overrides individual coordinates and gene
         chrom, start, end = parse_region(args.region)
         print(f"Using region: {args.region}")
+    elif args.gene:
+        # Gene name - look up coordinates from GTF
+        gtf_file = args.gtf if not args.no_gtf else "Data/source/gencode.v48.annotation.gtf.gz"
+        chrom, start, end = get_gene_coordinates(args.gene, gtf_file)
     elif args.chr and args.start is not None and args.end is not None:
         # Use individual coordinates
         chrom = args.chr
         start = args.start
         end = args.end
     else:
-        print("Error: Must specify either --region or all of --chr/--start/--end")
+        print("Error: Must specify either --region, --gene, or all of --chr/--start/--end")
         parser.print_help()
         sys.exit(1)
 
@@ -907,8 +1017,27 @@ Examples:
             alt_map = {f.stem: f for f in alt_files}
             diff_map = {f.stem: f for f in diff_files}
 
-            # Get all unique base names and sort them
-            all_base_names = sorted(set(label_map.keys()) | set(pred_map.keys()) | set(alt_map.keys()) | set(diff_map.keys()))
+            # Get all unique base names in the order they appear (preserve pattern order)
+            # Don't sort - maintain the order from the --tracks argument
+            all_base_names = []
+            seen = set()
+            # Add files in the order they appear in pred, alt, diff, then label
+            for f in pred_files:
+                if f.stem not in seen:
+                    all_base_names.append(f.stem)
+                    seen.add(f.stem)
+            for f in alt_files:
+                if f.stem not in seen:
+                    all_base_names.append(f.stem)
+                    seen.add(f.stem)
+            for f in diff_files:
+                if f.stem not in seen:
+                    all_base_names.append(f.stem)
+                    seen.add(f.stem)
+            for f in label_files:
+                if f.stem not in seen:
+                    all_base_names.append(f.stem)
+                    seen.add(f.stem)
 
             if len(all_base_names) == 0:
                 print("Error: No bigwig files found matching the track patterns")
@@ -1306,8 +1435,20 @@ Examples:
             label_map = {f.stem: f for f in label_files}
             pred_map = {f.stem: f for f in pred_files}
 
-            # Get all unique base names and sort them
-            all_base_names = sorted(set(label_map.keys()) | set(pred_map.keys()))
+            # Get all unique base names in the order they appear (preserve pattern order)
+            # Don't sort - maintain the order from the --tracks argument
+            all_base_names = []
+            seen = set()
+            # First add pred files in order
+            for f in pred_files:
+                if f.stem not in seen:
+                    all_base_names.append(f.stem)
+                    seen.add(f.stem)
+            # Then add any label-only files
+            for f in label_files:
+                if f.stem not in seen:
+                    all_base_names.append(f.stem)
+                    seen.add(f.stem)
 
             # Add files in order: celltype_pred, celltype_label for each celltype
             for base_name in all_base_names:
