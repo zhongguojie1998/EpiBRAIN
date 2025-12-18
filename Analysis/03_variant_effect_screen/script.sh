@@ -19,6 +19,7 @@
 #        - "slurm": submit all chunks to SLURM
 #        - "ssh+slurm": submit first N chunks to SSH machines, remaining chunks to SLURM
 # --load_existing is path to existing HDF5 file to transfer predictions from, optional
+# --force-init if set, always run init_tasks.py even if H5 file exists (useful for updating variants)
 # --merge if set, only run the merge step (skip all processing steps)
 # --timeout is timeout in seconds for waiting for all chunks to complete, optional (if not specified, defaults based on input type: 24h for VCF, 48h for filelist)
 # --untransform if set, untransform predictions back to original scale (requires --label_meta)
@@ -72,6 +73,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --force)
             FORCE="true"
+            shift 1
+            ;;
+        --force-init)
+            FORCE_INIT="true"
             shift 1
             ;;
         --merge)
@@ -240,8 +245,8 @@ if [ "$MERGE_ONLY" != "true" ]; then
         LOAD_EXISTING_FLAG="--load_existing $LOAD_EXISTING"
     fi
 
-    # Only run init_tasks if H5 file doesn't exist or force flag is on or load_existing is specified
-    if [ ! -f "$H5_FILE" ] || [ "$FORCE" = "true" ] || [ -n "$LOAD_EXISTING" ]; then
+    # Only run init_tasks if H5 file doesn't exist or force flag is on or load_existing is specified or force-init is on
+    if [ ! -f "$H5_FILE" ] || [ "$FORCE" = "true" ] || [ -n "$LOAD_EXISTING" ] || [ "$FORCE_INIT" = "true" ]; then
         if [ -n "$VCF_FILE" ]; then
             # VCF mode
             python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
@@ -256,7 +261,7 @@ if [ "$MERGE_ONLY" != "true" ]; then
                 -e "$EXPERIMENT" -s raw_diff -s raw_log_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_raw_log_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG $LOAD_EXISTING_FLAG
         fi
     else
-        echo "H5 file already exists and --force not specified. Skipping init_tasks."
+        echo "H5 file already exists and neither --force nor --force-init specified. Skipping init_tasks."
     fi
 
     # Build -g arguments based on mode
