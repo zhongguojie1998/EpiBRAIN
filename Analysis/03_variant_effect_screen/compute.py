@@ -571,7 +571,7 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             error_msgs = []
 
     # Save any remaining data as the final part
-    if all_success_res:
+    if all_success or all_error:
         part_count += 1
         current_time = time.time()
         time_since_last_save = current_time - last_save_time
