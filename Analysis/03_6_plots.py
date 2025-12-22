@@ -13,6 +13,9 @@ PWD = f'{os.environ["workingHOME"]}/BICAN'
 import sys
 os.chdir(PWD)
 sys.path.append(PWD)
+# make fonts AI compatible
+plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['ps.fonttype'] = 42
 # %%
 # read Single Brain Fine Mapped eQTL results
 eqtl_res = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/var_eff/variant_effects_by_gene_single_brain.tsv', sep='\t')
@@ -157,7 +160,7 @@ eqtl_res_filtered['diff'] = eqtl_res_filtered['alt_value'] - eqtl_res_filtered['
 # calculate avg_variant_effect_logsum
 eqtl_res_filtered['avg_variant_effect_logsum'] = eqtl_res_filtered['variant_effect_logsum'] / eqtl_res_filtered['n_exons']
 # %% plot
-fig, ax = plt.subplots(figsize=(5, 4))
+fig, ax = plt.subplots(figsize=(4, 3))
 ax.scatter(eqtl_finemap_filtered['fixed_beta'], eqtl_res_filtered['lfdc'], alpha=0.5)
 ax.set_xlabel('Finemap LFC')
 ax.set_ylabel('BICAN LFC')
@@ -176,7 +179,7 @@ valid_idx = (((eqtl_res_filtered['lfdc'] < -0.05) | (eqtl_res_filtered['lfdc'] >
 # calculate F1 score
 spearman_corr, _ = spearmanr(eqtl_finemap_filtered['fixed_beta'][valid_idx], eqtl_res_filtered['lfdc'][valid_idx])
 print(f'Spearman correlation: {spearman_corr}')
-sns.scatterplot(x=eqtl_finemap_filtered['fixed_beta'][valid_idx], y=eqtl_res_filtered['lfdc'][valid_idx], alpha=0.5)
+sns.scatterplot(x=eqtl_finemap_filtered['fixed_beta'][valid_idx], y=eqtl_res_filtered['lfdc'][valid_idx], alpha=0.5, s=75)
 # add x=0 and y=0 lines
 ax.axhline(0, color='black', linestyle='--')
 ax.axvline(0, color='black', linestyle='--')
@@ -214,13 +217,12 @@ eqtl_res_agg_plot = eqtl_res_agg[np.abs(eqtl_res_agg['diff']) > 0.05]
 eqtl_finemap_plot = eqtl_finemap.loc[eqtl_res_agg_plot.index]
 # %% plot
 fig, ax = plt.subplots(figsize=(5, 4))
-ax.scatter(eqtl_finemap_plot['MetaBeta'], eqtl_res_agg_plot['diff'], alpha=0.5)
+sns.scatterplot(x=eqtl_finemap_plot['MetaBeta'], y=eqtl_res_agg_plot['diff'], alpha=0.5, s=75, ax=ax)
 spearman_corr, _ = spearmanr(eqtl_finemap_plot['MetaBeta'], eqtl_res_agg_plot['diff'])
 ax.text(0.05, 0.95, f'Spearman r={spearman_corr:.2f} (n={len(eqtl_res_agg_plot)})', transform=ax.transAxes, verticalalignment='top')
 ax.axhline(0, color='black', linestyle='--')
 ax.axvline(0, color='black', linestyle='--')
 ax.set_xlabel('Finemap Beta')
 ax.set_ylabel('BICAN log2(Alt) - log2(Ref)')
-ax.set_title('Comparison of eQTL Effect between MetaBrain and BICAN')
 fig.savefig('figures/MetaBrain_top_variants_lfdc_comparison.pdf')
 # %%
