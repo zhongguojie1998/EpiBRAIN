@@ -944,8 +944,8 @@ Examples:
     # Highlight regions
     parser.add_argument("--highlight", type=str, default=None,
                         help="Regions to highlight (e.g., 'chr4:89700000-89850000' or multiple: 'chr4:100-200,chr4:300-400')")
-    parser.add_argument("--highlight-color", type=str, default="#ffff00",
-                        help="Color for highlighted regions (default: #ffff00, bright yellow)")
+    parser.add_argument("--highlight-color", type=str, default="#808080",
+                        help="Color for highlighted regions (default: #808080, grey)")
 
     args = parser.parse_args()
 
@@ -1348,6 +1348,7 @@ Examples:
                         config_lines.append(f"[vlines]")
                         config_lines.append(f"file = {highlight_file.absolute()}")
                         config_lines.append("type = vlines")
+                        config_lines.append(f"color = {args.highlight_color}")
                         config_lines.append("")
                         print(f"\nAdded {len(highlight_regions)} vertical line(s)")
                         print(f"  BED file: {highlight_file}")
@@ -1369,6 +1370,7 @@ Examples:
                         config_lines.append(f"[vhighlight]")
                         config_lines.append(f"file = {highlight_file.absolute()}")
                         config_lines.append("type = vhighlight")
+                        config_lines.append(f"color = {args.highlight_color}")
                         config_lines.append("")
                         print(f"\nAdded {len(highlight_regions)} highlight region(s)")
                         print(f"  narrowPeak file: {highlight_file}")
@@ -1610,6 +1612,7 @@ Examples:
                         config_lines.append(f"[vlines]")
                         config_lines.append(f"file = {highlight_file.absolute()}")
                         config_lines.append("type = vlines")
+                        config_lines.append(f"color = {args.highlight_color}")
                         config_lines.append("")
                         print(f"\nAdded {len(highlight_regions)} vertical line(s)")
                         print(f"  BED file: {highlight_file}")
@@ -1631,6 +1634,7 @@ Examples:
                         config_lines.append(f"[vhighlight]")
                         config_lines.append(f"file = {highlight_file.absolute()}")
                         config_lines.append("type = vhighlight")
+                        config_lines.append(f"color = {args.highlight_color}")
                         config_lines.append("")
                         print(f"\nAdded {len(highlight_regions)} highlight region(s)")
                         print(f"  narrowPeak file: {highlight_file}")
