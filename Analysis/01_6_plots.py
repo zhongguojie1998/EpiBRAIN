@@ -159,6 +159,7 @@ fig_scatter.savefig('figures/Gene_level_PearsonR_comparison_ATAC_vs_Full_model.p
 # ============================================================================
 # Combined figure with 2 subplots (plot 1 wider than plot 3)
 # ============================================================================
+merged_res = merged_res[merged_res['atlas_name'] == 'BasalGanglia']
 fig, axes = plt.subplots(1, 2, figsize=(9, 4), gridspec_kw={'width_ratios': [2.5, 1]})
 
 # ----------------------------------------------------------------------------
@@ -912,7 +913,7 @@ ax.legend()
 fig.savefig('figures/celltype_head/Bin_level_PearsonR_vs_number_of_cells.pdf')
 
 # %% # load gene level metrics
-gene_level_results = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear_full_atlas/analysis_17/gene_level/raw_data/Test_gene_metrics_length.csv', index_col=0)
+gene_level_results = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear_full_atlas/analysis_17/gene_level/raw_data/Test_gene_metrics_rpkm.csv', index_col=0)
 gene_level_results = gene_level_results.merge(cell_type_meta, left_on='trial', right_on='exp')
 gene_level_results['modality'] = gene_level_results['modality_x'].replace(
     {'RNA': 'RNA', 'RNAplus': 'RNA', 'RNAminus': 'RNA', 'K27Ac': 'H3K27ac', 'K27Me3': 'H3K27me3', 'K9Me3': 'H3K9me3'})

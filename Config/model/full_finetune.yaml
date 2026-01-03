@@ -19,4 +19,4 @@ finetune_param: null
 
 # new output head setting for the model
 output_heads: # set up the prediction head name and trial number
-  use_cell_encoder: False  # whether to use shared cell encoder for the output heads, if True, the output will be calculated as celltype embedding then shared task output, else, directly output separate celltype * modality
+  use_cell_encoder: True  # whether to use shared cell encoder for the output heads, if True, the output will be calculated as celltype embedding then shared task output, else, directly output separate celltype * modality

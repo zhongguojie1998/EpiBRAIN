@@ -99,10 +99,10 @@ partial_load: # only load the given part of the pretrained model. If not provide
 # new output head setting for the model
 output_heads: # set up the prediction head name and trial number
   use_cell_encoder: True  # whether to use shared cell encoder for the output heads, if True, the output will be calculated as celltype embedding then shared task output, else, directly output separate celltype * modality
-  celltype_hidden_dim: 6  # the dimension of the cell type embedding, if use_cell_encoder is True, this will be used to calculate the cell type embedding
+  celltype_hidden_dim: 8  # the dimension of the cell type embedding, if use_cell_encoder is True, this will be used to calculate the cell type embedding
   cell_encoder_activation: 'none'  # activation function for the cell type encoder
   regression:
-      track_num: 199
-      celltype_num: 37
+      track_num: 209
+      celltype_num: 39
       modality_num: 6 # ATAC, H3K27ac, H3K27me3, H3K9me3, RNA_plus, RNA_minus
       task: regression # choose from `regression` or `classification`
