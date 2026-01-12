@@ -626,6 +626,9 @@ class RegionInference:
         wt_nt_fetched = onehot_to_str(wt_seq_onehot[s_idx:e_idx])
         if ref != wt_nt_fetched:
             logger.warning(f"Ref info isn't consistent with genome. {chr}:{pos}, given {ref}, fetched {wt_nt_fetched}")
+            # convert wt_nt into desired ref
+            ref_nt_onehot = str_to_one_hot(ref)
+            wt_seq_onehot[s_idx:e_idx] = ref_nt_onehot
 
         # Create alt sequence
         alt_nt_onehot = str_to_one_hot(alt)
@@ -1460,6 +1463,12 @@ Examples:
     parser.add_argument('--gene', type=str, default=None,
                        help='Gene name (e.g., GRIN2A). Can be used alone for gene inference, or with --sat_mutagenesis to calculate gene-specific statistics.')
 
+    # Aggregation region for saturation mutagenesis (alternative to gene exons)
+    parser.add_argument('--aggregation-region', type=str, default=None,
+                       help='Genomic region for aggregating variant effects in saturation mutagenesis (e.g., chr1:100000-100500). '
+                            'Used when --gene is not provided. If neither --gene nor --aggregation-region is specified, '
+                            'no aggregation statistics will be calculated.')
+
     # Region center for saturation mutagenesis inference window
     parser.add_argument('--region-center', type=int, default=None,
                        help='Center position for inference context window in saturation mutagenesis (default: midpoint of mutation region). Useful for large genes.')
@@ -1548,7 +1557,7 @@ Examples:
         # Parse region
         chr, start_pos, end_pos = inference.parse_sat_region(args.sat_mutagenesis)
 
-        # Check if gene is also provided for gene-specific statistics
+        # Check if gene or aggregation region is provided for aggregation statistics
         gene_exons = None
         gene_name = None
         if args.gene:
@@ -1559,6 +1568,29 @@ Examples:
             gene_exons = [(start, end) for _, start, end in exons_with_chr]
             gene_name = args.gene
             logger.info(f"Found {len(gene_exons)} exons for gene {gene_name}")
+        elif args.aggregation_region:
+            logger.info(f"Using aggregation region: {args.aggregation_region}")
+            # Parse aggregation region (format: chr:start-end)
+            if ':' not in args.aggregation_region or '-' not in args.aggregation_region:
+                logger.error(f"Invalid aggregation region format: {args.aggregation_region}")
+                logger.error("Expected format: chr:start-end (e.g., chr1:100000-100500)")
+                sys.exit(1)
+
+            chr_region = args.aggregation_region.split(':')
+            agg_chr = chr_region[0]
+            start_end = chr_region[1].split('-')
+            agg_start = int(start_end[0])
+            agg_end = int(start_end[1])
+
+            # Verify chromosome matches
+            if agg_chr != chr:
+                logger.error(f"Aggregation region chromosome ({agg_chr}) does not match saturation mutagenesis chromosome ({chr})")
+                sys.exit(1)
+
+            # Convert aggregation region to exon format (single "exon" covering the region)
+            gene_exons = [(agg_start, agg_end)]
+            gene_name = f"region_{agg_chr}_{agg_start}_{agg_end}"
+            logger.info(f"Aggregation region: {agg_chr}:{agg_start}-{agg_end}")
 
         # Run saturation mutagenesis
         results_df = inference.run_saturation_mutagenesis(

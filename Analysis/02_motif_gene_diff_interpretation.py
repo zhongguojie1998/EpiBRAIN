@@ -237,6 +237,72 @@ def get_gene_exon_regions(gene_name, gtf_file, window_size, n_window, context_le
     return regions
 
 
+def get_aggregation_regions(aggregation_region, window_size, n_window, context_length, region_center=None):
+    """
+    Create a region from a custom aggregation region specification.
+
+    Args:
+        aggregation_region: Region in format chr:start-end (e.g., chr1:100000-100500)
+        window_size: Size of each bin
+        n_window: Total number of bins
+        context_length: Total context length
+        region_center: Optional custom center position for the analysis region
+
+    Returns:
+        List with single tuple: (chr, start, end, strand, bin_range_str, region_name)
+        where bin_range_str contains all bins that overlap with the aggregation region
+    """
+    logger = BaseLogger(name="Aggregation Region Parser", level=logging.INFO)
+
+    # Parse aggregation region (format: chr:start-end)
+    if ':' not in aggregation_region or '-' not in aggregation_region:
+        raise ValueError(f"Invalid aggregation region format: {aggregation_region}. Expected format: chr:start-end")
+
+    chr_region = aggregation_region.split(':')
+    chrom = chr_region[0]
+    start_end = chr_region[1].split('-')
+    agg_start = int(start_end[0])
+    agg_end = int(start_end[1])
+
+    logger.info(f"Aggregation region: {chrom}:{agg_start}-{agg_end}")
+
+    # Calculate region center (midpoint of aggregation region or custom center)
+    agg_center = (agg_start + agg_end) // 2
+
+    if region_center is not None:
+        logger.info(f"  Using custom region center: {region_center} (overriding aggregation center: {agg_center})")
+        center_pos = region_center
+    else:
+        center_pos = agg_center
+
+    # Create a context window centered on the aggregation region
+    region_start = max(0, center_pos - context_length // 2)
+    region_end = region_start + context_length
+
+    logger.info(f"  Context window: {chrom}:{region_start}-{region_end}")
+
+    # Calculate bin range for the aggregation region
+    bin_indices = calculate_bin_range(agg_start, agg_end, region_start, window_size, n_window)
+    bin_range_str = format_bin_range(np.array(sorted(bin_indices)))
+
+    logger.info(f"  Aggregation region {chrom}:{agg_start}-{agg_end} -> bins {bin_range_str} ({len(bin_indices)} bins)")
+
+    # Create region name
+    region_name = f"region_{chrom}_{agg_start}_{agg_end}"
+
+    # Return single region
+    regions = [(
+        chrom,
+        region_start,
+        region_end,
+        '+',  # Strand doesn't matter for custom aggregation regions
+        bin_range_str,
+        region_name
+    )]
+
+    return regions
+
+
 def untransform_predictions_numpy(preds, label_meta_row):
     """
     Untransform predictions back to original scale (numpy version).
@@ -827,7 +893,11 @@ def process_region_chunk(args):
 
 
 @click.command()
-@click.option("--gene_name", "-g", required=True, type=str, help="Gene name to analyze")
+@click.option("--gene_name", "-g", required=False, type=str, default=None,
+              help="Gene name to analyze (required if --aggregation-region is not provided)")
+@click.option("--aggregation_region", required=False, type=str, default=None,
+              help="Genomic region for aggregating attribution scores (e.g., chr1:100000-100500). "
+                   "Used when --gene_name is not provided. Either --gene_name or --aggregation_region must be specified.")
 @click.option("--gtf_file", required=False, type=str,
               default="Data/source/gencode.v48.annotation.gtf.gz",
               help="Path to GTF annotation file")
@@ -867,6 +937,7 @@ def process_region_chunk(args):
               default="DeepLift", help="Attribution method to use")
 def main(
     gene_name,
+    aggregation_region,
     gtf_file,
     region_center,
     trial_pos,
@@ -905,6 +976,15 @@ def main(
     trial_pos_str = ';'.join(trial_pos)
     trial_neg_str = ';'.join(trial_neg) if trial_neg else None
 
+    # Validate inputs
+    if not gene_name and not aggregation_region:
+        logger.error("Either --gene_name or --aggregation_region must be specified")
+        return
+
+    if gene_name and aggregation_region:
+        logger.error("Cannot specify both --gene_name and --aggregation_region")
+        return
+
     # Validate we have at least one positive track
     if len(trial_pos) == 0:
         logger.error("At least one positive track must be specified with --trial_pos")
@@ -916,16 +996,28 @@ def main(
     else:
         logger.info("No negative tracks specified - will analyze positive tracks only")
 
-    # Get gene exon regions
-    logger.info(f"Extracting exon regions for gene: {gene_name}")
-    regions = get_gene_exon_regions(
-        gene_name,
-        gtf_file,
-        myconfig.data.preprocess.window_size,
-        myconfig.data.preprocess.n_window,
-        myconfig.data.context_length,
-        region_center=region_center
-    )
+    # Get regions based on mode
+    if gene_name:
+        # Gene-based mode: extract exon regions
+        logger.info(f"Extracting exon regions for gene: {gene_name}")
+        regions = get_gene_exon_regions(
+            gene_name,
+            gtf_file,
+            myconfig.data.preprocess.window_size,
+            myconfig.data.preprocess.n_window,
+            myconfig.data.context_length,
+            region_center=region_center
+        )
+    else:
+        # Aggregation region mode: create region from custom coordinates
+        logger.info(f"Using aggregation region: {aggregation_region}")
+        regions = get_aggregation_regions(
+            aggregation_region,
+            myconfig.data.preprocess.window_size,
+            myconfig.data.preprocess.n_window,
+            myconfig.data.context_length,
+            region_center=region_center
+        )
 
     if len(regions) == 0:
         logger.error(f"No valid exon regions found for gene {gene_name}")

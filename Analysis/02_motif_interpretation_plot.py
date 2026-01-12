@@ -336,7 +336,8 @@ def plot_interpretation(data, output_file, dpi=300, start_idx=None, end_idx=None
     logger.info(f"Plotting region: genomic coords {start_genomic} to {end_genomic} ({end_genomic - start_genomic} bp)")
 
     # Create bp-resolution x coordinates
-    x_bp = np.arange(start_genomic, end_genomic)
+    # Add 1 to convert from 0-based to 1-based genomic coordinates for display
+    x_bp = np.arange(start_genomic, end_genomic) + 1
 
     # Prepare plot data - only importance and sequence attribution
     plot_data = []

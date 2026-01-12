@@ -21,6 +21,9 @@ usage() {
     echo "Optional arguments:"
     echo "  --variant-name NAME         Variant name/RS ID (default: chr_pos_ref_alt)"
     echo "  --gene GENE                 Gene symbol (default: auto-detect from GTF)"
+    echo "  --region REGION             Genomic region in format chr:start-end (e.g., chr19:19657165-19658165)"
+    echo "                              Replaces --gene for aggregation and motif interpretation (Steps 2,4,5,6,7)"
+    echo "  --no-gene                   Disable gene detection, use variant-centered mode (aggregation over variant ±500bp)"
     echo "  --disease DISEASE           Disease name (e.g., Schizophrenia)"
     echo "  --midpoint POSITION         Central position for analysis in format chr:pos"
     echo "                              - Step 1: Switches to region inference mode (full gene region centered at midpoint)"
@@ -109,6 +112,10 @@ usage() {
     echo "  $0 --variant chr11:113400106:G:T --track BasalGanglia-STR-D1-MSN_RNAminus \\"
     echo "     --alt-first"
     echo ""
+    echo "  # Use a custom region for aggregation instead of gene:"
+    echo "  $0 --variant chr19:19657165:G:A --track MiniAtlas-L5IT_RNAminus \\"
+    echo "     --region chr19:19657165-19658165"
+    echo ""
     echo "Note: Track 'BasalGanglia-STR-D1-MSN_RNAminus' will auto-derive trial-pos as 'STR-D1-MSN_RNAminus'"
     exit 1
 }
@@ -128,6 +135,14 @@ while [[ $# -gt 0 ]]; do
         --gene)
             GENE="$2"
             shift 2
+            ;;
+        --region)
+            REGION="$2"
+            shift 2
+            ;;
+        --no-gene)
+            NO_GENE=true
+            shift
             ;;
         --track)
             TRACK="$2"
@@ -281,9 +296,15 @@ if [ -z "$VARIANT" ] || [ -z "$TRACK" ]; then
     usage
 fi
 
+# Check for conflicting arguments
+if [ -n "$REGION" ] && [ -n "$GENE" ]; then
+    echo "Error: Cannot specify both --region and --gene. Use --region to replace --gene functionality."
+    exit 1
+fi
+
 # Set defaults
-EXP_NAME=${EXP_NAME:-"full_finetune_original_loss_celltype_head_dim8_linear"}
-CHECKPOINT=${CHECKPOINT:-20}
+EXP_NAME=${EXP_NAME:-"full_finetune_original_loss_celltype_head_dim8_linear_full_atlas"}
+CHECKPOINT=${CHECKPOINT:-17}
 OUTPUT_BASE=${OUTPUT_BASE:-"Analysis/figures"}
 GTF_FILE=${GTF_FILE:-"Data/source/gencode.v48.annotation.gtf.gz"}
 NUM_GPUS=${NUM_GPUS:-4}
@@ -348,57 +369,93 @@ if [ -z "$TOMTOM_BACKGROUND_REGION" ]; then
 fi
 
 # Auto-detect gene from GTF if not provided
-if [ -z "$GENE" ]; then
+GENE_MODE="gene"  # Default mode: gene-based analysis
+
+# Check if --region was specified (takes precedence over gene)
+if [ -n "$REGION" ]; then
+    echo "Region specified: $REGION (will be used for aggregation and motif interpretation)"
+    GENE_MODE="region"
+    GENE="region"  # Placeholder for display
+    # Parse region to set aggregation region
+    AGGREGATION_REGION="$REGION"
+# Check if --no-gene flag was set
+elif [ "$NO_GENE" = true ]; then
+    echo "Gene detection disabled (--no-gene flag), proceeding in variant-centered mode"
+    GENE_MODE="variant"
+    GENE="variant"  # Placeholder
+elif [ -z "$GENE" ]; then
     echo "Gene not provided, searching for closest gene in GTF file..."
     if [ ! -f "$GTF_FILE" ]; then
-        echo "Error: GTF file not found at $GTF_FILE"
-        exit 1
-    fi
-
-    # Extract genes from GTF and find the closest one
-    # Use zcat if file is gzipped, otherwise cat
-    if [[ "$GTF_FILE" == *.gz ]]; then
-        CAT_CMD="zcat"
+        echo "Warning: GTF file not found at $GTF_FILE, proceeding in variant-centered mode"
+        GENE_MODE="variant"
+        GENE="variant"  # Placeholder
     else
-        CAT_CMD="cat"
-    fi
+        # Extract genes from GTF and find the closest one
+        # Use zcat if file is gzipped, otherwise cat
+        if [[ "$GTF_FILE" == *.gz ]]; then
+            CAT_CMD="zcat"
+        else
+            CAT_CMD="cat"
+        fi
 
-    # Find closest gene (looking for genes on the same chromosome)
-    # GTF format: chr source feature start end score strand frame attributes
-    GENE=$($CAT_CMD "$GTF_FILE" | \
-        awk -v chr="$CHR" -v pos="$POS" '
-        BEGIN { min_dist = 999999999; closest_gene = "unknown" }
-        $1 == chr && $3 == "gene" {
-            # Extract gene_name from attributes
-            match($0, /gene_name "([^"]+)"/, arr)
-            gene_name = arr[1]
+        # Find closest gene (looking for genes on the same chromosome)
+        # GTF format: chr source feature start end score strand frame attributes
+        GENE=$($CAT_CMD "$GTF_FILE" | \
+            awk -v chr="$CHR" -v pos="$POS" '
+            BEGIN { min_dist = 999999999; closest_gene = "unknown" }
+            $1 == chr && $3 == "gene" {
+                # Extract gene_name from attributes
+                match($0, /gene_name "([^"]+)"/, arr)
+                gene_name = arr[1]
 
-            start = $4
-            end = $5
+                start = $4
+                end = $5
 
-            # Calculate distance (0 if inside gene, otherwise distance to nearest boundary)
-            if (pos >= start && pos <= end) {
-                dist = 0
-            } else if (pos < start) {
-                dist = start - pos
-            } else {
-                dist = pos - end
+                # Calculate distance (0 if inside gene, otherwise distance to nearest boundary)
+                if (pos >= start && pos <= end) {
+                    dist = 0
+                } else if (pos < start) {
+                    dist = start - pos
+                } else {
+                    dist = pos - end
+                }
+
+                if (dist < min_dist) {
+                    min_dist = dist
+                    closest_gene = gene_name
+                }
             }
+            END { print closest_gene }
+        ')
 
-            if (dist < min_dist) {
-                min_dist = dist
-                closest_gene = gene_name
-            }
-        }
-        END { print closest_gene }
-    ')
-
-    if [ "$GENE" = "unknown" ] || [ -z "$GENE" ]; then
-        echo "Error: Could not find a gene near variant $VARIANT in GTF file"
-        exit 1
+        if [ "$GENE" = "unknown" ] || [ -z "$GENE" ]; then
+            echo "Warning: Could not find a gene near variant $VARIANT in GTF file"
+            echo "Proceeding in variant-centered mode (aggregation over variant ±500bp)"
+            GENE_MODE="variant"
+            GENE="variant"  # Placeholder
+        else
+            echo "Closest gene found: $GENE"
+        fi
     fi
+fi
 
-    echo "Closest gene found: $GENE"
+# Set up aggregation region based on mode
+if [ "$GENE_MODE" = "region" ]; then
+    # Region mode: aggregation region is already set from --region parameter
+    echo "Aggregation region (from --region): $AGGREGATION_REGION"
+elif [ "$GENE_MODE" = "variant" ]; then
+    # Variant-centered mode: aggregate over variant ± 500bp
+    AGG_REGION_START=$((POS - 500))
+    AGG_REGION_END=$((POS + 500))
+    if [ $AGG_REGION_START -lt 0 ]; then
+        AGG_REGION_START=0
+    fi
+    AGGREGATION_REGION="${CHR}:${AGG_REGION_START}-${AGG_REGION_END}"
+    echo "Aggregation region (variant ±500bp): $AGGREGATION_REGION"
+else
+    # Gene-based mode: aggregation will use gene exons
+    AGGREGATION_REGION=""
+    echo "Aggregation region: Gene exons (will be extracted from GTF)"
 fi
 
 # Auto-generate trial_pos from track if not provided
@@ -409,11 +466,32 @@ if [ -z "$TRIAL_POS" ]; then
     echo "Trial position not provided, derived from track: $TRIAL_POS"
 fi
 
-# Generate output suffix based on disease
-if [ -n "$DISEASE" ]; then
-    OUTPUT_SUFFIX="${VARIANT_NAME}_${GENE}_${DISEASE}"
+# Generate output suffix based on disease and mode
+if [ "$GENE_MODE" = "region" ]; then
+    # Region mode: use variant name and region
+    # Extract region coordinates for suffix
+    IFS=':' read -r REGION_CHR REGION_COORDS <<< "$REGION"
+    IFS='-' read -r REGION_START REGION_END <<< "$REGION_COORDS"
+    REGION_SUFFIX="${REGION_CHR}_${REGION_START}_${REGION_END}"
+    if [ -n "$DISEASE" ] && [ "$DISEASE" != "NA" ]; then
+        OUTPUT_SUFFIX="${VARIANT_NAME}_${REGION_SUFFIX}_${DISEASE}"
+    else
+        OUTPUT_SUFFIX="${VARIANT_NAME}_${REGION_SUFFIX}"
+    fi
+elif [ "$GENE_MODE" = "variant" ]; then
+    # Variant-centered mode: use variant name only
+    if [ -n "$DISEASE" ] && [ "$DISEASE" != "NA" ]; then
+        OUTPUT_SUFFIX="${VARIANT_NAME}_${DISEASE}"
+    else
+        OUTPUT_SUFFIX="${VARIANT_NAME}"
+    fi
 else
-    OUTPUT_SUFFIX="${VARIANT_NAME}_${GENE}"
+    # Gene-based mode: include gene name
+    if [ -n "$DISEASE" ] && [ "$DISEASE" != "NA" ]; then
+        OUTPUT_SUFFIX="${VARIANT_NAME}_${GENE}_${DISEASE}"
+    else
+        OUTPUT_SUFFIX="${VARIANT_NAME}_${GENE}"
+    fi
 fi
 
 # Calculate saturation mutagenesis region if not provided (±20bp around variant)
@@ -424,14 +502,18 @@ if [ -z "$SAT_REGION" ]; then
     SAT_REGION="${CHR}:${SAT_START}-${SAT_END}"
 fi
 
-# Calculate gene region if not provided (centered on midpoint or gene center ± 262144bp)
+# Calculate gene region if not provided (centered on midpoint, gene center, or variant ± 262144bp)
 if [ -z "$GENE_REGION" ]; then
     # If midpoint is specified, use it directly
     if [ -n "$MIDPOINT" ]; then
         echo "Using midpoint as center for gene region: $MIDPOINT_POS"
         REGION_CENTER=$MIDPOINT_POS
+    elif [ "$GENE_MODE" = "variant" ]; then
+        # Variant-centered mode: use variant position as center
+        echo "Using variant position as center for visualization region"
+        REGION_CENTER=$POS
     else
-        # Extract gene coordinates from GTF to find gene center
+        # Gene-based mode: Extract gene coordinates from GTF to find gene center
         echo "Extracting gene coordinates from GTF..."
 
         # Use zcat if file is gzipped, otherwise cat
@@ -608,14 +690,22 @@ if ! should_skip 2; then
     echo "[Step 2/7] Running saturation mutagenesis (using $NUM_GPUS GPUs)..."
     SAT_OUTPUT_DIR="${ANALYSIS_DIR}/sat_mutagenesis"
 
-    # Build command with optional region-center parameter
+    # Build command with optional parameters
     CMD="python Analysis/01_0_quick_inference_bigwig.py \
         --sat_mutagenesis \"$SAT_REGION\" \
         --exp_name \"$EXP_NAME\" \
         --chk \"$CHECKPOINT\" \
         --output \"$SAT_OUTPUT_DIR\" \
-        --gene \"$GENE\" \
         --num-gpus \"$NUM_GPUS\""
+
+    # Add gene or aggregation region based on mode
+    if [ "$GENE_MODE" = "region" ] || [ "$GENE_MODE" = "variant" ]; then
+        CMD="$CMD --aggregation-region \"$AGGREGATION_REGION\""
+        echo "  Aggregation region: $AGGREGATION_REGION"
+    else
+        CMD="$CMD --gene \"$GENE\""
+        echo "  Gene: $GENE"
+    fi
 
     # Add region-center if midpoint is specified
     if [ -n "$MIDPOINT" ]; then
@@ -742,11 +832,10 @@ fi
 
 # Step 5: Motif interpretation
 if ! should_skip 5; then
-    echo "[Step 5/7] Running motif gene diff interpretation..."
+    echo "[Step 5/7] Running motif interpretation..."
     echo "  Attribution method: $METHOD"
-    # Build command with optional region_center parameter
+    # Build command with gene or aggregation region based on mode
     CMD="python Analysis/02_motif_gene_diff_interpretation.py \
-        --gene_name \"$GENE\" \
         --trial_pos \"$TRIAL_POS\" \
         -e \"$EXP_NAME\" \
         --chk \"$CHECKPOINT\" \
@@ -760,13 +849,33 @@ if ! should_skip 5; then
         --num_threads 1 \
         --use_head regression"
 
+    # Add gene or aggregation region based on mode
+    if [ "$GENE_MODE" = "region" ] || [ "$GENE_MODE" = "variant" ]; then
+        CMD="$CMD --aggregation_region \"$AGGREGATION_REGION\""
+        echo "  Aggregation region: $AGGREGATION_REGION"
+    else
+        CMD="$CMD --gene_name \"$GENE\""
+        echo "  Gene: $GENE"
+    fi
+
     # Add region_center if midpoint is specified
     if [ -n "$MIDPOINT" ]; then
         CMD="$CMD --region_center $MIDPOINT_POS"
         echo "  Using custom region center: $MIDPOINT_POS"
     fi
 
-    eval $CMD
+    # Capture Step 5 output to extract NAME_BASE
+    STEP5_OUTPUT=$(eval $CMD 2>&1)
+    echo "$STEP5_OUTPUT"
+
+    # Parse NAME_BASE from the output (look for --name_base parameter)
+    NAME_BASE=$(echo "$STEP5_OUTPUT" | grep -oP '(?<=--name_base )[^ ]+' | head -1)
+    DATA_DIR=$(echo "$STEP5_OUTPUT" | grep -oP '(?<=--data_dir )[^ ]+' | head -1)
+
+    if [ -n "$NAME_BASE" ]; then
+        echo "  Captured NAME_BASE for subsequent steps: $NAME_BASE"
+    fi
+
     echo "✓ Step 5 complete."
     echo ""
 else
@@ -777,79 +886,95 @@ fi
 # Step 6: Motif interpretation plotting
 if ! should_skip 6; then
     echo "[Step 6/7] Running motif interpretation plotting..."
-    # Parse gene region
-    IFS=':' read -r GENE_CHR GENE_COORDS <<< "$GENE_REGION"
-    IFS='-' read -r GENE_START GENE_END <<< "$GENE_COORDS"
 
-    # Extract trial pos components (remove _RNAplus/RNAminus suffix)
-    TRIAL_POS_SHORT=$(echo "$TRIAL_POS" | sed 's/_RNA.*//')
-    TRIAL_STRAND=$(echo "$TRIAL_POS" | grep -o "RNA.*")
-
-    # Create name base
-    # Format: chr_start_end_gene_celltype_strand
-    # Example: chr11_113137962_113662250_DRD2_STR-D1-MSN_minus
-    NAME_BASE="${GENE_CHR}_${GENE_START}_${GENE_END}_${GENE}_${TRIAL_POS_SHORT}"
-    if [ "$TRIAL_STRAND" = "RNAplus" ]; then
-        NAME_BASE="${NAME_BASE}_plus"
-    else
-        NAME_BASE="${NAME_BASE}_minus"
+    # Use NAME_BASE and DATA_DIR from Step 5 if available, otherwise auto-detect
+    if [ -z "$DATA_DIR" ]; then
+        DATA_DIR="./Res/${EXP_NAME}/analysis_${CHECKPOINT}/raw_data/interp_diff"
     fi
 
-    echo "  Using name base: $NAME_BASE"
+    if [ -z "$NAME_BASE" ]; then
+        # Step 5 was skipped, need to auto-detect NAME_BASE from existing files
+        echo "  Step 5 was skipped, auto-detecting NAME_BASE from existing files..."
+        TRIAL_POS_SHORT=$(echo "$TRIAL_POS" | sed 's/_RNA.*//')
 
-    DATA_DIR="./Res/${EXP_NAME}/analysis_${CHECKPOINT}/raw_data/interp_diff"
+        if [ "$GENE_MODE" = "region" ] || [ "$GENE_MODE" = "variant" ]; then
+            IFS=':' read -r AGG_CHR AGG_COORDS <<< "$AGGREGATION_REGION"
+            IFS='-' read -r AGG_START AGG_END <<< "$AGG_COORDS"
+            REGION_PATTERN="region_${AGG_CHR}_${AGG_START}_${AGG_END}"
+            METADATA_FILE=$(find "$DATA_DIR" -name "*_${REGION_PATTERN}_${TRIAL_POS_SHORT}_metadata.npy" 2>/dev/null | head -1)
+        else
+            METADATA_FILE=$(find "$DATA_DIR" -name "*_${GENE}_${TRIAL_POS_SHORT}*_metadata.npy" 2>/dev/null | head -1)
+        fi
 
-    # Plot 1: Full region plot (without zoom)
-    PLOT_OUTPUT_FULL="${ANALYSIS_DIR}/motif_interpretation_full.pdf"
-    echo "  Creating full region plot..."
-    python Analysis/02_motif_interpretation_plot.py \
-        --data_dir "$DATA_DIR" \
-        --name_base "$NAME_BASE" \
-        --baseline random \
-        --output "$PLOT_OUTPUT_FULL" \
-        --motif-viz-plot-width "$MOTIF_VIZ_PLOT_WIDTH" \
-        --motif-viz-plot-height "$MOTIF_VIZ_PLOT_HEIGHT"
-
-    # Plot 2: Zoomed region around variant, custom midpoint, or custom region
-    # Priority: custom region > custom midpoint > variant location
-    if [ -n "$MOTIF_VIZ_ZOOM_REGION" ]; then
-        # Parse custom region (format: chr:start-end)
-        ZOOM_CHR=$(echo "$MOTIF_VIZ_ZOOM_REGION" | cut -d':' -f1)
-        ZOOM_COORDS=$(echo "$MOTIF_VIZ_ZOOM_REGION" | cut -d':' -f2)
-        ZOOM_START=$(echo "$ZOOM_COORDS" | cut -d'-' -f1)
-        ZOOM_END=$(echo "$ZOOM_COORDS" | cut -d'-' -f2)
-        PLOT_OUTPUT_ZOOM="${ANALYSIS_DIR}/motif_interpretation_zoom.pdf"
-        echo "  Creating zoomed region plot (custom region: ${ZOOM_CHR}:${ZOOM_START}-${ZOOM_END})..."
-    elif [ -n "$MOTIF_VIZ_ZOOM_MIDPOINT" ]; then
-        # Parse custom midpoint (format: chr:pos)
-        ZOOM_CHR=$(echo "$MOTIF_VIZ_ZOOM_MIDPOINT" | cut -d':' -f1)
-        ZOOM_CENTER=$(echo "$MOTIF_VIZ_ZOOM_MIDPOINT" | cut -d':' -f2)
-        ZOOM_START=$((ZOOM_CENTER - 50))
-        ZOOM_END=$((ZOOM_CENTER + 50))
-        PLOT_OUTPUT_ZOOM="${ANALYSIS_DIR}/motif_interpretation_zoom.pdf"
-        echo "  Creating zoomed region plot (custom midpoint ±50bp: ${ZOOM_CHR}:${ZOOM_START}-${ZOOM_END})..."
+        if [ -z "$METADATA_FILE" ]; then
+            echo "  Error: Could not find Step 5 output files in $DATA_DIR"
+            echo "  Expected pattern: *_${REGION_PATTERN}_${TRIAL_POS_SHORT}_metadata.npy"
+            echo "  Skipping Step 6."
+            echo ""
+        else
+            # Extract NAME_BASE from metadata filename
+            METADATA_BASENAME=$(basename "$METADATA_FILE")
+            NAME_BASE="${METADATA_BASENAME%_metadata.npy}"
+            echo "  Auto-detected name base: $NAME_BASE"
+        fi
     else
-        # Default to variant position
-        ZOOM_START=$((POS - 50))
-        ZOOM_END=$((POS + 50))
-        PLOT_OUTPUT_ZOOM="${ANALYSIS_DIR}/motif_interpretation_zoom.pdf"
-        echo "  Creating zoomed region plot (variant ±50bp: ${CHR}:${ZOOM_START}-${ZOOM_END})..."
+        echo "  Using NAME_BASE from Step 5: $NAME_BASE"
     fi
-    python Analysis/02_motif_interpretation_plot.py \
-        --data_dir "$DATA_DIR" \
-        --name_base "$NAME_BASE" \
-        --baseline random \
-        --output "$PLOT_OUTPUT_ZOOM" \
-        --start "$ZOOM_START" \
-        --end "$ZOOM_END" \
-        --show_sequence \
-        --motif-viz-plot-width "$MOTIF_VIZ_PLOT_WIDTH" \
-        --motif-viz-plot-height "$MOTIF_VIZ_PLOT_HEIGHT"
 
-    echo "✓ Step 6 complete."
-    echo "  Full plot:   $PLOT_OUTPUT_FULL"
-    echo "  Zoomed plot: $PLOT_OUTPUT_ZOOM"
-    echo ""
+    if [ -n "$NAME_BASE" ]; then
+
+        # Plot 1: Full region plot (without zoom)
+        PLOT_OUTPUT_FULL="${ANALYSIS_DIR}/motif_interpretation_full.pdf"
+        echo "  Creating full region plot..."
+        python Analysis/02_motif_interpretation_plot.py \
+            --data_dir "$DATA_DIR" \
+            --name_base "$NAME_BASE" \
+            --baseline random \
+            --output "$PLOT_OUTPUT_FULL" \
+            --motif-viz-plot-width "$MOTIF_VIZ_PLOT_WIDTH" \
+            --motif-viz-plot-height "$MOTIF_VIZ_PLOT_HEIGHT"
+
+        # Plot 2: Zoomed region around variant, custom midpoint, or custom region
+        # Priority: custom region > custom midpoint > variant location
+        if [ -n "$MOTIF_VIZ_ZOOM_REGION" ]; then
+            # Parse custom region (format: chr:start-end)
+            ZOOM_CHR=$(echo "$MOTIF_VIZ_ZOOM_REGION" | cut -d':' -f1)
+            ZOOM_COORDS=$(echo "$MOTIF_VIZ_ZOOM_REGION" | cut -d':' -f2)
+            ZOOM_START=$(echo "$ZOOM_COORDS" | cut -d'-' -f1)
+            ZOOM_END=$(echo "$ZOOM_COORDS" | cut -d'-' -f2)
+            PLOT_OUTPUT_ZOOM="${ANALYSIS_DIR}/motif_interpretation_zoom.pdf"
+            echo "  Creating zoomed region plot (custom region: ${ZOOM_CHR}:${ZOOM_START}-${ZOOM_END})..."
+        elif [ -n "$MOTIF_VIZ_ZOOM_MIDPOINT" ]; then
+            # Parse custom midpoint (format: chr:pos)
+            ZOOM_CHR=$(echo "$MOTIF_VIZ_ZOOM_MIDPOINT" | cut -d':' -f1)
+            ZOOM_CENTER=$(echo "$MOTIF_VIZ_ZOOM_MIDPOINT" | cut -d':' -f2)
+            ZOOM_START=$((ZOOM_CENTER - 50))
+            ZOOM_END=$((ZOOM_CENTER + 50))
+            PLOT_OUTPUT_ZOOM="${ANALYSIS_DIR}/motif_interpretation_zoom.pdf"
+            echo "  Creating zoomed region plot (custom midpoint ±50bp: ${ZOOM_CHR}:${ZOOM_START}-${ZOOM_END})..."
+        else
+            # Default to variant position
+            ZOOM_START=$((POS - 50))
+            ZOOM_END=$((POS + 50))
+            PLOT_OUTPUT_ZOOM="${ANALYSIS_DIR}/motif_interpretation_zoom.pdf"
+            echo "  Creating zoomed region plot (variant ±50bp: ${CHR}:${ZOOM_START}-${ZOOM_END})..."
+        fi
+        python Analysis/02_motif_interpretation_plot.py \
+            --data_dir "$DATA_DIR" \
+            --name_base "$NAME_BASE" \
+            --baseline random \
+            --output "$PLOT_OUTPUT_ZOOM" \
+            --start "$ZOOM_START" \
+            --end "$ZOOM_END" \
+            --show_sequence \
+            --motif-viz-plot-width "$MOTIF_VIZ_PLOT_WIDTH" \
+            --motif-viz-plot-height "$MOTIF_VIZ_PLOT_HEIGHT"
+
+        echo "✓ Step 6 complete."
+        echo "  Full plot:   $PLOT_OUTPUT_FULL"
+        echo "  Zoomed plot: $PLOT_OUTPUT_ZOOM"
+        echo ""
+    fi
 else
     echo "[Step 6/7] Skipped."
     echo ""
@@ -872,41 +997,55 @@ if ! should_skip 7; then
             echo "  Skipping TOMTOM analysis"
             echo ""
         else
-            # Use NAME_BASE and DATA_DIR from Step 6 context
-            # Parse gene region to construct NAME_BASE if Step 6 was skipped
-            if [ -z "$NAME_BASE" ]; then
-                IFS=':' read -r GENE_CHR GENE_COORDS <<< "$GENE_REGION"
-                IFS='-' read -r GENE_START GENE_END <<< "$GENE_COORDS"
-
-                TRIAL_POS_SHORT=$(echo "$TRIAL_POS" | sed 's/_RNA.*//')
-                TRIAL_STRAND=$(echo "$TRIAL_POS" | grep -o "RNA.*")
-
-                NAME_BASE="${GENE_CHR}_${GENE_START}_${GENE_END}_${GENE}_${TRIAL_POS_SHORT}"
-                if [ "$TRIAL_STRAND" = "RNAplus" ]; then
-                    NAME_BASE="${NAME_BASE}_plus"
-                else
-                    NAME_BASE="${NAME_BASE}_minus"
-                fi
-            fi
-
+            # Use NAME_BASE and DATA_DIR from Step 5/6 if available
             if [ -z "$DATA_DIR" ]; then
                 DATA_DIR="./Res/${EXP_NAME}/analysis_${CHECKPOINT}/raw_data/interp_diff"
             fi
 
-            TOMTOM_OUTPUT_DIR="${ANALYSIS_DIR}/tomtom"
+            if [ -z "$NAME_BASE" ]; then
+                # Steps 5-6 were skipped, need to auto-detect NAME_BASE from existing files
+                echo "  Steps 5-6 were skipped, auto-detecting NAME_BASE from existing files..."
+                TRIAL_POS_SHORT=$(echo "$TRIAL_POS" | sed 's/_RNA.*//')
 
-            python Analysis/02_motif_region_tomtom.py \
-                --data_dir "$DATA_DIR" \
-                --name_base "$NAME_BASE" \
-                --baseline random \
-                --region "$TOMTOM_REGION" \
-                --background-region "$TOMTOM_BACKGROUND_REGION" \
-                --output_dir "$TOMTOM_OUTPUT_DIR" \
-                --meme_db "$TOMTOM_DB"
+                if [ "$GENE_MODE" = "region" ] || [ "$GENE_MODE" = "variant" ]; then
+                    IFS=':' read -r AGG_CHR AGG_COORDS <<< "$AGGREGATION_REGION"
+                    IFS='-' read -r AGG_START AGG_END <<< "$AGG_COORDS"
+                    REGION_PATTERN="region_${AGG_CHR}_${AGG_START}_${AGG_END}"
+                    METADATA_FILE=$(find "$DATA_DIR" -name "*_${REGION_PATTERN}_${TRIAL_POS_SHORT}_metadata.npy" 2>/dev/null | head -1)
+                else
+                    METADATA_FILE=$(find "$DATA_DIR" -name "*_${GENE}_${TRIAL_POS_SHORT}*_metadata.npy" 2>/dev/null | head -1)
+                fi
 
-            echo "✓ Step 7 complete."
-            echo "  Results: $TOMTOM_OUTPUT_DIR/tomtom.html"
-            echo ""
+                if [ -n "$METADATA_FILE" ]; then
+                    # Extract NAME_BASE from metadata filename
+                    METADATA_BASENAME=$(basename "$METADATA_FILE")
+                    NAME_BASE="${METADATA_BASENAME%_metadata.npy}"
+                    echo "  Auto-detected name base: $NAME_BASE"
+                fi
+            else
+                echo "  Using NAME_BASE from Step 5: $NAME_BASE"
+            fi
+
+            if [ -z "$NAME_BASE" ]; then
+                echo "  Error: Could not find Step 5 output files in $DATA_DIR"
+                echo "  Skipping TOMTOM analysis."
+                echo ""
+            else
+                TOMTOM_OUTPUT_DIR="${ANALYSIS_DIR}/tomtom"
+
+                python Analysis/02_motif_region_tomtom.py \
+                    --data_dir "$DATA_DIR" \
+                    --name_base "$NAME_BASE" \
+                    --baseline random \
+                    --region "$TOMTOM_REGION" \
+                    --background-region "$TOMTOM_BACKGROUND_REGION" \
+                    --output_dir "$TOMTOM_OUTPUT_DIR" \
+                    --meme_db "$TOMTOM_DB"
+
+                echo "✓ Step 7 complete."
+                echo "  Results: $TOMTOM_OUTPUT_DIR/tomtom.html"
+                echo ""
+            fi
         fi
     fi
 else
