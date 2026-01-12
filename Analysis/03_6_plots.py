@@ -213,7 +213,8 @@ common_variants = eqtl_res_agg.index.intersection(eqtl_finemap.index)
 eqtl_res_agg = eqtl_res_agg.loc[common_variants]
 eqtl_finemap = eqtl_finemap.loc[common_variants]
 # %% filter low effect size variants
-eqtl_res_agg_plot = eqtl_res_agg[np.abs(eqtl_res_agg['diff']) > 0.05]
+# eqtl_res_agg_plot = eqtl_res_agg[np.abs(eqtl_res_agg['diff']) > 0.05]
+eqtl_res_agg_plot = eqtl_res_agg
 eqtl_finemap_plot = eqtl_finemap.loc[eqtl_res_agg_plot.index]
 # %% plot
 fig, ax = plt.subplots(figsize=(5, 4))
