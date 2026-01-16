@@ -241,6 +241,27 @@ def process_vcf_chunk(args):
                 wt_seq_onehot[e_idx:]
             ], dim=0)
 
+            # For deletions, mut_seq_onehot is shorter than expected
+            # Add additional sequence from the tail to maintain the same length
+            if ref_len > alt_len:
+                length_diff = ref_len - alt_len
+                # Fetch additional sequence after real_end
+                additional_token_dict = dna_tokenizer(
+                    chr_name=chr_name, start=real_end, end=real_end + length_diff, return_augs=False, return_rela_idx=True
+                )
+                add_s_idx, add_e_idx = additional_token_dict["rela_idx"]
+                additional_seq_onehot = additional_token_dict["one_hot"][add_s_idx:add_e_idx]
+                # Handle gap regions: if all 4 one-hot values are 0, set to 0.25 each
+                gap_mask = (additional_seq_onehot.sum(dim=1) == 0)
+                additional_seq_onehot[gap_mask] = 0.25
+                # Append to mut_seq_onehot
+                mut_seq_onehot = torch.cat([mut_seq_onehot, additional_seq_onehot], dim=0)
+            # For insertions, mut_seq_onehot is longer than expected
+            # Remove additional nucleotides from the tail to maintain the same length
+            elif alt_len > ref_len:
+                length_diff = alt_len - ref_len
+                mut_seq_onehot = mut_seq_onehot[:-length_diff]
+
             # create reverse complement sequences for augmentation
             wt_seq_onehot_rev = one_hot_reverse_complement(wt_seq_onehot)
             mut_seq_onehot_rev = one_hot_reverse_complement(mut_seq_onehot)
@@ -307,23 +328,27 @@ def process_vcf_chunk(args):
             )
             np.save(unmap_npy, mseqs_unmap)
 
-            label_trial = {}
-            for i in data_config.index:
-                get_labels(
-                    mseqs,
-                    blacklist_bed=myconfig.data.preprocess.blacklist_bed,
-                    pool_width=myconfig.data.preprocess.window_size,
-                    kept_num_after_crop=myconfig.data.preprocess.n_window,
-                    seqs_cov_file=label_h5,
-                    genome_cov_file=data_config.loc[i, "file"],
-                    umap_npy_path=unmap_npy,
-                    **data_config.loc[i].drop(["exp", "file", "celltype", "celltype_n", "modality", "atlas_name", "task"]).to_dict(),
-                )
-                with h5py.File(label_h5, "r") as f:
-                    label_trial[data_config.loc[i, "exp"]] = f["targets"][0]
-            labels = np.zeros((myconfig.data.preprocess.n_window, len(label_meta)))
-            for i, (_, v) in enumerate(label_trial.items()):
-                labels[:, i] = v
+            labels = None
+            try:
+                label_trial = {}
+                for i in data_config.index:
+                    get_labels(
+                        mseqs,
+                        blacklist_bed=myconfig.data.preprocess.blacklist_bed,
+                        pool_width=myconfig.data.preprocess.window_size,
+                        kept_num_after_crop=myconfig.data.preprocess.n_window,
+                        seqs_cov_file=label_h5,
+                        genome_cov_file=data_config.loc[i, "file"],
+                        umap_npy_path=unmap_npy,
+                        **data_config.loc[i].drop(["exp", "file", "celltype", "celltype_n", "modality", "atlas_name", "task"]).to_dict(),
+                    )
+                    with h5py.File(label_h5, "r") as f:
+                        label_trial[data_config.loc[i, "exp"]] = f["targets"][0]
+                labels = np.zeros((myconfig.data.preprocess.n_window, len(label_meta)))
+                for i, (_, v) in enumerate(label_trial.items()):
+                    labels[:, i] = v
+            except Exception as e:
+                logger.warning(f"Failed to get labels for {name_base}: {type(e).__name__}: {str(e)}. Skipping labels output.")
 
             # Create coordinate conversion dataframe for mapping genomic coords to bin indices
             coord_conv_df = create_coord_conversion_df(
@@ -331,9 +356,38 @@ def process_vcf_chunk(args):
                 bin_size=myconfig.data.preprocess.window_size
             )
 
+            # Adjust coord_conv_df based on sequence length changes
+            bin_size = myconfig.data.preprocess.window_size
+            if ref_len > alt_len:
+                # For deletions: add additional rows for the appended sequence
+                length_diff = ref_len - alt_len
+                additional_coords = np.arange(real_end, real_end + length_diff)
+                # Calculate bin indices for the additional coordinates
+                # These are appended to the end of both wt and mut sequences
+                # wt_bin_idx: these coordinates are beyond the original wt context, so set to NaN
+                # mut_bin_idx: these map to the appended sequence positions
+                additional_wt_bin_idx = np.full(length_diff, np.nan)
+                # The appended sequence starts at position (real_end - real_start) in the original context
+                # but in mut_seq it's at the end after the deletion shift
+                base_mut_pos = (real_end - real_start) - length_diff  # account for deletion shift
+                additional_mut_bin_idx = np.array([(base_mut_pos + i) // bin_size for i in range(length_diff)])
+                additional_df = pd.DataFrame({
+                    'wt_bin_idx': additional_wt_bin_idx,
+                    'mut_bin_idx': additional_mut_bin_idx
+                }, index=additional_coords)
+                coord_conv_df = pd.concat([coord_conv_df, additional_df])
+            elif alt_len > ref_len:
+                # For insertions: set mut_bin_idx to NaN for the tail coordinates
+                # that no longer have corresponding positions in mut_seq (we truncated the tail)
+                length_diff = alt_len - ref_len
+                # The last length_diff coordinates in the original context are truncated in mut_seq
+                tail_coords = coord_conv_df.index[-length_diff:]
+                coord_conv_df.loc[tail_coords, 'mut_bin_idx'] = np.nan
+
             with h5py.File(f"{save_base}/{name_base}.h5", "w") as f:
                 data_group = f.create_group("data")
-                data_group.create_dataset("label", data=labels, compression="gzip")
+                if labels is not None:
+                    data_group.create_dataset("label", data=labels, compression="gzip")
                 data_group.create_dataset("pred_wt", data=pred_res_wt, compression="gzip")
                 data_group.create_dataset("pred_alt", data=pred_res_mut, compression="gzip")
 
