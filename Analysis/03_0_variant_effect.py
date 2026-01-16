@@ -36,6 +36,75 @@ def onehot_to_str(seq_onehot):
     return seq_str
 
 
+def create_coord_conversion_df(real_start, real_end, variant_pos, ref_len, alt_len, bin_size=32):
+    """
+    Create coordinate conversion dataframe for mapping genomic coordinates to bin indices.
+
+    For MNVs (insertions/deletions), the mutant sequence has different length than WT,
+    so we need to track how genomic coordinates map to bins in both sequences.
+
+    Parameters:
+    -----------
+    real_start, real_end : int
+        Genomic coordinates of the context sequence
+    variant_pos : int
+        1-indexed genomic position of the variant (VCF POS)
+    ref_len, alt_len : int
+        Length of reference and alternate alleles
+    bin_size : int
+        Bin size for model output (default 32 bp)
+
+    Returns:
+    --------
+    pd.DataFrame with columns ['wt_bin_idx', 'mut_bin_idx'] indexed by genomic coordinates
+    """
+    length_diff = alt_len - ref_len  # positive = insertion, negative = deletion
+
+    # Variant's 0-indexed position in the sequence
+    var_seq_pos = variant_pos - 1 - real_start  # convert 1-indexed VCF pos to 0-indexed seq pos
+    var_bin = var_seq_pos // bin_size
+
+    coords = np.arange(real_start, real_end)
+    n_coords = len(coords)
+
+    # WT bin indices - straightforward
+    wt_bin_idx = (coords - real_start) // bin_size
+
+    # MUT bin indices - need to account for length difference
+    mut_bin_idx = np.zeros(n_coords, dtype=np.int32)
+
+    for i, coord in enumerate(coords):
+        seq_pos = coord - real_start
+
+        if coord < variant_pos:
+            # Before variant - same as WT
+            mut_bin_idx[i] = seq_pos // bin_size
+        elif coord < variant_pos + ref_len:
+            # Within ref region
+            if length_diff < 0:  # deletion
+                offset = coord - variant_pos
+                if offset < alt_len:
+                    # Position still exists in alt
+                    mut_seq_pos = var_seq_pos + offset
+                    mut_bin_idx[i] = mut_seq_pos // bin_size
+                else:
+                    # Position is deleted - map to variant bin
+                    mut_bin_idx[i] = var_bin
+            else:  # insertion or SNP
+                offset = coord - variant_pos
+                mut_seq_pos = var_seq_pos + offset
+                mut_bin_idx[i] = mut_seq_pos // bin_size
+        else:
+            # After ref region - shifted by length_diff
+            mut_seq_pos = seq_pos + length_diff
+            mut_bin_idx[i] = mut_seq_pos // bin_size
+
+    return pd.DataFrame({
+        'wt_bin_idx': wt_bin_idx.astype(np.int32),
+        'mut_bin_idx': mut_bin_idx
+    }, index=coords)
+
+
 def build_rc_swap_index(label_meta):
     """
     Build reverse complement swap index for RNAplus/RNAminus tracks.
@@ -144,8 +213,11 @@ def process_vcf_chunk(args):
 
             # get ref seq
             # tokenizer is python indexed (from 0) but the vcf is natural indexed (from 1)
+            # For MNVs, we need to fetch the full ref region
+            ref_len = len(ref)
+            alt_len = len(alt)
             token_dict = dna_tokenizer(
-                chr_name=chr_name, start=pos - 1, end=pos, return_augs=False, return_rela_idx=True
+                chr_name=chr_name, start=pos - 1, end=pos - 1 + ref_len, return_augs=False, return_rela_idx=True
             )
             s_idx, e_idx = token_dict["rela_idx"]
             wt_seq_onehot = token_dict["one_hot"]
@@ -161,10 +233,13 @@ def process_vcf_chunk(args):
                 ref_nt_onehot = str_to_one_hot(ref)
                 wt_seq_onehot[s_idx:e_idx] = ref_nt_onehot
 
-            # get alt seq
+            # get alt seq - use concatenation to handle insertions/deletions
             alt_nt_onehot = str_to_one_hot(alt)
-            mut_seq_onehot = wt_seq_onehot.clone()
-            mut_seq_onehot[s_idx:e_idx] = alt_nt_onehot
+            mut_seq_onehot = torch.cat([
+                wt_seq_onehot[:s_idx],
+                alt_nt_onehot,
+                wt_seq_onehot[e_idx:]
+            ], dim=0)
 
             # create reverse complement sequences for augmentation
             wt_seq_onehot_rev = one_hot_reverse_complement(wt_seq_onehot)
@@ -250,11 +325,26 @@ def process_vcf_chunk(args):
             for i, (_, v) in enumerate(label_trial.items()):
                 labels[:, i] = v
 
+            # Create coordinate conversion dataframe for mapping genomic coords to bin indices
+            coord_conv_df = create_coord_conversion_df(
+                real_start, real_end, pos, ref_len, alt_len,
+                bin_size=myconfig.data.preprocess.window_size
+            )
+
             with h5py.File(f"{save_base}/{name_base}.h5", "w") as f:
                 data_group = f.create_group("data")
                 data_group.create_dataset("label", data=labels, compression="gzip")
                 data_group.create_dataset("pred_wt", data=pred_res_wt, compression="gzip")
                 data_group.create_dataset("pred_alt", data=pred_res_mut, compression="gzip")
+
+                # Store coordinate conversion dataframe
+                # Index: genomic coordinates (real_start to real_end)
+                # wt_bin_idx: bin index in WT sequence predictions
+                # mut_bin_idx: bin index in MUT sequence predictions (accounts for indels)
+                coord_group = f.create_group("coord_conversion")
+                coord_group.create_dataset("genomic_coords", data=coord_conv_df.index.values, compression="gzip")
+                coord_group.create_dataset("wt_bin_idx", data=coord_conv_df['wt_bin_idx'].values, compression="gzip")
+                coord_group.create_dataset("mut_bin_idx", data=coord_conv_df['mut_bin_idx'].values, compression="gzip")
 
                 f.attrs["context_start"] = real_start
                 f.attrs["context_end"] = real_end
@@ -262,6 +352,11 @@ def process_vcf_chunk(args):
                 f.attrs["alt"] = alt
                 f.attrs["pos"] = pos
                 f.attrs["rela_pos"] = (s_idx, e_idx)
+                f.attrs["ref_len"] = ref_len
+                f.attrs["alt_len"] = alt_len
+                f.attrs["is_snp"] = (ref_len == 1 and alt_len == 1)
+                f.attrs["is_insertion"] = (alt_len > ref_len)
+                f.attrs["is_deletion"] = (ref_len > alt_len)
 
         except Exception as e:
             logger.error(
