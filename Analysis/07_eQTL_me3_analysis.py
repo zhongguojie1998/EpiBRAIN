@@ -229,7 +229,7 @@ print(f"\nResults saved to Data/source/eQTL/me3_bigwig_auroc_results.csv")
 print(f"Flank results saved to Data/source/eQTL/me3_bigwig_auroc_by_flank.csv")
 
 # %% Plot AUROC vs Flank Size for ALL_* tracks
-fig, ax = plt.subplots(figsize=(10, 6))
+fig, ax = plt.subplots(figsize=(15, 6))
 
 # Define colors and markers for each track
 track_styles = {
@@ -263,7 +263,7 @@ print("Plot saved to figures/me3_bigwig_auroc_vs_flank.pdf")
 
 # %% Plot AUROC distribution by modality (for default flank size = 500)
 default_flank = 500
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+fig, axes = plt.subplots(1, 2, figsize=(16, 5))
 
 # Filter for default flank size and individual tracks only (not merged)
 results_default = results_df[results_df['flank_size'] == default_flank]
@@ -291,7 +291,7 @@ plt.savefig('figures/me3_bigwig_auroc_analysis.pdf')
 print("Plot saved to figures/me3_bigwig_auroc_analysis.pdf")
 
 # %% Compare positive vs negative mean coverage (for default flank size)
-fig, ax = plt.subplots(figsize=(10, 6))
+fig, ax = plt.subplots(figsize=(15, 6))
 
 x = np.arange(len(individual_tracks))
 width = 0.35

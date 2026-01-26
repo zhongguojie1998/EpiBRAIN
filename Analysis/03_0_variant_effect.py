@@ -1,6 +1,7 @@
 import logging
 import multiprocessing as mp
 import os
+import pickle
 import sys
 import warnings
 from pathlib import Path
@@ -23,6 +24,21 @@ from data.tokenizer import FastaInterval, str_to_one_hot, one_hot_reverse_comple
 from model.model_utils import setup_model
 from utils.config import load_config
 from utils.logging import BaseLogger
+
+
+class ModelPackage:
+    """Container class for loading pre-packaged Borzoi models."""
+    def __init__(self, model, dna_tokenizer, config):
+        self.model = model
+        self.dna_tokenizer = dna_tokenizer
+        self.config = config
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
 
 
 def onehot_to_str(seq_onehot):
@@ -170,33 +186,51 @@ def build_rc_swap_index(label_meta):
 
 
 def process_vcf_chunk(args):
-    chunk_data, config_path, checkpoint_path, save_base, device, use_head = args
+    chunk_data, config_path, checkpoint_path, save_base, device, use_head, use_borzoi = args
 
-    # Load config
-    myconfig = load_config(config_name=config_path, skip_validation=True)
     logger = BaseLogger(name=f"Variant Effect-{device}", level=logging.INFO)
-    data_config = pd.read_csv(f"{myconfig.data.preprocess.trial_summary_path}", index_col=0)
-    label_meta = pd.read_csv(f"{myconfig.logging.log_dir}/regression_label_meta.csv", index_col=1)
-    # set index
-    label_meta = label_meta.set_index("trial")
 
-    # Build reverse complement swap index for RNA tracks
-    rc_orig_index, rc_swap_index = build_rc_swap_index(label_meta)
-    if rc_swap_index is not None:
-        logger.info("Built reverse complement swap index for RNAplus/RNAminus tracks")
+    if use_borzoi:
+        # Load pre-packaged Borzoi model
+        logger.info(f"Loading pre-packaged Borzoi model from {checkpoint_path}")
+        with open(checkpoint_path, "rb") as f:
+            model_package = pickle.load(f)
 
-    # Setup model
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    # we should not compile the model for inference, override the config here
-    myconfig.model.use_compile = False
-    model = setup_model(myconfig, logger)
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval().to(device)
+        model = model_package.model.eval().to(device)
+        dna_tokenizer = model_package.dna_tokenizer
+        myconfig = model_package.config
 
-    # Setup tokenizer
-    dna_tokenizer = FastaInterval(
-        fasta_file=os.path.abspath(myconfig.data.refer_genom), context_length=myconfig.data.context_length
-    )
+        # For Borzoi, we don't have the same label metadata structure
+        # Skip label retrieval for Borzoi mode
+        data_config = None
+        label_meta = None
+        rc_orig_index, rc_swap_index = None, None
+        logger.info("Borzoi mode: skipping label retrieval")
+    else:
+        # Load config and custom model
+        myconfig = load_config(config_name=config_path, skip_validation=True)
+        data_config = pd.read_csv(f"{myconfig.data.preprocess.trial_summary_path}", index_col=0)
+        label_meta = pd.read_csv(f"{myconfig.logging.log_dir}/regression_label_meta.csv", index_col=1)
+        # set index
+        label_meta = label_meta.set_index("trial")
+
+        # Build reverse complement swap index for RNA tracks
+        rc_orig_index, rc_swap_index = build_rc_swap_index(label_meta)
+        if rc_swap_index is not None:
+            logger.info("Built reverse complement swap index for RNAplus/RNAminus tracks")
+
+        # Setup model
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        # we should not compile the model for inference, override the config here
+        myconfig.model.use_compile = False
+        model = setup_model(myconfig, logger)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.eval().to(device)
+
+        # Setup tokenizer
+        dna_tokenizer = FastaInterval(
+            fasta_file=os.path.abspath(myconfig.data.refer_genom), context_length=myconfig.data.context_length
+        )
 
     for idx in range(len(chunk_data)):
         chr_name, pos, ref, alt = chunk_data.iloc[idx, [0, 1, 2, 3]]
@@ -313,42 +347,43 @@ def process_vcf_chunk(args):
                 pred_res_wt = (pred_res_wt_fwd + pred_res_wt_rev) / 2.0
                 pred_res_mut = (pred_res_mut_fwd + pred_res_mut_rev) / 2.0
 
-            # get label
-            os.makedirs(f"{save_base}/tmp/", exist_ok=True)
-            unmap_npy = f"{save_base}/tmp/{name_base}_mseqs_unmap.npy"
-            label_h5 = f"{save_base}/tmp/{name_base}_label.h5"
-
-            mseqs = [ModelSeq(chr_name, real_start, real_end, "test")]
-
-            mseqs_unmap = annotate_unmap(
-                mseqs,
-                myconfig.data.preprocess.unmap_bed,
-                myconfig.data.preprocess.context_length,
-                myconfig.data.preprocess.window_size,
-            )
-            np.save(unmap_npy, mseqs_unmap)
-
+            # get label (skip for Borzoi mode)
             labels = None
-            try:
-                label_trial = {}
-                for i in data_config.index:
-                    get_labels(
-                        mseqs,
-                        blacklist_bed=myconfig.data.preprocess.blacklist_bed,
-                        pool_width=myconfig.data.preprocess.window_size,
-                        kept_num_after_crop=myconfig.data.preprocess.n_window,
-                        seqs_cov_file=label_h5,
-                        genome_cov_file=data_config.loc[i, "file"],
-                        umap_npy_path=unmap_npy,
-                        **data_config.loc[i].drop(["exp", "file", "celltype", "celltype_n", "modality", "atlas_name", "task"]).to_dict(),
-                    )
-                    with h5py.File(label_h5, "r") as f:
-                        label_trial[data_config.loc[i, "exp"]] = f["targets"][0]
-                labels = np.zeros((myconfig.data.preprocess.n_window, len(label_meta)))
-                for i, (_, v) in enumerate(label_trial.items()):
-                    labels[:, i] = v
-            except Exception as e:
-                logger.warning(f"Failed to get labels for {name_base}: {type(e).__name__}: {str(e)}. Skipping labels output.")
+            if not use_borzoi and data_config is not None:
+                os.makedirs(f"{save_base}/tmp/", exist_ok=True)
+                unmap_npy = f"{save_base}/tmp/{name_base}_mseqs_unmap.npy"
+                label_h5 = f"{save_base}/tmp/{name_base}_label.h5"
+
+                mseqs = [ModelSeq(chr_name, real_start, real_end, "test")]
+
+                mseqs_unmap = annotate_unmap(
+                    mseqs,
+                    myconfig.data.preprocess.unmap_bed,
+                    myconfig.data.preprocess.context_length,
+                    myconfig.data.preprocess.window_size,
+                )
+                np.save(unmap_npy, mseqs_unmap)
+
+                try:
+                    label_trial = {}
+                    for i in data_config.index:
+                        get_labels(
+                            mseqs,
+                            blacklist_bed=myconfig.data.preprocess.blacklist_bed,
+                            pool_width=myconfig.data.preprocess.window_size,
+                            kept_num_after_crop=myconfig.data.preprocess.n_window,
+                            seqs_cov_file=label_h5,
+                            genome_cov_file=data_config.loc[i, "file"],
+                            umap_npy_path=unmap_npy,
+                            **data_config.loc[i].drop(["exp", "file", "celltype", "celltype_n", "modality", "atlas_name", "task"]).to_dict(),
+                        )
+                        with h5py.File(label_h5, "r") as f:
+                            label_trial[data_config.loc[i, "exp"]] = f["targets"][0]
+                    labels = np.zeros((myconfig.data.preprocess.n_window, len(label_meta)))
+                    for i, (_, v) in enumerate(label_trial.items()):
+                        labels[:, i] = v
+                except Exception as e:
+                    logger.warning(f"Failed to get labels for {name_base}: {type(e).__name__}: {str(e)}. Skipping labels output.")
 
             # Create coordinate conversion dataframe for mapping genomic coords to bin indices
             coord_conv_df = create_coord_conversion_df(
@@ -423,7 +458,7 @@ def process_vcf_chunk(args):
 @click.command()
 @click.option("--vcf", "-f", required=True, type=str, help="Path to the vcf")
 @click.option("--exp_name", "-e", required=True, type=str)
-@click.option("--chk", required=True, type=str)
+@click.option("--chk", required=False, type=str, default=None, help="Checkpoint epoch (not required for --borzoi mode)")
 @click.option("--log_base", required=False, type=str, default="./logs")
 @click.option("--chk_base", required=False, type=str, default="./Chk")
 @click.option("--res_base", required=False, type=str, default="./Res")
@@ -436,14 +471,36 @@ def process_vcf_chunk(args):
 )
 @click.option("--num_processes", type=int, default=4, help="Number of subprocess to use for parallel processing")
 @click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
-def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, processor, num_processes, use_head):
+@click.option("--borzoi", is_flag=True, help="Use the original pre-packaged Borzoi model instead of custom model")
+@click.option(
+    "--borzoi_model_path",
+    type=str,
+    default="./Chk/borzoi_pretrain/authentic_borzoi_packaged.pkl",
+    help="Path to the pre-packaged Borzoi model pickle file",
+)
+def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, processor, num_processes, use_head, borzoi, borzoi_model_path):
     LOG_BASE = os.path.abspath(log_base)
     CHK_BASE = os.path.abspath(chk_base)
     RES_BASE = os.path.abspath(res_base)
 
-    os.makedirs(f"{RES_BASE}/{exp_name}/analysis_{chk}/var_eff/raw_data/", exist_ok=True)
-
     logger = BaseLogger(name="Variant Effect", level=logging.INFO)
+
+    # Validate options based on mode
+    if borzoi:
+        borzoi_model_path = os.path.abspath(borzoi_model_path)
+        if not os.path.exists(borzoi_model_path):
+            raise click.ClickException(f"Borzoi model not found at: {borzoi_model_path}")
+        logger.info(f"Using original Borzoi model from: {borzoi_model_path}")
+        # For Borzoi mode, use 'borzoi' as the analysis name
+        analysis_name = "borzoi"
+    else:
+        if chk is None:
+            raise click.ClickException("--chk is required when not using --borzoi mode")
+        analysis_name = f"analysis_{chk}"
+
+    os.makedirs(f"{RES_BASE}/{exp_name}/{analysis_name}/var_eff/raw_data/", exist_ok=True)
+
+    logger.info(f"Output directory: {RES_BASE}/{exp_name}/{analysis_name}/var_eff/raw_data/")
 
     # read vcf data (skip header lines starting with #)
     vcf_file = pd.read_csv(vcf, sep="\t", comment='#', header=None)
@@ -452,7 +509,7 @@ def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, proces
         chr_name, pos, ref, alt = vcf_file.iloc[i, [0, 1, 3, 4]]
         name_base = f"{chr_name}_{ref}{pos}{alt}"
         todo = (
-            not os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/var_eff/raw_data/{name_base}.h5")
+            not os.path.exists(f"{RES_BASE}/{exp_name}/{analysis_name}/var_eff/raw_data/{name_base}.h5")
             or force_restart
         )
         vcf_df.loc[i] = [chr_name, pos, ref, alt, todo]
@@ -535,13 +592,22 @@ def main(vcf, exp_name, chk, log_base, chk_base, res_base, force_restart, proces
         else:
             device = "cpu"
 
+        # Set paths based on mode
+        if borzoi:
+            config_path = None  # Not used in Borzoi mode
+            checkpoint_path = borzoi_model_path
+        else:
+            config_path = f"{LOG_BASE}/{exp_name}/overall_setting.yaml"
+            checkpoint_path = f"{CHK_BASE}/{exp_name}/chk_epoch_{chk}.pt"
+
         args = (
             chunk,
-            f"{LOG_BASE}/{exp_name}/overall_setting.yaml",
-            f"{CHK_BASE}/{exp_name}/chk_epoch_{chk}.pt",
-            f"{RES_BASE}/{exp_name}/analysis_{chk}/var_eff/raw_data",
+            config_path,
+            checkpoint_path,
+            f"{RES_BASE}/{exp_name}/{analysis_name}/var_eff/raw_data",
             device,
             use_head,
+            borzoi,
         )
         process_args.append(args)
 
