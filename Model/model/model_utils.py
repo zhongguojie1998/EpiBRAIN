@@ -1,7 +1,9 @@
 import math
+from types import SimpleNamespace
 
 import numpy as np
 import torch.nn as nn
+from torch import compile
 from peft import LoraConfig, get_peft_model
 
 from model.model_building_block import Attention, FlashAttention
@@ -42,6 +44,7 @@ def std_pred_head_config(config):
         # Shared parameters (optional)
         'use_cell_encoder': bool,           # Whether to use shared celltype encoder (default: False)
         'celltype_hidden_dim': int,         # Hidden dim for celltype embedding
+        'cell_encoder_activation': str,     # Activation function: 'gelu', 'relu', 'tanh', or 'none' (default: 'gelu')
 
         # Individual head configs
         'head_name': {
@@ -64,6 +67,7 @@ def std_pred_head_config(config):
     # Step 1: Pop shared parameters
     use_cell_encoder = config.pop("use_cell_encoder", False)
     celltype_hidden_dim = config.pop("celltype_hidden_dim", None)
+    cell_encoder_activation = config.pop("cell_encoder_activation", "gelu")
 
     if use_cell_encoder and celltype_hidden_dim is None:
         raise ValueError("celltype_hidden_dim not provided")
@@ -141,7 +145,34 @@ def std_pred_head_config(config):
                 f"All heads must have same celltype_num when use_cell_encoder=True. Got: {set(celltype_nums)}"
             )
 
-    return head_configs, use_cell_encoder, celltype_hidden_dim
+    return head_configs, use_cell_encoder, celltype_hidden_dim, cell_encoder_activation
+
+
+def get_activation_layer(activation_name):
+    """
+    Get activation layer based on string name.
+
+    Args:
+        activation_name: str, one of 'gelu', 'relu', 'tanh', 'none'
+
+    Returns:
+        nn.Module or None
+    """
+    activation_name = activation_name.lower()
+
+    if activation_name == "gelu":
+        return nn.GELU(approximate="tanh")
+    elif activation_name == "relu":
+        return nn.ReLU()
+    elif activation_name == "tanh":
+        return nn.Tanh()
+    elif activation_name == "none":
+        return None
+    else:
+        raise ValueError(
+            f"Unsupported activation: '{activation_name}'. "
+            f"Supported activations: 'gelu', 'relu', 'tanh', 'none'"
+        )
 
 
 # model init utils
@@ -204,6 +235,44 @@ def set_param_grad(model, trainable_params=[]):
     return model
 
 
+def freeze_batch_norm_layers(model, logger=None):
+    """
+    Freeze BatchNorm layers to match Baskerville's transfer learning behavior.
+
+    In TensorFlow/Keras (Baskerville), setting layer.trainable=False automatically
+    puts BatchNorm in inference mode (freezes running statistics). In PyTorch,
+    we must explicitly call eval() on BatchNorm modules to achieve the same behavior.
+
+    This function should be called after applying PEFT to ensure BatchNorm layers:
+    - Use frozen running mean/variance (from pretraining)
+    - Do NOT update running statistics during fine-tuning
+    - Keep parameters (weight, bias) frozen
+
+    Args:
+        model: The model to freeze BatchNorm layers in
+        logger: Optional logger for info/debug messages
+
+    Returns:
+        model: Model with frozen BatchNorm layers
+    """
+    frozen_count = 0
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d)):
+            # Set to eval mode (uses frozen running stats, doesn't update them)
+            module.eval()
+            # Disable tracking of running stats during training
+            module.track_running_stats = False
+
+            frozen_count += 1
+            if logger:
+                logger.debug(f"Froze BatchNorm layer: {name}")
+
+    if logger and frozen_count > 0:
+        logger.info(f"Froze {frozen_count} BatchNorm layers to match Baskerville behavior")
+
+    return model
+
+
 def safe_state_dict_loader(org_model_state_dict, load_model_state_dict, partial_load, logger):
     filtered_dict = {}
 
@@ -226,7 +295,7 @@ def safe_state_dict_loader(org_model_state_dict, load_model_state_dict, partial_
     return filtered_dict
 
 
-def setup_model(config, logger):
+def setup_model(config, logger, checkpoint=None):
     from model.model import Borzoi  # Import moved here to avoid circular import
 
     model_config = config.model
@@ -239,16 +308,43 @@ def setup_model(config, logger):
         logger.error(f"Model {model_config.model_name} is not implemented yet.")
         exit(1)
 
-    model = model_cls.from_hparams(**model_config)
+    # Convert SimpleNamespace to dict for unpacking if needed
+    def namespace_to_dict(obj):
+        """Recursively convert SimpleNamespace to dict."""
+        if isinstance(obj, SimpleNamespace):
+            return {k: namespace_to_dict(v) for k, v in vars(obj).items()}
+        elif isinstance(obj, list):
+            return [namespace_to_dict(item) for item in obj]
+        else:
+            return obj
 
-    # initialize the model
+    if isinstance(model_config, SimpleNamespace):
+        model_config_dict = namespace_to_dict(model_config)
+    else:
+        model_config_dict = model_config
+
+    model = model_cls.from_hparams(**model_config_dict)
+
+    # Track whether we've loaded checkpoint
+    checkpoint_loaded = False
+
+    # initialize the model or load checkpoint
     if training_config.load_checkpoint is None:
         model.init_weights()
+    else:
+        # If loading checkpoint and NOT using LoRA (or not finetuning), load full checkpoint now
+        if not training_config.finetune or model_config.finetune_method != "lora":
+            logger.info("Loading full checkpoint (non-LoRA case)")
+            model.load_state_dict(checkpoint["model_state_dict"])
+            checkpoint_loaded = True
+        # If using LoRA, we'll load after compilation and LoRA setup
+
+    should_compile = model_config_dict.get("use_compile", False)
 
     # if finetune, load the pretrained model
-    if training_config.finetune:
+    if training_config.finetune and not checkpoint_loaded:
         # in case we need to load the pretrained model and only want to load part of them
-        partial_load = model_config.get("partial_load", None)
+        partial_load = model_config_dict.get("partial_load", None) if isinstance(model_config_dict, dict) else getattr(model_config, "partial_load", None)
         partial_load = list(model.state_dict().keys()) if partial_load is None else partial_load
 
         # load the pretrained state dict
@@ -269,11 +365,37 @@ def setup_model(config, logger):
             logger.info("LORA Finetune")
             finetune_config = LoraConfig(**model_config.finetune_param)
             model = get_peft_model(model, finetune_config)
+
+            # Freeze BatchNorm layers to match Baskerville behavior
+            # In TensorFlow, layer.trainable=False automatically freezes BatchNorm running stats
+            # In PyTorch, we must explicitly set BatchNorm to eval mode
+            model = freeze_batch_norm_layers(model, logger)
+
+            # If we have a checkpoint to load (LoRA case), load only LoRA parameters
+            if checkpoint is not None and not checkpoint_loaded:
+                logger.info("Loading LoRA parameters from checkpoint")
+                # Filter checkpoint to only include LoRA parameters and modules_to_save
+                checkpoint_state_dict = checkpoint["model_state_dict"]
+                lora_state_dict = {}
+
+                for key, value in checkpoint_state_dict.items():
+                    # Only load LoRA adapter weights and modules_to_save
+                    if "lora_" in key or "modules_to_save" in key:
+                        lora_state_dict[key] = value
+                        logger.debug(f"Loading LoRA parameter: {key}")
+
+                # Load only the LoRA parameters, strict=False to ignore base model keys
+                model.load_state_dict(lora_state_dict, strict=False)
+                checkpoint_loaded = True
+
         elif model_config.finetune_method == "finetune_layers":
             logger.info("Finetune the given layers")
             model = set_param_grad(model, **model_config.finetune_param)
+            # Also freeze BatchNorm for layer-wise finetuning
+            model = freeze_batch_norm_layers(model, logger)
         elif model_config.finetune_method == "cont_from_pretrain":
             logger.info("Load from pretrained model and continue train")
+            # Don't freeze BatchNorm when continuing pretraining
             pass
         else:
             logger.error(f"Finetune method {model_config.finetune_method} is not implemented yet.")
@@ -291,5 +413,27 @@ def setup_model(config, logger):
     )
 
     logger.debug(model)
+
+    # Apply torch.compile after LoRA is applied (if enabled)
+    # Compiling after LoRA is safe; the compile mode is what matters for numerical stability
+    if should_compile:
+        compile_mode = model_config.get("compile_mode", "default")
+        compile_backend = model_config.get("compile_backend", "inductor")
+        compile_fullgraph = model_config.get("compile_fullgraph", False)
+
+        # Warn about unsafe compile modes with LoRA
+        if training_config.finetune and model_config.finetune_method == "lora":
+            if compile_mode in ["max-autotune", "reduce-overhead"]:
+                logger.warning(
+                    f"Using compile_mode='{compile_mode}' with LoRA fine-tuning may cause NaN errors. "
+                    f"Recommended to use compile_mode='default' for numerical stability."
+                )
+
+        logger.info(f"Compiling model with torch.compile (mode={compile_mode}, backend={compile_backend}, fullgraph={compile_fullgraph})")
+        try:
+            model = compile(model, mode=compile_mode, backend=compile_backend, fullgraph=compile_fullgraph)
+            logger.info("Model compilation successful")
+        except Exception as e:
+            logger.warning(f"Model compilation failed: {e}. Proceeding with uncompiled model.")
 
     return model

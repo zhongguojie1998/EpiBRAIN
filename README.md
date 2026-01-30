@@ -29,7 +29,7 @@ conda create -n bican python=3.12
 conda activate bican
 
 # data processing
-conda install -c conda-forge -c bioconda pybigwig  # get label from bw files
+conda install -c conda-forge -c bioconda pybigwig pybigtools  # get label from bw files
 conda install -c conda-forge -c bioconda pysam  # reading genome data
 conda install -c bioconda bedtools  # process bed files
 pip install pyfaidx==0.8.1.4  # reading genome data

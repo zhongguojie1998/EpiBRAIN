@@ -21,6 +21,7 @@ torch.backends.cudnn.deterministic = True
 
 
 from data.dataset import DumySampler, GenomeIntervalDataset, StrictDistributedSampler, collate_fn
+from data.tokenizer import one_hot_reverse_complement
 from model.model_utils import setup_model, std_pred_head_config
 from utils.logging import LOGGER_PREFIX, TrainingLogger, timer
 from utils.loss import LOSS_DICT
@@ -28,16 +29,18 @@ from utils.multi_gpu import blocking_sync_wait, cleanup, deepspeed_setup, global
 from utils.scheduler import SCHEDULER_DICT
 
 
-def create_optimizer_grouped_parameters(model, use_groups=True):
+def create_optimizer_grouped_parameters(model, use_groups=True, weight_decay_config=None):
     """
-    Create optimizer parameter groups with differential weight decay:
-    - overall_decay_params: 1.0e-6 weight decay for most parameters
-    - transformer_decay_params: 2.0e-8 weight decay for transformer layers
-    - no_decay_params: 0.0 weight decay for biases and 1D parameters
+    Create optimizer parameter groups with differential weight decay.
 
     Args:
         model: The model to extract parameters from
         use_groups: Whether to use grouped parameters or return all parameters
+        weight_decay_config: Dictionary with weight decay configuration:
+            - overall: weight decay for general parameters (default: 4.0e-8)
+            - transformer: weight decay for transformer parameters (default: 2.0e-8)
+            - lora: weight decay for LoRA parameters (default: 0.0)
+            - exclude: list of patterns to exclude from decay (default: ["bias", "ndim_1"])
 
     Returns:
         list: Parameter groups suitable for optimizer initialization
@@ -45,34 +48,60 @@ def create_optimizer_grouped_parameters(model, use_groups=True):
     if not use_groups:
         return [param for param in model.parameters() if param.requires_grad]
 
+    # Set default weight decay values
+    if weight_decay_config is None:
+        weight_decay_config = {
+            "overall": 4.0e-8,
+            "transformer": 2.0e-8,
+            "lora": 0.0,
+            "exclude": ["bias", "ndim_1"]
+        }
+
+    # Extract weight decay values
+    overall_wd = weight_decay_config.get("overall", 4.0e-8)
+    transformer_wd = weight_decay_config.get("transformer", 2.0e-8)
+    lora_wd = weight_decay_config.get("lora", 0.0)
+    exclude_patterns = weight_decay_config.get("exclude", ["bias", "ndim_1"])
+
     overall_decay_params = []
     transformer_decay_params = []
+    lora_decay_params = []
     no_decay_params = []
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
+
         # Check for parameters to exclude from weight decay
-        if param.ndim == 1 or name.endswith(".bias"):
+        should_exclude = False
+        if "bias" in exclude_patterns and name.endswith(".bias"):
+            should_exclude = True
+        if "ndim_1" in exclude_patterns and param.ndim == 1:
+            should_exclude = True
+
+        if should_exclude:
             no_decay_params.append(param)
         else:
-            if "transformer" in name:
+            if "lora" in name:
+                lora_decay_params.append(param)
+            elif "transformer" in name:
                 transformer_decay_params.append(param)
             else:
                 overall_decay_params.append(param)
 
     optimizer_grouped_parameters = [
-        {"params": overall_decay_params, "weight_decay": 4.0e-8},
-        {"params": transformer_decay_params, "weight_decay": 2.0e-8},
+        {"params": overall_decay_params, "weight_decay": overall_wd},
+        {"params": transformer_decay_params, "weight_decay": transformer_wd},
+        {"params": lora_decay_params, "weight_decay": lora_wd},
         {"params": no_decay_params, "weight_decay": 0.0},
     ]
 
     return optimizer_grouped_parameters
 
 
-def aggregate_test_res(trainer, prefix="Test"):
+def aggregate_test_res(trainer, prefix="Test", remove_raw=True):
     # aggregate the results and clear per rank file
-    pattern = f"{trainer.logging_config.res_dir}/{prefix}_preds_rank_*_epoch_{trainer.current_epoch}.pt"
+    pattern = f"{trainer.logging_config.res_dir}/{prefix}_preds_rank_*_epoch_{trainer.current_epoch}*.pt"
 
     file_list = glob.glob(pattern)
     if not file_list:
@@ -86,9 +115,10 @@ def aggregate_test_res(trainer, prefix="Test"):
 
             all_inds.append(data["index"])
             for k, v in data["label"].items():
-                if k not in all_labels:
+                if k not in all_labels and k != "transcripts_mask":
                     all_labels[k] = []
-                all_labels[k].append(v)
+                if k != "transcripts_mask":
+                    all_labels[k].append(v)
             for k, v in data["pred"].items():
                 if k not in all_preds:
                     all_preds[k] = []
@@ -102,9 +132,55 @@ def aggregate_test_res(trainer, prefix="Test"):
             {"label": all_labels, "pred": all_preds, "index": all_inds},
             f"{trainer.logging_config.res_dir}/{prefix}_preds_epoch_{trainer.current_epoch}.pt",
         )
+        if remove_raw:
+            for file_path in file_list:
+                os.remove(file_path)
 
-        for file_path in file_list:
-            os.remove(file_path)
+
+class CrossColumnPearsonR(tm.Metric):
+    """
+    Accumulates all batches into large MxN array, then calculates 
+    Pearson correlation across columns, gets N values, then averages them.
+    """
+    def __init__(self):
+        super().__init__()
+        self.add_state("corr_sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("total_samples", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor):
+        """
+        preds, target: MxN tensors where M is samples, N is features/columns
+        Calculate correlations for current batch and accumulate
+        """
+        assert preds.shape == target.shape, f"Shape mismatch: {preds.shape} vs {target.shape}"
+
+        # Vectorized correlation computation for all rows at once
+        # Center each row by subtracting row mean
+        pred_centered = preds - preds.mean(dim=1, keepdim=True)  # MxN
+        target_centered = target - target.mean(dim=1, keepdim=True)  # MxN
+
+        # Compute correlation using dot product formula (vectorized across all rows)
+        numerator = torch.sum(pred_centered * target_centered, dim=1)  # M
+        pred_norm = torch.norm(pred_centered, dim=1)  # M
+        target_norm = torch.norm(target_centered, dim=1)  # M
+
+        # Compute denominator and avoid division by zero
+        denominator = pred_norm * target_norm  # M
+        valid_mask = denominator > 1e-8  # M (boolean mask)
+
+        # Only compute correlations where denominator is non-zero
+        if valid_mask.any():
+            corr = numerator[valid_mask] / denominator[valid_mask]  # K (K = number of valid samples)
+            # Accumulate sum of correlations and count of valid samples
+            self.corr_sum += torch.sum(corr)
+            self.total_samples += valid_mask.sum()
+
+    def compute(self):
+        if self.total_samples == 0:
+            return torch.tensor(0.0)
+
+        # Return mean of all accumulated correlations
+        return self.corr_sum / self.total_samples
 
 
 def get_metric_collection(prefix: str = "Valid/", config={}):
@@ -114,6 +190,7 @@ def get_metric_collection(prefix: str = "Valid/", config={}):
             "MSE": lambda **kw: tm.MeanSquaredError(**kw),
             "MAE": lambda **kw: tm.MeanAbsoluteError(**kw),
             "PearsonR": lambda **kw: tm.PearsonCorrCoef(**kw),
+            "TranscriptsPearsonR": lambda **kw: tm.PearsonCorrCoef(**kw),
         },
         "classification": {
             "Accuracy": lambda **kw: tm.Accuracy(task="multiclass", **kw),
@@ -140,7 +217,24 @@ def get_metric_collection(prefix: str = "Valid/", config={}):
 
         for trial, (metric_name, factory) in itertools.product(trials, metric_factories[task].items()):
             key = f"{trial}/{head_name}/{metric_name}"
+            # only RNA has "TranscriptsPearsonR"
+            if metric_name == "TranscriptsPearsonR" and "RNA" not in trial:
+                continue
             metrics_dict[key] = factory(**init_kwargs)
+    
+        # add cross-cell metrics
+        for modality, _ in head_cfg["label_meta"].groupby("modality"):
+            for metric_name, factory in metric_factories[task].items():
+                if metric_name == "TranscriptsPearsonR" and "RNA" not in modality:
+                    continue
+                # cross cell metric only applies to PearsonR
+                if "PearsonR" in metric_name and task == "regression":
+                    key = f"{modality}/{head_name}/cross_cell/{metric_name}"
+                    metrics_dict[key] = CrossColumnPearsonR()
+                else:
+                    # average metric
+                    key = f"{modality}/{head_name}/average/{metric_name}"
+                    metrics_dict[key] = factory(**init_kwargs)
 
     return tm.MetricCollection(metrics_dict, prefix=prefix), {k: v.keys() for k, v in metric_factories.items()}
 
@@ -166,6 +260,13 @@ class DNASeqModelTrainer:
             self.local_rank = rank
         self.world_size = world_size
         self.should_log = (self.world_size > 1 and self.rank == 0) or self.world_size == 1
+        # Set device: if rank is "cpu" or "cuda:X", use it directly; otherwise treat as device id
+        if isinstance(self.local_rank, str):
+            self.device = self.local_rank
+        elif torch.cuda.is_available():
+            self.device = self.local_rank
+        else:
+            self.device = "cpu"
 
         # set up model and data, make sure the logic aligned
         self.model_data_align()
@@ -175,6 +276,15 @@ class DNASeqModelTrainer:
         self.current_step = 0  # based on update step
         self.best_valid_loss = torch.inf
         self.metrics = {}
+
+        # Pre-compute metric metadata to avoid repeated pandas operations
+        self._precompute_metric_metadata()
+
+        # Buffers for averaging loss and gradients over multiple steps before logging
+        self.batch_loss_buffer = {}  # For accumulating loss values
+        self.batch_count_buffer = 0  # For counting batches in buffer
+        self.grad_norms_buffer = 0.0  # For accumulating total gradient norm
+        self.param_grad_norms_buffer = {}  # For accumulating individual parameter gradient norms
 
         # set up data
         self.data_split = self.config.data.used_dataset
@@ -215,7 +325,7 @@ class DNASeqModelTrainer:
     def model_data_align(self):
 
         # get the model setting
-        heads_config, use_cell_encoder, _ = std_pred_head_config(self.model_config.output_heads)
+        heads_config, use_cell_encoder, _, _ = std_pred_head_config(self.model_config.output_heads)
 
         # get the data setting
         raw_label_meta = pd.read_csv(f"{self.dataset_config.storage_path}/raw_label_meta.csv")
@@ -254,16 +364,129 @@ class DNASeqModelTrainer:
                 task_label_meta = full_info.merge(
                     task_label_meta, on=["cell_type", "modality"], how="left"
                 ).dropna()
-                task_label_meta = task_label_meta[["trial", "cell_type", "modality", "task", "file"]]
 
             task_label_meta["label_dim"] = range(len(task_label_meta))
-            task_label_meta.index.name = "dim"
+            # move index to column, and move to front
+            task_label_meta['dim'] = task_label_meta.index
+            cols = task_label_meta.columns.tolist()
+            cols = [cols[-1]] + cols[:-1]  # move 'dim' to front
+            task_label_meta = task_label_meta[cols]
             self.head_data_setting[head_name] = {
                 "label_meta": task_label_meta,
                 "task_type": task,
                 "class_num": head_config["class_num"],
             }
-            task_label_meta.to_csv(f"{self.logging_config.log_dir}/{task}_label_meta.csv", index=True)
+            task_label_meta.to_csv(f"{self.logging_config.log_dir}/{task}_label_meta.csv", index=False)
+
+    def _precompute_metric_metadata(self):
+        """Pre-compute metric and loss metadata to avoid repeated pandas operations in training loop."""
+        self._metric_cache = {}
+        self._loss_cache = {}
+
+        for head_name, head_data in self.head_data_setting.items():
+            label_meta = head_data["label_meta"]
+
+            # Pre-compute trial-indexed metadata (avoid reset_index().set_index() in loop)
+            label_meta_by_trial = label_meta.reset_index().set_index("trial")
+
+            # Pre-compute trial dimensions
+            trial_dims = {}
+            for trial in label_meta_by_trial.index:
+                trial_dims[trial] = {
+                    "pred_dim": label_meta_by_trial.loc[trial, "dim"],
+                    "label_dim": label_meta_by_trial.loc[trial, "label_dim"],
+                }
+
+            # Pre-compute RNA modalities
+            rna_mods = {}
+            non_rna_mods = {}
+            if "modality" in label_meta.columns:
+                rna_mask = label_meta["modality"].str.contains("RNA")
+
+                for mod in label_meta.loc[rna_mask, "modality"].unique():
+                    cell_data = label_meta[label_meta["modality"] == mod]
+                    rna_mods[mod] = {
+                        "cell_data": cell_data,
+                        "pred_dims": cell_data["dim"].tolist(),
+                        "label_dims": cell_data["label_dim"].tolist(),
+                        "trials": cell_data.index.tolist(),
+                    }
+
+                for mod in label_meta.loc[~rna_mask, "modality"].unique():
+                    cell_data = label_meta[label_meta["modality"] == mod]
+                    non_rna_mods[mod] = {
+                        "pred_dims": cell_data["dim"].tolist(),
+                        "label_dims": cell_data["label_dim"].tolist(),
+                    }
+
+            self._metric_cache[head_name] = {
+                "label_meta_by_trial": label_meta_by_trial,
+                "trial_dims": trial_dims,
+                "rna_mods": rna_mods,
+                "non_rna_mods": non_rna_mods,
+            }
+
+            # Pre-compute loss computation metadata
+            # RNA cell data for transcripts loss
+            if "modality" in label_meta.columns:
+                rna_cell_data = label_meta[label_meta["modality"].str.contains("RNA")]
+                rna_pred_dims = rna_cell_data.index.tolist()
+                rna_label_dims = rna_cell_data["label_dim"].tolist()
+
+                # Pre-compute tensors for compute_transcripts to avoid recreating them every batch
+                # These will be moved to device when needed
+                if len(rna_cell_data) > 0:
+                    scale_values = torch.tensor(rna_cell_data["scale"].values, dtype=torch.float32)
+
+                    if "clip_soft" in rna_cell_data.columns:
+                        clip_arr = rna_cell_data["clip_soft"].fillna(np.inf).values
+                        clip_soft_values = torch.tensor(clip_arr, dtype=torch.float32)
+                    else:
+                        clip_soft_values = torch.full((rna_cell_data.shape[0],), float('inf'), dtype=torch.float32)
+
+                    sum_stat_values = torch.tensor(
+                        np.where(rna_cell_data["sum_stat"] == "sum_three_quarter", 4 / 3, 1.0),
+                        dtype=torch.float32
+                    )
+                else:
+                    scale_values = None
+                    clip_soft_values = None
+                    sum_stat_values = None
+
+                # Modality groups for cross_cell loss
+                modality_groups = []
+                for mod, cell_data in label_meta.groupby("modality"):
+                    modality_groups.append({
+                        "modality": mod,
+                        "pred_dims": cell_data.index.tolist(),
+                        "label_dims": cell_data["label_dim"].tolist(),
+                        "cell_data": cell_data,
+                        "num_tracks": len(cell_data),
+                        "percentage_tracks": len(cell_data) / len(label_meta),
+                    })
+            else:
+                rna_cell_data = None
+                rna_pred_dims = []
+                rna_label_dims = []
+                modality_groups = []
+                scale_values = None
+                clip_soft_values = None
+                sum_stat_values = None
+
+            # All dimensions for regular loss
+            all_pred_dims = label_meta.index.tolist()
+
+            self._loss_cache[head_name] = {
+                "rna_cell_data": rna_cell_data,
+                "rna_pred_dims": rna_pred_dims,
+                "rna_label_dims": rna_label_dims,
+                "modality_groups": modality_groups,
+                "all_pred_dims": all_pred_dims,
+                # Cached tensors for compute_transcripts
+                "scale_tensor": scale_values,
+                "clip_soft_tensor": clip_soft_values,
+                "sum_stat_tensor": sum_stat_values,
+            }
 
     def get_dataset(self):
 
@@ -277,11 +500,15 @@ class DNASeqModelTrainer:
                 if split != "train":
                     # for valid and test, we disable the data augumentation
                     config.update({"shift_augs": None, "rc_aug": False, "return_augs": False})
+                # if transcripts are in self.training_config.loss.keys(), we need to return the transcripts mask
+                load_task = set([v["task_type"] for v in self.head_data_setting.values()])
+                if any(["transcripts" in i for i in self.training_config.loss.keys()]):
+                    load_task.add("transcripts")
                 self.data_func[split]["dataset"] = GenomeIntervalDataset(
                     split,
                     **config,
                     external_rand_seed=self.data_rand_seed,
-                    load_task=set([v["task_type"] for v in self.head_data_setting.values()]),
+                    load_task=load_task,
                 )
 
             except Exception as e:
@@ -348,24 +575,26 @@ class DNASeqModelTrainer:
 
         self.logger.info("Loading model...")
 
-        self.model = setup_model(self.config, self.logger)
+        # Pass checkpoint to setup_model so it can handle loading at the right time
+        checkpoint = self.checkpoint if self.training_config.load_checkpoint is not None else None
+        self.model = setup_model(self.config, self.logger, checkpoint=checkpoint)
 
         # since the batchsize is small, we need to sync batchnorm statistics
         if self.world_size > 1:
             self.model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(self.model)
 
-        # if necessary, load the checkpoint
-        ## load the full model before we wrap the model into DDP
-        if self.training_config.load_checkpoint is not None:
-            self.model.load_state_dict(self.checkpoint["model_state_dict"])
-
         # send the model to training device
-        self.model = self.model.to(self.local_rank, non_blocking=True)
+        self.model = self.model.to(self.device, non_blocking=True)
         if self.world_size > 1:
             # Add DDP wrapper
-            self.model = DDP(
-                self.model, device_ids=[self.local_rank], static_graph=True, find_unused_parameters=True
-            )
+            if torch.cuda.is_available():
+                self.model = DDP(
+                    self.model, device_ids=[self.local_rank], static_graph=True, find_unused_parameters=True
+                )
+            else:
+                self.model = DDP(
+                    self.model, static_graph=True, find_unused_parameters=True
+                )
 
             # If applicable, add gradient compression hook
             if self.training_config.use_grad_compression:
@@ -385,7 +614,9 @@ class DNASeqModelTrainer:
         optim_class = eval(f"optim.{self.training_config.optimizer}")
         # Apply differential weight decay using the shared function
         optimizer_grouped_parameters = create_optimizer_grouped_parameters(
-            self.model, self.training_config.get("add_opt_group", False)
+            self.model,
+            self.training_config.get("add_opt_group", False),
+            self.training_config.get("weight_decay", None)
         )
         self.optimizer = optim_class(optimizer_grouped_parameters, **self.training_config.optimizer_params)
 
@@ -413,9 +644,21 @@ class DNASeqModelTrainer:
 
         # if necessary, load the checkpoint
         if self.training_config.load_checkpoint is not None:
-            self.optimizer.load_state_dict(self.checkpoint["optimizer_state_dict"])
-            self.scheduler.load_state_dict(self.checkpoint["scheduler_state_dict"])
-            self.current_lr = self.checkpoint["lr"]
+            if "optimizer_state_dict" in self.checkpoint:
+                self.optimizer.load_state_dict(self.checkpoint["optimizer_state_dict"])
+            else:
+                self.logger.warning("optimizer_state_dict not found in checkpoint, skipping optimizer state loading")
+
+            if "scheduler_state_dict" in self.checkpoint:
+                self.scheduler.load_state_dict(self.checkpoint["scheduler_state_dict"])
+            else:
+                self.logger.warning("scheduler_state_dict not found in checkpoint, skipping scheduler state loading")
+
+            if "lr" in self.checkpoint:
+                self.current_lr = self.checkpoint["lr"]
+            else:
+                self.logger.warning("lr not found in checkpoint, using initial learning rate")
+                self.current_lr = self.optimizer.param_groups[0]['lr']
 
     def get_loss(self):
         # Loss configuration format: {"loss_name": {"loss_weight": float, "loss_head": str, "params": dict}}
@@ -443,37 +686,121 @@ class DNASeqModelTrainer:
         if loss_heads != set(self.training_config.use_head):
             raise ValueError(f"Loss heads {loss_heads} do not match use_head {set(self.training_config.use_head)}")
 
+    def compute_transcripts(self, pred_subset, label_subset, transcripts_mask, cell_data, cached_tensors=None):
+        # take pred and label for RNA predictions, aggregate by transcripts_mask
+        ## transform label_subset back to original scale
+
+        # Use cached tensors if available, otherwise compute from cell_data
+        if cached_tensors is not None:
+            scale_tensor = cached_tensors["scale"].to(device=label_subset.device, dtype=pred_subset.dtype).unsqueeze(0).unsqueeze(0)
+            soft_clip_tensor = cached_tensors["clip_soft"].to(device=label_subset.device, dtype=pred_subset.dtype).unsqueeze(0).unsqueeze(0)
+            sum_stat_tensor = cached_tensors["sum_stat"].to(device=label_subset.device, dtype=pred_subset.dtype).unsqueeze(0).unsqueeze(0)
+        else:
+            # Fallback: compute from cell_data (slower path for backward compatibility)
+            ### scale para
+            scale_tensor = (
+                torch.tensor(cell_data["scale"].values, device=label_subset.device, dtype=pred_subset.dtype).unsqueeze(0).unsqueeze(0)
+            )  # bsz x n_window x cell_types
+
+            ### soft clip para
+            if "clip_soft" not in cell_data.columns:
+                soft_clip_tensor = torch.full((cell_data.shape[0],), torch.inf, device=label_subset.device, dtype=pred_subset.dtype)
+            else:
+                clip_arr = cell_data["clip_soft"].fillna(torch.inf).values
+                soft_clip_tensor = torch.tensor(clip_arr, device=label_subset.device, dtype=pred_subset.dtype)
+            soft_clip_tensor = soft_clip_tensor.unsqueeze(0).unsqueeze(0)  # -> (1,1,cell_types)
+
+            ### sum stat para
+            sum_stat_tensor = (
+                torch.tensor(
+                    np.where(cell_data["sum_stat"] == "sum_three_quarter", 4 / 3, 1.0),
+                    device=label_subset.device,
+                    dtype=pred_subset.dtype
+                )
+                .unsqueeze(0)
+                .unsqueeze(0)
+            )  # -> shape (1,1,cell_types)
+
+        label_subset = label_subset / scale_tensor
+        pred_subset = pred_subset / scale_tensor
+
+        #### get soft clip back to original scale
+        label_subset = torch.where(
+            label_subset > soft_clip_tensor,
+            (label_subset - soft_clip_tensor + 1) ** 2 + soft_clip_tensor - 1,
+            label_subset,
+        )
+
+        label_subset = label_subset**sum_stat_tensor
+        ## transform pred_subset back to original scale
+        pred_subset = pred_subset**sum_stat_tensor
+
+        # aggregate by label_mask
+        pred_transcripts = torch.einsum(
+            "tbn,bnc->tc", transcripts_mask, pred_subset
+        )  # total_transcripts x cell_types
+        label_transcripts = torch.einsum(
+            "tbn,bnc->tc", transcripts_mask, label_subset
+        )
+        return pred_transcripts, label_transcripts
+
     def compute_loss(self, pred, label):
         loss_dict = {}
         total_loss = 0.0
-
+        
+        # apply each loss
         for loss_name, loss_info in self.loss_config.items():
             head_name = loss_info["head"]
             criterion = loss_info["criterion"]
             weight = loss_info["weight"]
 
-            # Get head data setting to find label indices and task type
+            # Get head data setting and cached metadata
             head_data = self.head_data_setting[head_name]
             task_type = head_data["task_type"]
-            label_meta = head_data["label_meta"]
+            cache = self._loss_cache[head_name]
 
             # Extract prediction subset for this head
             # pred[head_name] shape: [batch, seq_len, total_tracks]
             task_pred = pred[head_name]
             # Get corresponding labels
-            task_label = label[task_type].to(self.local_rank, non_blocking=True)
+            task_label = label[task_type].to(self.device, non_blocking=True)
 
-            # Compute loss
-            if "cross_cell" in loss_name:
-                loss_value = 0
-                for _, cell_data in label_meta.groupby("modality"):
-                    pred_subset = task_pred[:, :, cell_data.index.tolist(), ...]
-                    label_subset = task_label[:, :, cell_data["label_dim"].tolist()]
-                    loss_value += criterion(pred_subset, label_subset)
+            # Compute loss using cached metadata in each modalities
+            if "transcripts" in loss_name:
+                # if loss name is transcripts, we only calculate for rna modalities
+                # get transcripts masks
+                if "transcripts_mask" in label:
+                    transcripts_mask = label["transcripts_mask"].to(
+                        self.device, non_blocking=True, dtype=task_pred.dtype
+                    )  # total_transcripts x bsz x n_window
+                else:
+                    raise ValueError(f"Transcripts mask not found in label for loss {loss_name}")
+                # Use cached RNA dimensions
+                pred_subset = task_pred[:, :, cache["rna_pred_dims"], ...]  # bsz x n_window x cell_types
+                label_subset = task_label[:, :, cache["rna_label_dims"]]  # bsz x n_window x cell_types
+
+                # Pass cached tensors for faster computation
+                cached_tensors = {
+                    "scale": cache["scale_tensor"],
+                    "clip_soft": cache["clip_soft_tensor"],
+                    "sum_stat": cache["sum_stat_tensor"],
+                } if cache["scale_tensor"] is not None else None
+
+                pred_transcripts, label_transcripts = self.compute_transcripts(
+                    pred_subset, label_subset, transcripts_mask, cache["rna_cell_data"], cached_tensors
+                )
+                # unsqueeze to make it 1 x total_transcripts x cell_types, looks like batch size 1
+                loss_value = criterion(pred_transcripts.unsqueeze(0), label_transcripts.unsqueeze(0))
             else:
-                # We need to slice the tracks dimension based on label_meta
-                pred_subset = task_pred[:, :, label_meta.index.tolist(), ...]
-                loss_value = criterion(pred_subset, task_label)
+                # compute loss for each modalities
+                loss_value = 0
+                for mod_group in cache["modality_groups"]:
+                    mod_name = mod_group["modality"]
+                    pred_subset = task_pred[:, :, mod_group["pred_dims"], ...]
+                    label_subset = task_label[:, :, mod_group["label_dims"]]
+                    loss_value_mod = criterion(pred_subset, label_subset) * mod_group["percentage_tracks"]
+                    loss_dict[f"{loss_name}/{mod_name}"] = loss_value_mod.detach().cpu().item()
+                    loss_value += loss_value_mod
 
             loss_dict[loss_name] = loss_value.detach().cpu().item()
 
@@ -488,14 +815,23 @@ class DNASeqModelTrainer:
     @property
     def inference_model(self):
         """Property to access the model for inference, allowing subclasses to override."""
-        return self.model
+        model = self.model
+        # Keep compiled model for inference - torch.compile also speeds up forward pass
+        # Compilation is done after LoRA, so model.eval() won't trigger recompilation
+        return model
 
     @property
     def training_model(self):
         """Property to access the model for training logging, allowing subclasses to override."""
-        return self.model
+        # Unwrap DDP and torch.compile wrappers for parameter access
+        model = self.model
+        if hasattr(model, "module"):
+            model = model.module
+        if hasattr(model, "_orig_mod"):
+            model = model._orig_mod
+        return model
 
-    def _log_training_metrics(self, report_loss, should_exit_on_nan=False):
+    def _log_training_metrics(self, report_loss, avg_param_grad_norms=None, avg_total_grad_norm=None, should_exit_on_nan=False):
         """Shared training metrics logging logic with NaN detection and exit capability."""
         nan_detected = False
 
@@ -514,7 +850,6 @@ class DNASeqModelTrainer:
             if self.logging_config.log_more:
                 # track sqrtsuml2 of gradients and weights
                 weights = []
-                grads = []
                 for tag, value in self.training_model.named_parameters():
                     tag = tag.replace(".", "/")
 
@@ -530,7 +865,7 @@ class DNASeqModelTrainer:
                         )
                         self.logger.metric(
                             "weights_norm/" + tag,
-                            np.sqrt(np.linalg.norm(weight) ** 2),
+                            np.linalg.norm(weight),
                             self.current_step,
                             log_also=False,
                         )
@@ -541,7 +876,7 @@ class DNASeqModelTrainer:
                         )
                         nan_detected = True
 
-                    # only add gradients if they are not None
+                    # only add gradient histograms if they are not None (for debugging purposes)
                     if value.grad is not None:
                         grad = value.grad.data.detach().cpu().numpy()
                         if not np.isnan(grad).any():
@@ -552,23 +887,28 @@ class DNASeqModelTrainer:
                                 log_also=False,
                                 write_hist=True,
                             )
-                            self.logger.metric(
-                                "grads_norm/" + tag,
-                                np.sqrt(np.linalg.norm(grad) ** 2),
-                                self.current_step,
-                                log_also=False,
-                            )
-                            grads.append(grad)
                         else:
                             self.logger.warning(
                                 f"failed to add grad histogram for '{tag}' in counter: {self.current_step}, Nan occur!"
                             )
                             nan_detected = True
-                # log total weights and grads
+
+                # Log averaged gradient norms from buffer (instead of current gradients)
+                if avg_param_grad_norms is not None:
+                    for tag, avg_norm in avg_param_grad_norms.items():
+                        self.logger.metric(
+                            "grads_norm/" + tag,
+                            avg_norm,
+                            self.current_step,
+                            log_also=False,
+                        )
+
+                # log total weights norm and averaged total gradients norm
                 weights_norm = np.sqrt(sum(np.linalg.norm(w) ** 2 for w in weights))
-                grads_norm = np.sqrt(sum(np.linalg.norm(g) ** 2 for g in grads))
-                self.logger.metric("grads_norm/total", grads_norm, self.current_step, log_also=False)
                 self.logger.metric("weights_norm/total", weights_norm, self.current_step, log_also=False)
+
+                if avg_total_grad_norm is not None:
+                    self.logger.metric("grads_norm/total", avg_total_grad_norm, self.current_step, log_also=False)
         else:
             for k, v in report_loss.items():
                 self.logger.info(f"[Train] [Epoch {self.current_epoch}] Step {self.current_step} | {k}: {v:.6f}")
@@ -591,8 +931,16 @@ class DNASeqModelTrainer:
     def load_checkpoint(self):
 
         self.logger.info(f"Loading checkpoint from {self.training_config.load_checkpoint}")
+        # if load_checkpoint is best_valid_loss, we need to find the actual file
+        if self.training_config.load_checkpoint == "best_valid_loss":
+            load_file = f"{self.logging_config.checkpoint_dir}/chk_epoch_best_valid_loss.pt"
+        # else is a epoch number, which doesn't end with .pt
+        elif isinstance(self.training_config.load_checkpoint, int) or not self.training_config.load_checkpoint.endswith(".pt"):
+            load_file = f"{self.logging_config.checkpoint_dir}/chk_epoch_{self.training_config.load_checkpoint}.pt"
+        else:
+            load_file = self.training_config.load_checkpoint
         self.checkpoint = torch.load(
-            self.training_config.load_checkpoint, map_location=torch.device(self.local_rank)
+            load_file, map_location=torch.device(self.device)
         )
 
         # since this is first called in the model initialization pipeline, the model and optimizers loads the checkpoint in their own functions instead of here
@@ -607,8 +955,14 @@ class DNASeqModelTrainer:
         if save_name is None:
             save_name = self.current_epoch
 
-        # if DDP, then the model is wrapped in module
-        model_to_save = self.model.module if hasattr(self.model, "module") else self.model
+        # Unwrap model from DDP and torch.compile wrappers
+        model_to_save = self.model
+        # First unwrap DDP if present
+        if hasattr(model_to_save, "module"):
+            model_to_save = model_to_save.module
+        # Then unwrap torch.compile if present
+        if hasattr(model_to_save, "_orig_mod"):
+            model_to_save = model_to_save._orig_mod
 
         self.logger.info(f"Saving checkpoint for epoch {self.current_epoch}...")
         if self.should_log:
@@ -634,9 +988,7 @@ class DNASeqModelTrainer:
 
         # for loss log
         nan_termination = False
-        # for loss tracking
-        batch_loss_dict = {}
-        batch_count = 0
+        # for epoch-level tracking
         epoch_loss_list = []
 
         # for other metric log
@@ -649,7 +1001,7 @@ class DNASeqModelTrainer:
 
             # seq_embedding shape [batch, L, 4]
             # label is now a dictionary {task_type: tensor}
-            seq_embedding = seq_embedding.to(self.local_rank, non_blocking=True)
+            seq_embedding = seq_embedding.to(self.device, non_blocking=True)
             # pred is now a dictionary {head_name: tensor}
             pred = self.model(
                 seq_embedding.permute(0, 2, 1),
@@ -661,12 +1013,12 @@ class DNASeqModelTrainer:
             total_loss, loss_dict = self.compute_loss(pred, label)
             loss = total_loss / self.training_config.accum_step
 
-            # log loss
+            # Accumulate loss into buffer (instance variable that persists across epochs)
             for k, v in loss_dict.items():
-                if k not in batch_loss_dict:
-                    batch_loss_dict[k] = 0.0
-                batch_loss_dict[k] += v
-            batch_count += 1
+                if k not in self.batch_loss_buffer:
+                    self.batch_loss_buffer[k] = 0.0
+                self.batch_loss_buffer[k] += v
+            self.batch_count_buffer += 1
             epoch_loss_list.append(loss.detach().cpu().item() * self.training_config.accum_step)
 
             # metrics
@@ -681,21 +1033,51 @@ class DNASeqModelTrainer:
                 loss.backward()
 
             if should_update:
+                # Buffer gradient norms for averaging
+                tensorboard_log_every = self.logging_config.get("tensorboard_log_every") or self.logging_config.report_every
+                if self.logging_config.use_tensorboard and self.logging_config.log_more:
+                    grads = []
+                    for tag, value in self.training_model.named_parameters():
+                        tag = tag.replace(".", "/")
+                        if value.grad is not None:
+                            grad = value.grad.data.detach().cpu().numpy()
+                            if not np.isnan(grad).any():
+                                grad_norm = np.linalg.norm(grad)
+                                if tag not in self.param_grad_norms_buffer:
+                                    self.param_grad_norms_buffer[tag] = 0.0
+                                self.param_grad_norms_buffer[tag] += grad_norm
+                                grads.append(grad)
+                    if grads:
+                        total_grad_norm = np.sqrt(sum(np.linalg.norm(g) ** 2 for g in grads))
+                        self.grad_norms_buffer += total_grad_norm
+
                 # log training status
                 ## in the training loop, we only look at the local loss
-                if self.current_step % self.logging_config.report_every == 0:
-                    report_loss = {k: v / batch_count for k, v in batch_loss_dict.items()}
+                if self.current_step % tensorboard_log_every == 0:
+                    report_loss = {k: v / self.batch_count_buffer for k, v in self.batch_loss_buffer.items()}
 
-                    nan_termination = self._log_training_metrics(report_loss, should_exit_on_nan=True)
+                    # Compute average gradient norms from buffer
+                    avg_param_grad_norms = {k: v / self.batch_count_buffer for k, v in self.param_grad_norms_buffer.items()} if self.param_grad_norms_buffer else None
+                    avg_total_grad_norm = self.grad_norms_buffer / self.batch_count_buffer if self.grad_norms_buffer > 0 else None
 
-                    batch_loss_dict = {}
-                    batch_count = 0
+                    nan_termination = self._log_training_metrics(
+                        report_loss,
+                        avg_param_grad_norms=avg_param_grad_norms,
+                        avg_total_grad_norm=avg_total_grad_norm,
+                        should_exit_on_nan=True
+                    )
+
+                    # Clear all buffers (loss and gradients)
+                    self.batch_loss_buffer = {}
+                    self.batch_count_buffer = 0
+                    self.grad_norms_buffer = 0.0
+                    self.param_grad_norms_buffer = {}
 
                 # model step
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.training_config.clip_grad_norm)
                 self.optimizer.step()
                 self.scheduler.step()
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)  # Faster than zero_grad()
 
             if self.logging_config.diagnose:
                 self._diagnose_extra_log(ind)
@@ -707,17 +1089,20 @@ class DNASeqModelTrainer:
             if nan_termination:
                 exit(1)
 
+        # Note: All buffers (batch_loss_buffer, batch_count_buffer, grad_norms_buffer, param_grad_norms_buffer)
+        # are intentionally NOT cleared here. They persist across epochs for continuous averaging
+        # until the next tensorboard_log_every interval.
         self.current_epoch += 1
         self.metrics.update({f"Train/epoch_avg_loss": np.mean(epoch_loss_list)})
         # get and write the metric logs
         # self.metrics.update(tm_metrics.compute())
 
-    def infer_step(self, log_loss=False, save_pred=False, log_prefix="Valid"):
+    def infer_step(self, log_loss=False, save_pred=False, save_method="merge", log_prefix="Valid", rev_aug=False):
         self.inference_model.eval()
 
         if log_loss:
-            running_loss_local = torch.tensor(0.0, device=self.local_rank)
-        if save_pred:
+            running_loss_local = torch.tensor(0.0, device=self.device)
+        if save_pred and save_method == "merge":
             preds = {}
             labels = {}
             inds = []
@@ -725,16 +1110,17 @@ class DNASeqModelTrainer:
         tm_metrics, metric_name_dict = get_metric_collection(
             prefix=f"{log_prefix}/", config=self.head_data_setting
         )
-        tm_metrics.to(self.local_rank)
+        tm_metrics.to(self.device)
         tm_metrics.reset()
 
         dataloader = self.data_func[log_prefix.lower()]["data_loader"]
+        transcripts_warning_shown = False  # Flag to show warning only once
 
         with torch.no_grad():
             for i, (seq_embedding, label, ind) in enumerate(dataloader):
                 # seq_embedding shape [batch, L, 4]
                 # label is now a dictionary {task_type: tensor}
-                seq_embedding = seq_embedding.to(self.local_rank, non_blocking=True)
+                seq_embedding = seq_embedding.to(self.device, non_blocking=True)
                 # pred is now a dictionary {head_name: tensor}
                 pred = self.inference_model(
                     seq_embedding.permute(0, 2, 1),
@@ -742,42 +1128,195 @@ class DNASeqModelTrainer:
                     data_parallel_training=True if self.world_size > 1 else False,
                 )
 
+                # Reverse complement augmentation
+                if rev_aug:
+                    # seq_embedding shape: [batch, L, 4] with one-hot encoding [A, C, G, T]
+                    # Use the one_hot_reverse_complement function from tokenizer
+                    seq_embedding_rc = one_hot_reverse_complement(seq_embedding)
+
+                    pred_rc = self.inference_model(
+                        seq_embedding_rc.permute(0, 2, 1),
+                        self.training_config.use_head,
+                        data_parallel_training=True if self.world_size > 1 else False,
+                    )
+
+                    # Average predictions - handle strand-specific RNA tracks
+                    for head_name in pred.keys():
+                        # pred[head_name] has shape [batch, seq_len, features, ...]
+                        # Reverse the sequence dimension (dim 1) of pred_rc
+                        pred_rc_reversed = torch.flip(pred_rc[head_name], dims=[1])
+
+                        # Get label_meta to identify RNAplus and RNAminus tracks
+                        head_data = self.head_data_setting[head_name]
+                        label_meta = head_data["label_meta"]
+
+                        # For RNA, we need to swap plus and minus strands
+                        if "modality" in label_meta.columns:
+                            # Create a copy of forward predictions
+                            averaged_pred = pred[head_name].clone()
+
+                            # Identify plus and minus strand tracks by cell type
+                            for cell_type in label_meta["cell_type"].unique():
+                                # Get RNAplus and RNAminus track indices for this cell type
+                                rnaplus_mask = (label_meta["cell_type"] == cell_type) & (label_meta["modality"] == "RNAplus")
+                                rnaminus_mask = (label_meta["cell_type"] == cell_type) & (label_meta["modality"] == "RNAminus")
+
+                                if rnaplus_mask.any() and rnaminus_mask.any():
+                                    # Get the dimension indices
+                                    rnaplus_dims = label_meta[rnaplus_mask]["dim"].tolist()
+                                    rnaminus_dims = label_meta[rnaminus_mask]["dim"].tolist()
+
+                                    # Swap: forward RNAplus averaged with RC RNAminus
+                                    averaged_pred[:, :, rnaplus_dims] = (
+                                        pred[head_name][:, :, rnaplus_dims] +
+                                        pred_rc_reversed[:, :, rnaminus_dims]
+                                    ) / 2.0
+
+                                    # Swap: forward RNAminus averaged with RC RNAplus
+                                    averaged_pred[:, :, rnaminus_dims] = (
+                                        pred[head_name][:, :, rnaminus_dims] +
+                                        pred_rc_reversed[:, :, rnaplus_dims]
+                                    ) / 2.0
+                                # For non-strand-specific tracks, just average normally
+                                other_mask = (label_meta["cell_type"] == cell_type) & \
+                                            ~(label_meta["modality"].isin(["RNAplus", "RNAminus"]))
+                                if other_mask.any():
+                                    other_dims = label_meta[other_mask]["dim"].tolist()
+                                    averaged_pred[:, :, other_dims] = (
+                                        pred[head_name][:, :, other_dims] +
+                                        pred_rc_reversed[:, :, other_dims]
+                                    ) / 2.0
+
+                            pred[head_name] = averaged_pred
+                        else:
+                            # No modality column, just average normally
+                            pred[head_name] = (pred[head_name] + pred_rc_reversed) / 2.0
+
                 # loss - use new compute_loss function
                 if log_loss:
                     total_loss, loss_dict = self.compute_loss(pred, label)
                     running_loss_local += total_loss.detach()
                 # pred
                 if save_pred:
-                    for k, v in pred.items():
-                        if k not in preds:
-                            preds[k] = []
-                        preds[k].append(v.detach().cpu())
-                    for k, v in label.items():
-                        if k not in labels:
-                            labels[k] = []
-                        labels[k].append(v.detach().cpu())
-                    inds.append(ind)
+                    if save_method == "merge":
+                        for k, v in pred.items():
+                            if k not in preds:
+                                preds[k] = []
+                            preds[k].append(v.detach().cpu())
+                        for k, v in label.items():
+                            if k not in labels:
+                                labels[k] = []
+                            labels[k].append(v.detach().cpu())
+                        inds.append(ind)
+                    else:
+                        torch.save(
+                            {
+                                "label": {k: v.detach().cpu() for k, v in label.items()},
+                                "pred": {k: v.detach().cpu() for k, v in pred.items()},
+                                "index": ind,
+                            },
+                            f"{self.logging_config.res_dir}/{log_prefix}_preds_rank_{self.rank}_epoch_{self.current_epoch}_batch_{i}.pt",
+                        )
 
-                # metrics
+                # metrics for each track using pre-computed metadata (avoid pandas ops in loop)
                 for head_name, head_data in self.head_data_setting.items():
                     task_type = head_data["task_type"]
-                    label_meta = head_data["label_meta"].reset_index().set_index("trial")
-                    for trial in label_meta.index:
-                        pred_dim, label_dim = label_meta.loc[trial, ["dim", "label_dim"]]
-                        label_subset = label[task_type][:, :, label_dim].to(self.local_rank, non_blocking=True)
+                    cache = self._metric_cache[head_name]
+
+                    # Update per-trial metrics using cached dimensions
+                    for trial, dims in cache["trial_dims"].items():
+                        pred_dim = dims["pred_dim"]
+                        label_dim = dims["label_dim"]
+                        label_subset = label[task_type][:, :, label_dim].to(self.device, non_blocking=True)
                         pred_subset = pred[head_name][:, :, pred_dim, ...]
                         B, L = pred_subset.shape[:2]
                         # Update metrics for this head
                         for metric_name in metric_name_dict[task_type]:
-                            key = f"{trial}/{head_name}/{metric_name}"
+                            if "Transcripts" not in metric_name:
+                                key = f"{trial}/{head_name}/{metric_name}"
+                                tm_metrics[key].update(
+                                    pred_subset.reshape(B * L, -1).double(),
+                                    label_subset.reshape(B * L, -1).double(),
+                                )
 
+                    # special handling of TranscriptsPearsonR using cached RNA modalities
+                    if "transcripts_mask" in label and cache["rna_mods"]:
+                        transcripts_mask = label["transcripts_mask"].to(
+                            self.device, non_blocking=True, dtype=pred[head_name].dtype
+                        )  # total_transcripts x bsz x n_window
+                        # TODO: split the transcript info to minus strand and plus strand, and handle them separately
+                        for mod, mod_data in cache["rna_mods"].items():
+                            cell_data = mod_data["cell_data"]
+                            pred_subset = pred[head_name][:, :, mod_data["pred_dims"], ...]  # bsz x n_window x cell_types
+                            label_subset = label[task_type][:, :, mod_data["label_dims"], ...].to(self.device, non_blocking=True)  # bsz x n_window x cell_types
+                            pred_transcripts, label_transcripts = self.compute_transcripts(
+                                pred_subset, label_subset, transcripts_mask, cell_data
+                            ) # shape of total_transcripts x cell_types_tracks
+                            for i, trial in enumerate(mod_data["trials"]):
+                                # update per track transcripts pearsonr
+                                key = f"{trial}/{head_name}/TranscriptsPearsonR"
+                                tm_metrics[key].update(
+                                    pred_transcripts[:, i].double(),
+                                    label_transcripts[:, i].double(),
+                                )
+                            # update cross_cell transcripts pearsonr
+                            key = f"{mod}/{head_name}/cross_cell/TranscriptsPearsonR"
                             tm_metrics[key].update(
-                                pred_subset.reshape(B * L, -1).double(),
-                                label_subset.reshape(B * L, -1).double(),
+                                pred_transcripts.double(),
+                                label_transcripts.double(),
                             )
+                    elif "transcripts_mask" not in label and cache["rna_mods"]:
+                        if not transcripts_warning_shown:
+                            logging.warning(f"Transcripts mask not found in label, skip calculation for TranscriptsPearsonR")
+                            transcripts_warning_shown = True
+
+                    # metrics for non-RNA modalities using cached data
+                    for mod, mod_data in cache["non_rna_mods"].items():
+                        pred_subset = pred[head_name][:, :, mod_data["pred_dims"], ...]  # bsz x n_window x cell_types
+                        label_subset = label[task_type][:, :, mod_data["label_dims"], ...].to(self.device, non_blocking=True)  # bsz x n_window x cell_types
+                        B, L = pred_subset.shape[:2]
+                        key = f"{mod}/{head_name}/cross_cell/PearsonR"
+                        tm_metrics[key].update(
+                            pred_subset.reshape(B * L, -1).double(),
+                            label_subset.reshape(B * L, -1).double(),
+                        )
 
         # get and write the metric logs
         self.metrics.update(tm_metrics.compute())
+
+        # Calculate average Pearson R per modality
+        for head_name, head_data in self.head_data_setting.items():
+            label_meta = head_data["label_meta"]
+            task_type = head_data["task_type"]
+
+            # Only compute for regression tasks
+            if task_type == "regression" and "modality" in label_meta.columns:
+                # Group metrics by modality
+                modality_pearsonr = {}
+
+                for metric_key, metric_value in self.metrics.items():
+                    # Filter for per-trial PearsonR metrics (not cross_cell, not TranscriptsPearsonR)
+                    if f"/{head_name}/PearsonR" in metric_key and "/cross_cell/" not in metric_key and "Transcripts" not in metric_key:
+                        # Extract trial name from key: "Test/trial_name/head_name/PearsonR"
+                        trial_name = metric_key.split("/")[1]
+
+                        # Get modality for this trial
+                        if trial_name in label_meta["trial"].values:
+                            modality = label_meta[label_meta["trial"] == trial_name]["modality"].iloc[0]
+
+                            if modality not in modality_pearsonr:
+                                modality_pearsonr[modality] = []
+                            modality_pearsonr[modality].append(metric_value.item() if torch.is_tensor(metric_value) else metric_value)
+
+                # Calculate and store average Pearson R per modality
+                modality_avg_metrics = {}
+                for modality, pearsonr_values in modality_pearsonr.items():
+                    if pearsonr_values:  # Only if we have values
+                        avg_pearsonr = np.mean(pearsonr_values)
+                        modality_avg_metrics[f"{log_prefix}/{modality}/{head_name}/average/PearsonR"] = avg_pearsonr
+
+                self.metrics.update(modality_avg_metrics)
+
         # get global loss
         if log_loss:
             total_loss = running_loss_local.clone()
@@ -787,7 +1326,7 @@ class DNASeqModelTrainer:
             global_avg_loss = total_loss / (len(dataloader) * self.world_size)
             self.metrics.update({f"{log_prefix}/loss": global_avg_loss.cpu().item()})
 
-        if save_pred:
+        if save_pred and save_method == "merge":
             # we have to pre save all the res and later aggregate them
             torch.save(
                 {
@@ -820,6 +1359,13 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             self.local_rank = rank
         self.world_size = world_size
         self.should_log = (self.world_size > 1 and self.rank == 0) or self.world_size == 1
+        # Set device: if rank is "cpu" or "cuda:X", use it directly; otherwise treat as device id
+        if isinstance(self.local_rank, str):
+            self.device = self.local_rank
+        elif torch.cuda.is_available():
+            self.device = self.local_rank
+        else:
+            self.device = "cpu"
 
         # set up model and data, make sure the logic aligned
         self.model_data_align()
@@ -829,6 +1375,15 @@ class DeepspeedTrainer(DNASeqModelTrainer):
         self.current_step = 0  # based on update step
         self.best_valid_loss = torch.inf
         self.metrics = {}
+
+        # Pre-compute metric metadata to avoid repeated pandas operations
+        self._precompute_metric_metadata()
+
+        # Buffers for averaging loss and gradients over multiple steps before logging
+        self.batch_loss_buffer = {}  # For accumulating loss values
+        self.batch_count_buffer = 0  # For counting batches in buffer
+        self.grad_norms_buffer = 0.0  # For accumulating total gradient norm
+        self.param_grad_norms_buffer = {}  # For accumulating individual parameter gradient norms
 
         # set up data
         self.data_split = ["train", "valid", "test"]
@@ -869,7 +1424,9 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         self.logger.info("Loading model...")
 
-        self.model = setup_model(self.config, self.logger)
+        # Pass checkpoint to setup_model so it can handle loading at the right time
+        checkpoint = self.checkpoint if self.training_config.load_checkpoint is not None else None
+        self.model = setup_model(self.config, self.logger, checkpoint=checkpoint)
 
         # since the batchsize is small, we need to sync batchnorm statistics
         if self.world_size > 1:
@@ -877,7 +1434,9 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         # set up deepspeed with weight decay protocol
         optimizer_grouped_parameters = create_optimizer_grouped_parameters(
-            self.model, self.training_config.get("add_opt_group", False)
+            self.model,
+            self.training_config.get("add_opt_group", False),
+            self.training_config.get("weight_decay", None)
         )
         self.model_engine, self.optimizer, _, self.scheduler = deepspeed.initialize(
             model=self.model,
@@ -902,12 +1461,18 @@ class DeepspeedTrainer(DNASeqModelTrainer):
     @property
     def inference_model(self):
         """Override to use model_engine for DeepSpeed inference."""
-        return self.model_engine
+        model = self.model_engine
+        # Keep compiled model for inference - torch.compile also speeds up forward pass
+        return model
 
     @property
     def training_model(self):
         """Override to use model_engine.module for DeepSpeed training logging."""
-        return self.model_engine.module
+        # Unwrap torch.compile wrapper if present
+        model = self.model_engine.module
+        if hasattr(model, "_orig_mod"):
+            model = model._orig_mod
+        return model
 
     def load_checkpoint(self):
 
@@ -951,9 +1516,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
         # for loss log
         nan_termination = False
-        # for loss tracking
-        batch_loss_dict = {}
-        batch_count = 0
+        # for epoch-level tracking
         epoch_loss_list = []
 
         dataloader = self.data_func["train"]["data_loader"]
@@ -962,7 +1525,7 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 
             # seq_embedding shape [batch, L, 4]
             # label is now a dictionary {task_type: tensor}
-            seq_embedding = seq_embedding.to(self.local_rank, non_blocking=True)
+            seq_embedding = seq_embedding.to(self.device, non_blocking=True)
             # pred is now a dictionary {head_name: tensor}
             pred = self.model_engine(
                 seq_embedding.permute(0, 2, 1),
@@ -974,12 +1537,12 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             total_loss, loss_dict = self.compute_loss(pred, label)
             loss = total_loss / self.training_config.accum_step
 
-            # log loss
+            # Accumulate loss into buffer (instance variable that persists across epochs)
             for k, v in loss_dict.items():
-                if k not in batch_loss_dict:
-                    batch_loss_dict[k] = 0.0
-                batch_loss_dict[k] += v
-            batch_count += 1
+                if k not in self.batch_loss_buffer:
+                    self.batch_loss_buffer[k] = 0.0
+                self.batch_loss_buffer[k] += v
+            self.batch_count_buffer += 1
             epoch_loss_list.append(loss.detach().cpu().item() * self.training_config.accum_step)
 
             self.model_engine.backward(loss)
@@ -988,13 +1551,43 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             ## in the training loop, we only look at the local loss
             should_update = ((i + 1) % self.training_config.accum_step == 0) or (i + 1 == len(dataloader))
 
-            if self.current_step % self.logging_config.report_every == 0 and should_update:
-                report_loss = {k: v / batch_count for k, v in batch_loss_dict.items()}
+            # Buffer gradient norms for averaging
+            tensorboard_log_every = self.logging_config.get("tensorboard_log_every") or self.logging_config.report_every
+            if should_update and self.logging_config.use_tensorboard and self.logging_config.log_more:
+                grads = []
+                for tag, value in self.training_model.named_parameters():
+                    tag = tag.replace(".", "/")
+                    if value.grad is not None:
+                        grad = value.grad.data.detach().cpu().numpy()
+                        if not np.isnan(grad).any():
+                            grad_norm = np.linalg.norm(grad)
+                            if tag not in self.param_grad_norms_buffer:
+                                self.param_grad_norms_buffer[tag] = 0.0
+                            self.param_grad_norms_buffer[tag] += grad_norm
+                            grads.append(grad)
+                if grads:
+                    total_grad_norm = np.sqrt(sum(np.linalg.norm(g) ** 2 for g in grads))
+                    self.grad_norms_buffer += total_grad_norm
 
-                nan_termination = self._log_training_metrics(report_loss, should_exit_on_nan=True)
+            if self.current_step % tensorboard_log_every == 0 and should_update:
+                report_loss = {k: v / self.batch_count_buffer for k, v in self.batch_loss_buffer.items()}
 
-                batch_loss_dict = {}
-                batch_count = 0
+                # Compute average gradient norms from buffer
+                avg_param_grad_norms = {k: v / self.batch_count_buffer for k, v in self.param_grad_norms_buffer.items()} if self.param_grad_norms_buffer else None
+                avg_total_grad_norm = self.grad_norms_buffer / self.batch_count_buffer if self.grad_norms_buffer > 0 else None
+
+                nan_termination = self._log_training_metrics(
+                    report_loss,
+                    avg_param_grad_norms=avg_param_grad_norms,
+                    avg_total_grad_norm=avg_total_grad_norm,
+                    should_exit_on_nan=True
+                )
+
+                # Clear all buffers (loss and gradients)
+                self.batch_loss_buffer = {}
+                self.batch_count_buffer = 0
+                self.grad_norms_buffer = 0.0
+                self.param_grad_norms_buffer = {}
 
             # model optimize
             self.model_engine.step()
@@ -1008,6 +1601,9 @@ class DeepspeedTrainer(DNASeqModelTrainer):
             if nan_termination:
                 exit(1)
 
+        # Note: All buffers (batch_loss_buffer, batch_count_buffer, grad_norms_buffer, param_grad_norms_buffer)
+        # are intentionally NOT cleared here. They persist across epochs for continuous averaging
+        # until the next tensorboard_log_every interval.
         self.current_epoch += 1
         self.metrics.update({f"Train/epoch_avg_loss": np.mean(epoch_loss_list)})
 
@@ -1015,6 +1611,10 @@ class DeepspeedTrainer(DNASeqModelTrainer):
 # this function also support single GPU training
 def mp_main(rank, world_size, myconfig, local_rank=None):
     # special train loggers which can also log to tensorboard
+    # Disable tensorboard when test_only is True
+    if myconfig.training.get("test_only", False):
+        myconfig.logging.use_tensorboard = False
+
     logger = TrainingLogger(
         name=f"{LOGGER_PREFIX}-Trainer",
         level=myconfig.logging.log_level,
@@ -1115,28 +1715,35 @@ def mp_main(rank, world_size, myconfig, local_rank=None):
         else:
             trainer.data_rand_seed.value = trainer.current_epoch
             save_pred_res = myconfig.logging.get("save_pred_res", True)
+            save_method = myconfig.logging.get("save_method", "split")
+            rev_aug = myconfig.training.get("rev_aug", False)
 
             if trainer.data_func["train"]["data_loader"] is not None:
                 with timer(f"[Train/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                    trainer.infer_step(log_loss=False, log_prefix="Train", save_pred=save_pred_res)
+                    trainer.infer_step(
+                        log_loss=False, log_prefix="Train", save_pred=save_pred_res, save_method=save_method, rev_aug=rev_aug
+                    )
                 blocking_sync_wait(world_size)
 
             if trainer.data_func["valid"]["data_loader"] is not None:
                 with timer(f"[Valid/Infer] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                    trainer.infer_step(log_loss=False, log_prefix="Valid", save_pred=save_pred_res)
+                    trainer.infer_step(
+                        log_loss=False, log_prefix="Valid", save_pred=save_pred_res, save_method=save_method, rev_aug=rev_aug
+                    )
                 blocking_sync_wait(world_size)
 
             if trainer.data_func["test"]["data_loader"] is not None:
                 with timer(f"[Test] [Epoch {trainer.current_epoch}]", logger, rank, world_size):
-                    trainer.infer_step(log_loss=False, log_prefix="Test", save_pred=save_pred_res)
+                    trainer.infer_step(
+                        log_loss=False, log_prefix="Test", save_pred=save_pred_res, save_method=save_method, rev_aug=rev_aug
+                    )
                 blocking_sync_wait(world_size)
 
             # save the raw preds and write the metrics
             if trainer.should_log:
-                aggregate_test_res(trainer, "Train")
-                aggregate_test_res(trainer, "Valid")
-                aggregate_test_res(trainer, "Test")
-
+                aggregate_test_res(trainer, "Train", remove_raw=True)
+                aggregate_test_res(trainer, "Valid", remove_raw=True)
+                aggregate_test_res(trainer, "Test", remove_raw=True)
                 metric_dict = trainer.metrics
                 if myconfig.logging.use_tensorboard:
                     for k, v in metric_dict.items():

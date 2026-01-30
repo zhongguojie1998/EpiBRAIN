@@ -156,12 +156,13 @@ class Borzoi(PreTrainedModel):
         )
 
         ## create unified prediction head with all output heads
-        heads_config, use_cell_encoder, celltype_hidden_dim = std_pred_head_config(config.output_heads)
+        heads_config, use_cell_encoder, celltype_hidden_dim, cell_encoder_activation = std_pred_head_config(config.output_heads)
         self.prediction_head = PredictionHead(
             in_features=config.final_joined_conv_param["out_channels"],
             heads_config=heads_config,
             use_cell_encoder=use_cell_encoder,
             celltype_hidden_dim=celltype_hidden_dim,
+            cell_encoder_activation=cell_encoder_activation,
         )
 
     def _init_weights(self, module):

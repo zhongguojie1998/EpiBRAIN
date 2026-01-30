@@ -17,11 +17,11 @@ finetune: True # whether to finetune the model
 
 ## training hyperparameter
 lr: 5e-5 # maximum learning rate
-lr_warmup_step: 10000  # gradually increase lr from 0 to `lr` in given optimization steps
+lr_warmup_step: 2500  # gradually increase lr from 0 to `lr` in given optimization steps
 batch_size: 3 # batch size for one single GPU
 total_epoch: 200  # maximum training epoch number
 accum_step: 2 # gradient accumulation step (effective batchsize=world_size * batch_size * accum_step)
-clip_grad_norm: 0.1 # gradient clipping norm, 0.15 as in borzoi
+clip_grad_norm: 0.15 # gradient clipping norm, 0.15 as in borzoi
 seed: 42  # random seed for reproduciblility
 
 ## model head setup
@@ -29,26 +29,13 @@ use_head: # list of heads to use for training
   - regression
 
 ## loss setup
-# loss: poisson # the name of the loss function (now support: poisson, poisson_mn)
-# loss_params:
-#   log_input: False
-#   eps: 1e-7
-#   reduction: mean
-
-loss: 
-  poisson_mn: # the name of the loss function (now support: poisson, poisson_mn, cross_cell_mn)
-    loss_head: regression # the head to use for the loss
-    loss_weight: 1.0 # the weight of the loss
+loss:
+  poisson_mn:
+    loss_head: regression
+    loss_weight: 1.0
     params:
-      total_weight: 1
+      total_weight: 0.2
       weight_range: 1
-      eps: 1e-7
-      reduction: mean
-  cross_cell_mn:
-    loss_head: regression # the head to use for the loss
-    loss_weight: 1.0 # the weight of the loss
-    params:
-      total_weight: 1
       eps: 1e-7
       reduction: mean
 
@@ -58,11 +45,22 @@ optimizer: AdamW # optimizer to use, the name should be in the torch.optim packa
 optimizer_params: # optimizer parameters
   lr: ${training.lr}
 
+## weight decay setup (used when add_opt_group is True)
+weight_decay:
+  overall: 4.0e-8 # weight decay for general parameters
+  transformer: 2.0e-8 # weight decay for transformer parameters
+  lora: 0.0 # weight decay for LoRA parameters
+  exclude: # parameter patterns to exclude from weight decay (always 0.0)
+    - bias # exclude bias parameters
+    - ndim_1 # exclude 1D parameters (e.g., LayerNorm)
+
 ## scheduler setup
-scheduler: WarmupThenCosineDecay
+scheduler: WarmupThenPolynomialDecay
 scheduler_params:
   num_warmup_steps: ${training.lr_warmup_step}
-  num_training_steps: 84200
+  num_training_steps: 20000
+  lr_end: 5e-6 # final learning rate, only for Polynomial Decay
+  power: 1.0 # the power of the polynomial, only for Polynomial Decay, use 1.0 for linear decay
 # scheduler: WarmupThenReduceLROnPlateau # learning rate scheduler to use
 # scheduler_params: # scheduler parameters
 #   warmup_steps: ${training.lr_warmup_step}
@@ -75,7 +73,7 @@ scheduler_params:
 #     min_lr: 1e-6 # the minimum learning rate
 
 ## dataloader setup
-dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader
+dataloader_params:
   batch_size: ${training.batch_size}
   pin_memory: True
   num_workers: 12

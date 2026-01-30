@@ -73,8 +73,13 @@ logger = LazyLogger(f"{LOGGER_PREFIX}-Main")
     is_flag=True,
     help="If to just generate the config",
 )
+@click.option(
+    "--rev_aug",
+    is_flag=True,
+    help="If to use reverse complement augmentation during inference (only applicable with test_only mode)",
+)
 @record
-def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_data, bypass_data, only_config):
+def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_data, bypass_data, only_config, rev_aug):
 
     if torchrun and deepspeed:
         raise ValueError("Cannot both enable torchrun and deepspeed")
@@ -97,6 +102,7 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
     ## set up training devices (and logging)
     myconfig.training.torchrun = torchrun
     myconfig.training.deepspeed = deepspeed
+    myconfig.training.rev_aug = rev_aug
     if torchrun or deepspeed:
         ### get world size, gpu id and rank from torchrun (from environment) or deepspeed (from input parameter)
         world_size = int(os.environ.get("WORLD_SIZE", 1))
@@ -113,8 +119,11 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
         )
     else:
         world_size = myconfig.training.get("world_size", 1)
-        available_devices = max(1, torch.cuda.device_count())
-        world_size = min(world_size, available_devices)
+        available_devices = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if available_devices > 0:
+            world_size = min(world_size, available_devices)
+        else:
+            world_size = 1  # CPU mode, single process only
 
         setup_logging(
             level=myconfig.logging.log_level,
@@ -132,6 +141,8 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
             logger.info(f"Using gpu 0 to {world_size - 1} for training")
         else:
             gpu_id = myconfig.training.get("gpu_id", 0)
+            if gpu_id is None:
+                gpu_id = 0
             gpu_id = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
             logger.info(f"Using {gpu_id} for training")
         myconfig.training.world_size = world_size
@@ -142,21 +153,26 @@ def main(config_setting, config_dir, override_config, torchrun, deepspeed, only_
     random.seed(myconfig.training.seed)
     np.random.seed(myconfig.training.seed)
     torch.manual_seed(myconfig.training.seed)
-    torch.cuda.manual_seed_all(myconfig.training.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(myconfig.training.seed)
 
     ## save the configs
     logger.debug(myconfig)
-    with open(f"{myconfig.logging.log_dir}/overall_setting.yaml", "w") as f:
-        OmegaConf.save(myconfig, f)
-    if deepspeed:
+    if not myconfig.training.get("test_only", False):
+        with open(f"{myconfig.logging.log_dir}/overall_setting.yaml", "w") as f:
+            OmegaConf.save(myconfig, f)
+        if deepspeed:
+            myconfig.training.deepspeed_config = f"{myconfig.logging.log_dir}/deepspeed_setup.json"
+            write_deepspeed_config(myconfig, f"{myconfig.logging.log_dir}/deepspeed_setup.json")
+    elif deepspeed:
+        # Still need to set deepspeed_config path for test_only mode with deepspeed
         myconfig.training.deepspeed_config = f"{myconfig.logging.log_dir}/deepspeed_setup.json"
-        write_deepspeed_config(myconfig, f"{myconfig.logging.log_dir}/deepspeed_setup.json")
     
     if only_config:
         exit(0)
 
     # get data split and labels
-    if not bypass_data:
+    if not bypass_data and ("SLURM_PROCID" not in os.environ or os.environ["SLURM_PROCID"] == "0") and ("local_rank" not in locals() or local_rank == 0):
         try:
             preprocess(**myconfig.data.preprocess)
         except Exception as e:

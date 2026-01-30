@@ -8,13 +8,17 @@ import time
 from functools import partial
 
 import numpy as np
+import torch
 import pandas as pd
 from utils.logging import LOGGER_PREFIX, LazyLogger
+
+from utils.get_transcripts import get_transcripts_in_region
 
 from .data_utils import (
     STD_CHR,
     Contig,
     aggregate_data,
+    split_save_data,
     annotate_unmap,
     break_large_contigs,
     contig_sequences,
@@ -108,6 +112,42 @@ def get_trail_value_mp(
         return exp
 
     return None
+
+
+# get RNA transcripts locations
+def process_transcript_region(mseq, window_size, n_window, storage_path, force_restart=False):
+    if force_restart or not os.path.exists(f"{storage_path}/data/{mseq.chr}_{mseq.start}_{mseq.end}_transcripts.pt"):
+        logger.debug(f"Processing transcripts for {mseq.chr}:{mseq.start}-{mseq.end}")
+        # only keep the longest transcript and full-length transcripts in the region
+        transcripts_df = get_transcripts_in_region(f"{mseq.chr}:{mseq.start}-{mseq.end}", window_size=window_size, n_window=n_window,
+                                                    filter_to_full_transcript=True, filter_to_longest=True)
+        # transform transcripts_df to a new track for 0-1 mask, with dim (1, n_window, n_transcripts), and save the transcript IDs and gene names
+        # when we get a output of bsz x n_window x RNA_dim (cell types), we can integrate it with the mask to get the RNA-specific output
+        # we do it like this, first get a mask of n_transcripts_total x bsz x n_window, then we get n_transcripts_total x RNA_dim predictions and labels
+        # then we apply poisson multinomial in two dimensions, cell type dimension, then across cell type dimension
+        # now we make the 0-1 mask with dim (1, n_window, n_transcripts), based on the start_bin_idx, end_bin_idx columns in transcripts_df
+        # if no transcripts, just make an empty mask and save
+        if transcripts_df.shape[0] == 0:
+            transcripts_mask = np.zeros((1, n_window, 0), dtype=np.float32)
+            torch.save({"transcripts_mask": torch.from_numpy(transcripts_mask),
+                        "transcript_ids": [],
+                        "gene_names": []
+                        }, f"{storage_path}/data/{mseq.chr}_{mseq.start}_{mseq.end}_transcripts.pt")
+        else:
+            transcripts_mask = np.zeros((1, n_window, len(transcripts_df)), dtype=np.float32)
+            for i, (_, transcript) in enumerate(transcripts_df.iterrows()):
+                start_bin = int(transcript['start_bin_idx'])
+                end_bin = int(transcript['end_bin_idx'])
+                # Ensure bin indices are within valid range
+                start_bin = max(0, min(start_bin, n_window - 1))
+                end_bin = max(0, min(end_bin, n_window - 1))
+                # Set mask to 1 for bins where this transcript is present
+                transcripts_mask[0, start_bin:end_bin + 1, i] = 1.0 / (end_bin - start_bin + 1)  # normalize by length
+            # save it to a torch pt file
+            torch.save({"transcripts_mask": torch.from_numpy(transcripts_mask),
+                        "transcript_ids": transcripts_df['transcriptID'].tolist(),
+                        "gene_names": transcripts_df['geneName'].tolist()
+                        }, f"{storage_path}/data/{mseq.chr}_{mseq.start}_{mseq.end}_transcripts.pt")
 
 
 def preprocess(
@@ -215,7 +255,7 @@ def preprocess(
 
         ################################################################
         # divide between train/valid/test (contigs)
-        ################################################################\
+        ################################################################
 
         if folds is not None:
             fold_labels = ["fold%d" % fi for fi in range(folds)]
@@ -347,6 +387,18 @@ def preprocess(
                 for trial in failed_targets:
                     f.write(f"{trial}\n")
 
+        # process transcripts for each model sequence
+        logger.info("Start to process transcripts for each model sequence")
+        os.makedirs(f"{storage_path}/data", exist_ok=True)
+        process_transcript_region_prebound = partial(
+            process_transcript_region,
+            window_size=window_size,
+            n_window=n_window,
+            storage_path=storage_path
+        )
+        with mp.Pool(processes=num_worker) as pool:
+            pool.map(process_transcript_region_prebound, mseqs)
+
         ################################################################
         # stats
         ################################################################
@@ -401,6 +453,7 @@ def preprocess(
         logger.info(f"Preprocess data already exists at {storage_path}. Skipping preprocess step.")
 
     # start to aggregate the preprocessed data
+    trial_files = pd.read_csv(trial_summary_path)
     if preload_data:
         if force_restart or not os.path.exists(f"{storage_path}/data/all_label.pt"):
             logger.info("Start to aggregate data")
@@ -408,7 +461,8 @@ def preprocess(
             aggregate_data(
                 storage_path=storage_path,
                 preload_data=True,
-                task=data,
+                todo=data,
+                meta_info=trial_files,
                 precision=precision,
             )
             logger.info("Finish aggregation")
@@ -419,11 +473,12 @@ def preprocess(
         )
 
         if data["generate"].any():
-            logger.info("Start to aggregate data")
-            aggregate_data(
+            logger.info("Start to split and save data")
+            split_save_data(
                 storage_path=storage_path,
-                preload_data=False,
                 todo=data[data["generate"]],
+                meta_info=trial_files,
                 precision=precision,
+                n_workers=num_worker,
             )
-            logger.info("Finish aggregation")
+            logger.info("Finish split and save data")

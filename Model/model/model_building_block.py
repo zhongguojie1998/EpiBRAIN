@@ -281,12 +281,13 @@ class ConvDna(nn.Module):
 
 class PredictionHead(nn.Module):
 
-    def __init__(self, in_features, heads_config=None, use_cell_encoder=False, celltype_hidden_dim=None, **kwargs):
+    def __init__(self, in_features, heads_config=None, use_cell_encoder=False, celltype_hidden_dim=None, cell_encoder_activation='gelu', **kwargs):
         super().__init__()
 
         self.in_features = in_features
         self.use_cell_encoder = use_cell_encoder
         self.celltype_hidden_dim = celltype_hidden_dim
+        self.cell_encoder_activation = cell_encoder_activation
         self.heads_config = heads_config
         self.shared_celltype_num = [v["celltype_num"] for v in heads_config.values()][0]
 
@@ -296,10 +297,16 @@ class PredictionHead(nn.Module):
     def _setup_cell_encoder(self):
         """Setup shared celltype encoder if needed"""
         if self.use_cell_encoder:
-            self.shared_cell_encoder = nn.Sequential(
-                nn.Linear(self.in_features, self.celltype_hidden_dim * self.shared_celltype_num),
-                nn.GELU(approximate="tanh"),
-            )
+            from model.model_utils import get_activation_layer
+
+            layers = [nn.Linear(self.in_features, self.celltype_hidden_dim * self.shared_celltype_num)]
+
+            # Add activation layer if specified
+            activation = get_activation_layer(self.cell_encoder_activation)
+            if activation is not None:
+                layers.append(activation)
+
+            self.shared_cell_encoder = nn.Sequential(*layers)
         else:
             self.shared_cell_encoder = None
 
@@ -315,9 +322,6 @@ class PredictionHead(nn.Module):
                 # Use shared cell encoder, only build modality head
                 if head_config["task"] == "regression":
                     self.heads[head_name] = nn.Linear(self.celltype_hidden_dim, head_config["modality_num"])
-                    self.register_parameter(
-                        f"{head_name}_scale", nn.Parameter(torch.ones(head_config["track_num"]))
-                    )
                 else:  # classification
                     self.heads[head_name] = nn.Linear(
                         self.celltype_hidden_dim, head_config["modality_num"] * head_config["class_num"]
@@ -325,10 +329,6 @@ class PredictionHead(nn.Module):
             else:
                 # Direct linear layer
                 self.heads[head_name] = nn.Linear(self.in_features, head_config["out_channels"])
-                if head_config["task"] == "regression":
-                    self.register_parameter(
-                        f"{head_name}_scale", nn.Parameter(torch.ones(head_config["out_channels"]))
-                    )
 
     def forward(self, x):
         """
@@ -355,8 +355,7 @@ class PredictionHead(nn.Module):
                 mod_preds = head_layer(shared_cell_embs)  # [B, L, C, M] or [B, L, C, M*K]
 
                 if head_config["task"] == "regression":
-                    scale = getattr(self, f"{head_name}_scale")
-                    pred = F.softplus(mod_preds.view(B, L, -1)) * F.softplus(scale)  # [B, L, C*M]
+                    pred = F.softplus(mod_preds.view(B, L, -1))  # [B, L, C*M]
                 else:  # classification
                     pred = mod_preds.view(B, L, -1, head_config["class_num"])  # [B, L, C*M, K]
             else:
@@ -366,8 +365,7 @@ class PredictionHead(nn.Module):
                 if "classification" in head_config["task"]:
                     pred = pred.view(B, L, head_config["track_num"], head_config["class_num"])
                 else:  # regression
-                    scale = getattr(self, f"{head_name}_scale")
-                    pred = F.softplus(pred) * F.softplus(scale)
+                    pred = F.softplus(pred)
 
             outputs[head_name] = pred
 

@@ -3,33 +3,95 @@ from pathlib import Path
 
 import click
 import h5py
+import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed
 from tqdm import tqdm
 
 REQUIRED_COLS = ["rsid", "chr", "pos", "ref", "alt", "index_key"]
+REQUIRED_COLS_ALT = {'rsid': 'variant_id'}
 
 
 def load_enriched_sumstats(csv_path: str):
     """Load enriched summary statistics"""
-    df = pd.read_csv(csv_path, sep="\t", compression="gzip" if csv_path.endswith(".gz") else None)
-
     if csv_path.endswith("vcf") or csv_path.endswith("vcf.gz"):
-        df.rename({"#CHROM": "chr", "POS": "pos", "REF": "ref", "ALT": "alt"}, axis=1, inplace=True)
-        if "rsid" not in df.columns:
+        # Skip lines starting with ## but keep the #CHROM header line
+        import gzip
+        open_func = gzip.open if csv_path.endswith(".gz") else open
+        mode = 'rt' if csv_path.endswith(".gz") else 'r'
+
+        # Count header lines starting with ##
+        skip_lines = []
+        with open_func(csv_path, mode) as f:
+            for i, line in enumerate(f):
+                if line.startswith('##'):
+                    skip_lines.append(i)
+                else:
+                    break
+
+        df = pd.read_csv(
+            csv_path,
+            sep="\t",
+            compression="gzip" if csv_path.endswith(".gz") else None,
+            skiprows=skip_lines
+        )
+        df.rename({"#CHROM": "chr", "POS": "pos", "ID": "rsid", "REF": "ref", "ALT": "alt"}, axis=1, inplace=True)
+        if "rsid" not in df.columns or df["rsid"].isna().all():
             df["rsid"] = "NA"
+
+        # Normalize for consistent index_key generation
+        # Strip whitespace and ensure uppercase for alleles
+        df["chr"] = df["chr"].astype(str).str.strip()
+        df["ref"] = df["ref"].astype(str).str.strip().str.upper()
+        df["alt"] = df["alt"].astype(str).str.strip().str.upper()
+
         df["index_key"] = df["chr"] + ":" + df["pos"].astype("str") + ":" + df["ref"] + ":" + df["alt"]
+    else:
+        df = pd.read_csv(csv_path, sep="\t", compression="gzip" if csv_path.endswith(".gz") else None)
+
+        # Normalize for consistent index_key generation
+        if "chr" in df.columns and "pos" in df.columns and "ref" in df.columns and "alt" in df.columns:
+            df["chr"] = df["chr"].astype(str).str.strip()
+            df["ref"] = df["ref"].astype(str).str.strip().str.upper()
+            df["alt"] = df["alt"].astype(str).str.strip().str.upper()
+
+            # Recreate index_key if it doesn't exist or to ensure consistency
+            df["index_key"] = df["chr"] + ":" + df["pos"].astype("str") + ":" + df["ref"] + ":" + df["alt"]
 
     # Validate required columns
-
-    missing_cols = [col for col in REQUIRED_COLS if col not in df.columns]
+    missing_cols = []
+    for col in REQUIRED_COLS:
+        if col not in df.columns:
+            if col in REQUIRED_COLS_ALT and REQUIRED_COLS_ALT[col] in df.columns:
+                df.rename({REQUIRED_COLS_ALT[col]: col}, axis=1, inplace=True)
+            else:
+                missing_cols.append(col)
     if missing_cols:
         raise ValueError(f"Missing required columns in enriched file: {missing_cols}")
 
     return df
 
 
-def load_enriched_sumstats_from_filelist(filelist_path):
-    """Load enriched summary statistics from multiple files listed in filelist TSV"""
+def _load_single_file(file_path, exp_name):
+    """Helper function to load a single file for parallel processing"""
+    if not os.path.exists(file_path):
+        print(f"Warning: File not found, skipping: {file_path}")
+        return None, None, None
+
+    try:
+        df = load_enriched_sumstats(file_path)
+        return exp_name, df, None
+    except Exception as e:
+        return exp_name, None, str(e)
+
+
+def load_enriched_sumstats_from_filelist(filelist_path, n_jobs=36):
+    """Load enriched summary statistics from multiple files listed in filelist TSV
+
+    Args:
+        filelist_path: Path to the filelist TSV file
+        n_jobs: Number of parallel jobs (default: -1, uses all available cores)
+    """
     if not os.path.exists(filelist_path):
         raise FileNotFoundError(f"Filelist not found: {filelist_path}")
 
@@ -46,24 +108,23 @@ def load_enriched_sumstats_from_filelist(filelist_path):
         axis=1,
     )
 
-    print(f"Loading {len(filelist_df)} files from filelist...")
+    print(f"Loading {len(filelist_df)} files from filelist using {n_jobs if n_jobs > 0 else 'all'} parallel jobs...")
 
+    # Load files in parallel
+    results = Parallel(n_jobs=n_jobs, verbose=10)(
+        delayed(_load_single_file)(row["file_path"], row["experiment_name"])
+        for _, row in filelist_df.iterrows()
+    )
+
+    # Process results
     df_dict = {}
-    for _, row in tqdm(filelist_df.iterrows(), desc="Loading files", total=len(filelist_df)):
-        file_path = row["file_path"]
-        exp_name = row["experiment_name"]
-
-        if not os.path.exists(file_path):
-            print(f"Warning: File not found, skipping: {file_path}")
+    for exp_name, df, error in results:
+        if error is not None:
+            print(f"Error loading {exp_name}: {error}")
             continue
-
-        try:
-            df = load_enriched_sumstats(file_path)
+        if df is not None:
             df_dict[exp_name] = df
-            print(f"  Loaded {len(df)} variants from {file_path} as experiment '{exp_name}'")
-        except Exception as e:
-            print(f"Error loading {file_path}: {e}")
-            continue
+            print(f"  Loaded {len(df)} variants from experiment '{exp_name}'")
 
     if not df_dict:
         raise ValueError("No valid files could be loaded from filelist")
@@ -84,19 +145,22 @@ def init_hdf5_structure(h5_path, label_meta_path, score_names):
         model_grp.create_dataset(
             "trial_names", data=label_meta["trial"].values, dtype=h5py.string_dtype(), compression="gzip"
         )
-        model_grp.create_dataset("trial_dims", data=label_meta["dim"].values, dtype="i8", compression="gzip")
-
+        if "dim" in label_meta.columns:
+            model_grp.create_dataset("trial_dims", data=label_meta["dim"].values, dtype="i8", compression="gzip")
+        else:
+            model_grp.create_dataset("trial_dims", data=label_meta.index.values, dtype="i8", compression="gzip")
+            
         # Main variants table (compressed)
         variants_grp = f.create_group("variants")
         variants_grp.create_dataset(
-            "index_key", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip"
+            "index_key", (0,), maxshape=(None,), dtype=h5py.string_dtype(), chunks=True, compression="gzip"
         )
-        variants_grp.create_dataset("rsid", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip")
-        variants_grp.create_dataset("chr", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip")
-        variants_grp.create_dataset("pos", (0,), maxshape=(None,), dtype="i8", compression="gzip")
-        variants_grp.create_dataset("ref", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip")
-        variants_grp.create_dataset("alt", (0,), maxshape=(None,), dtype=h5py.string_dtype(), compression="gzip")
-        variants_grp.create_dataset("finished", (0,), maxshape=(None,), dtype="bool", compression="gzip")
+        variants_grp.create_dataset("rsid", (0,), maxshape=(None,), dtype=h5py.string_dtype(), chunks=True, compression="gzip")
+        variants_grp.create_dataset("chr", (0,), maxshape=(None,), dtype=h5py.string_dtype(), chunks=True, compression="gzip")
+        variants_grp.create_dataset("pos", (0,), maxshape=(None,), dtype="i8", chunks=True, compression="gzip")
+        variants_grp.create_dataset("ref", (0,), maxshape=(None,), dtype=h5py.string_dtype(), chunks=True, compression="gzip")
+        variants_grp.create_dataset("alt", (0,), maxshape=(None,), dtype=h5py.string_dtype(), chunks=True, compression="gzip")
+        variants_grp.create_dataset("finished", (0,), maxshape=(None,), dtype="bool", chunks=True, compression="gzip")
 
         # Results table (compressed) - create datasets for each score type
         results_grp = f.create_group("results")
@@ -136,6 +200,86 @@ def load_existing_index(h5_path):
     return index_lookup
 
 
+def transfer_existing_predictions(source_h5_path, target_h5_path):
+    """Transfer predictions from an existing HDF5 file to a new one"""
+    if not os.path.exists(source_h5_path):
+        print(f"Source HDF5 file not found: {source_h5_path}")
+        return 0
+
+    print(f"Transferring predictions from {source_h5_path} to {target_h5_path}...")
+
+    transferred_count = 0
+
+    with h5py.File(source_h5_path, "r") as src_f, h5py.File(target_h5_path, "r+") as tgt_f:
+        # Get source and target data
+        src_variants = src_f["variants"]
+        src_results = src_f["results"]
+
+        tgt_variants = tgt_f["variants"]
+        tgt_results = tgt_f["results"]
+
+        # Get score names from target file
+        score_names = tgt_f.attrs.get("score_names", ["raw_diff"])
+
+        # Build index mapping from source to target
+        src_index_keys = src_variants["index_key"][:]
+        src_finished = src_variants["finished"][:]
+
+        tgt_index_keys = tgt_variants["index_key"][:]
+
+        # Create lookup dictionary for target indices
+        print("Building target index lookup...")
+        tgt_index_lookup = {key.decode() if isinstance(key, bytes) else key: idx
+                           for idx, key in enumerate(tgt_index_keys)}
+
+        # Transfer finished predictions
+        print("Transferring finished predictions...")
+
+        # Find all finished indices at once
+        finished_src_indices = np.where(src_finished)[0]
+        print(f"Found {len(finished_src_indices)} finished predictions in source")
+
+        if len(finished_src_indices) > 0:
+            # Get keys for finished entries and map to target indices
+            src_indices_list = []
+            tgt_indices_list = []
+
+            for src_idx in tqdm(finished_src_indices, desc="Mapping indices"):
+                src_key = src_index_keys[src_idx]
+                src_key_str = src_key.decode() if isinstance(src_key, bytes) else src_key
+
+                # Check if this variant exists in target
+                if src_key_str in tgt_index_lookup:
+                    tgt_idx = tgt_index_lookup[src_key_str]
+                    src_indices_list.append(src_idx)
+                    tgt_indices_list.append(tgt_idx)
+
+            # Convert to numpy arrays for vectorized operations
+            src_indices = np.array(src_indices_list, dtype=np.int64)
+            tgt_indices = np.array(tgt_indices_list, dtype=np.int64)
+            transferred_count = len(src_indices)
+
+            print(f"Matched {transferred_count} predictions to transfer")
+
+            # Sort indices in increasing order (required by HDF5)
+            sort_order = np.argsort(tgt_indices)
+            src_indices = src_indices[sort_order]
+            tgt_indices = tgt_indices[sort_order]
+
+            # Copy predictions using vectorized operations
+            for score_name in score_names:
+                if score_name in src_results and score_name in tgt_results:
+                    print(f"Copying {score_name}...")
+                    tgt_results[score_name][tgt_indices, :] = src_results[score_name][src_indices, :]
+
+            # Mark as finished in target using vectorized assignment
+            tgt_variants["finished"][tgt_indices] = True
+
+        print(f"Transferred {transferred_count} predictions")
+
+    return transferred_count
+
+
 @click.command()
 @click.option("-f", "--enriched_sumstats", help="Path to enriched summary statistics CSV/CSV.GZ file")
 @click.option("-e", "--experiment_name", help="Unique experiment name")
@@ -152,7 +296,11 @@ def load_existing_index(h5_path):
     default=["raw_diff"],
     help="Score names for results_grp (can be used multiple times)",
 )
-def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, force, score_names):
+@click.option(
+    "--load_existing",
+    help="Path to existing HDF5 file to transfer predictions from",
+)
+def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, force, score_names, load_existing):
     """Initialize variant effect analysis from enriched summary statistics"""
 
     # Validate input arguments
@@ -297,6 +445,12 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
                 for i in exp_df.columns:
                     exp_data_grp.create_dataset(i, data=exp_df[i].values, compression="gzip")
 
+    # Transfer predictions from existing HDF5 file after adding all variants
+    if load_existing:
+        print("\nTransferring predictions from existing HDF5 file...")
+        transferred_count = transfer_existing_predictions(load_existing, hdf5_file)
+        print(f"Successfully transferred {transferred_count} predictions from {load_existing}")
+
     # Summary
     print("\n" + "=" * 60)
     print("INITIALIZATION SUMMARY")
@@ -304,6 +458,8 @@ def main(enriched_sumstats, experiment_name, filelist, hdf5_file, label_meta, fo
 
     print(f"Total enriched variants: {total_variants}")
     print(f"New variants added to main table: {n_new_variants}")
+    if load_existing:
+        print(f"Predictions transferred from: {load_existing}")
     print(f"HDF5 file: {hdf5_file}")
     print(f"Experiment data stored under: experiments/[experiment_name]")
 

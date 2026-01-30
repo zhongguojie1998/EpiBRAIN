@@ -1,19 +1,26 @@
-import multiprocessing as mp
 import os
 import warnings
-from functools import partial
 
 warnings.filterwarnings("ignore")
 
 import click
+import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+from joblib import Parallel, delayed
 
 
 def plot_manhattan(args, outdir):
     celltype, df = args
+    output_path = f"{outdir}/{celltype}.png"
+
+    # Check if file exists, skip if it does
+    if os.path.exists(output_path):
+        print(f"PNG file already exists for {celltype}, skipping...")
+        return
+
     chrom_order = [str(i) for i in range(1, 23)] + ["X", "Y"]
     chrom_to_int = {chrom: i + 1 for i, chrom in enumerate(chrom_order)}
     colors = ["#1f77b4", "#ff7f0e"]
@@ -51,30 +58,201 @@ def plot_manhattan(args, outdir):
     fig.tight_layout()
 
     # ensure output dir exists
-    fig.savefig(f"{outdir}/{celltype}.png", dpi=300, bbox_inches="tight")
+    fig.savefig(output_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
-def prepare_dfs(label_path, dataset_path, metadata_path):
-    all = torch.load(label_path)
+def process_celltype(args):
+    label_path, celltype, sequences_data, outdir = args
+    print(f"Preparing dataframe and plotting for {celltype}")
+
+    # Read data from h5py file
+    h5_path = f'{label_path}/regression_{celltype}.h5'
+    with h5py.File(h5_path, 'r') as f:
+        data = f['targets'][:]
+
+    df = pd.DataFrame(data.flatten(), columns=["value"])
+    # Add chromosome information to the DataFrame, should be sequences['chrom'] repeated for each row in df
+    df["chrom"] = sequences_data["chrom"].repeat(data.shape[1]).reset_index(drop=True)
+    offset_start = np.arange(320 * 128, 320 * 128 + data.shape[1] * 128, 128)
+    df["start"] = sequences_data["start"].repeat(data.shape[1]).values + np.tile(offset_start, data.shape[0])
+    df["end"] = df["start"] + 128
+    df["midpoint"] = (df["start"] + df["end"]) / 2
+
+    # Directly plot using the plot_manhattan logic
+    plot_manhattan((celltype, df), outdir)
+
+    return celltype
+
+
+def process_celltype_stats(args):
+    label_path, celltype = args
+    print(f"Processing statistics for {celltype}")
+
+    # Read data from h5py file
+    h5_path = f'{label_path}/regression_{celltype}.h5'
+    with h5py.File(h5_path, 'r') as f:
+        data = f['targets'][:]
+
+    # Calculate statistics
+    flattened_data = data.flatten()
+    stats = {
+        'celltype': celltype,
+        'min': np.min(flattened_data),
+        'max': np.max(flattened_data),
+        'mean': np.mean(flattened_data),
+        'std': np.std(flattened_data),
+        'zero_fraction': np.mean(flattened_data == 0),
+        '5%': np.percentile(flattened_data, 5),
+        '10%': np.percentile(flattened_data, 10),
+        '25%': np.percentile(flattened_data, 25),
+        '50%': np.percentile(flattened_data, 50),
+        '75%': np.percentile(flattened_data, 75),
+        '90%': np.percentile(flattened_data, 90),
+        '95%': np.percentile(flattened_data, 95),
+        '99%': np.percentile(flattened_data, 99),
+        '99.9%': np.percentile(flattened_data, 99.9),
+        '99.99%': np.percentile(flattened_data, 99.99),
+        '99.999%': np.percentile(flattened_data, 99.999),
+    }
+
+    return stats
+
+
+def load_pt_file(args):
+    file, label_path = args
+    if file.endswith(".pt") and file.startswith("chr") and "transcript" not in file:
+        return torch.load(os.path.join(label_path, file)), file.replace(".pt", "")
+    return None, None
+
+
+def process_celltype_zero_check(args):
+    """Process a single celltype for zero region checking."""
+    celltype, label_path, sequences_data = args
+    print(f"Processing zero region check for {celltype}")
+
+    # Read data from h5py file
+    h5_path = f'{label_path}/regression_{celltype}.h5'
+    with h5py.File(h5_path, 'r') as f:
+        data = f['targets'][:]
+
+    # Create dataframe similar to process_celltype
+    df = pd.DataFrame(data.flatten(), columns=["value"])
+    df["chrom"] = sequences_data["chrom"].repeat(data.shape[1]).reset_index(drop=True)
+
+    # Calculate zero fraction per chromosome
+    chrom_stats = df.groupby("chrom")["value"].agg([
+        ('total_count', 'count'),
+        ('zero_count', lambda x: (x == 0).sum()),
+        ('zero_fraction', lambda x: (x == 0).mean())
+    ]).reset_index()
+
+    chrom_stats['celltype'] = celltype
+    return chrom_stats
+
+
+def zero_region_check(dataset_path, label_path, celltype_patterns=None, n_jobs=-1):
+    """
+    Count the zero fraction in each chromosome for all celltypes using multiprocessing.
+
+    Args:
+        dataset_path: Path to the sequences.bed file
+        label_path: Path to the labels directory
+        celltype_patterns: Optional patterns to filter cell types
+        n_jobs: Number of parallel jobs (-1 for all cores)
+
+    Returns:
+        DataFrame with chromosome and zero fraction statistics per celltype
+    """
+    # Read sequences data
+    sequences = pd.read_csv(dataset_path, sep="\t", header=None)
+    sequences.columns = ["chrom", "start", "end", "split"]
+
+    # Get celltypes from files under label_path
+    celltypes = []
+    for filename in os.listdir(label_path):
+        if filename.startswith("regression_") and filename.endswith(".h5"):
+            celltype = filename.replace("regression_", "").replace(".h5", "")
+            celltypes.append(celltype)
+
+    # Filter cell types based on patterns if specified
+    if celltype_patterns:
+        filtered_celltypes = []
+        for celltype in celltypes:
+            if any(pattern in celltype for pattern in celltype_patterns):
+                filtered_celltypes.append(celltype)
+        celltypes = filtered_celltypes
+
+    # Process celltypes in parallel
+    results = Parallel(n_jobs=n_jobs)(
+        delayed(process_celltype_zero_check)((celltype, label_path, sequences))
+        for celltype in celltypes
+    )
+
+    # Combine all results
+    final_df = pd.concat(results, ignore_index=True)
+
+    return final_df
+
+
+def prepare_dfs(label_path, dataset_path, output_dir, n_jobs=-1, celltype_patterns=None):
     sequences = pd.read_csv(dataset_path, sep="\t", header=None)
     sequences.columns = ["chrom", "start", "end", "split"]
     sequences.shape, sequences[sequences["split"] == "train"].shape, sequences[
         sequences["split"] == "valid"
     ].shape, sequences[sequences["split"] == "test"].shape
-    metadata = pd.read_csv(metadata_path)
-    dfs = {}
-    for i, celltype in enumerate(metadata["trial"]):
-        print(f"Preparing dataframe for {celltype}")
-        df = pd.DataFrame(all[:, :, i].flatten().numpy(), columns=["value"])
-        # Add chromosome information to the DataFrame, should be sequences['chrom'] repeated for each row in df
-        df["chrom"] = sequences["chrom"].repeat(all.shape[1]).reset_index(drop=True)
-        offset_start = np.arange(320 * 128, 320 * 128 + all.shape[1] * 128, 128)
-        df["start"] = sequences["start"].repeat(all.shape[1]).values + np.tile(offset_start, all.shape[0])
-        df["end"] = df["start"] + 128
-        df["midpoint"] = (df["start"] + df["end"]) / 2
-        dfs[celltype] = df
-    return dfs
+
+    # Get celltypes from files under label_path
+    celltypes = []
+    for filename in os.listdir(label_path):
+        if filename.startswith("regression_") and filename.endswith(".h5"):
+            celltype = filename.replace("regression_", "").replace(".h5", "")
+            celltypes.append(celltype)
+
+    # Filter cell types based on patterns if specified
+    if celltype_patterns:
+        filtered_celltypes = []
+        for celltype in celltypes:
+            if any(pattern in celltype for pattern in celltype_patterns):
+                filtered_celltypes.append(celltype)
+        celltypes = filtered_celltypes
+
+    processed_celltypes = Parallel(n_jobs=n_jobs)(
+        delayed(process_celltype)((label_path, celltype, sequences, output_dir))
+        for celltype in celltypes
+    )
+
+    return processed_celltypes
+
+
+def compute_stats(label_path, celltype_patterns=None, n_jobs=-1):
+    # Get celltypes from files under label_path
+    celltypes = []
+    for filename in os.listdir(label_path):
+        if filename.startswith("regression_") and filename.endswith(".h5"):
+            celltype = filename.replace("regression_", "").replace(".h5", "")
+            celltypes.append(celltype)
+
+    # Filter cell types based on patterns if specified
+    if celltype_patterns:
+        filtered_celltypes = []
+        for celltype in celltypes:
+            if any(pattern in celltype for pattern in celltype_patterns):
+                filtered_celltypes.append(celltype)
+        celltypes = filtered_celltypes
+
+    stats_list = Parallel(n_jobs=n_jobs)(
+        delayed(process_celltype_stats)((label_path, celltype))
+        for celltype in celltypes
+    )
+
+    # Create DataFrame from statistics
+    stats_df = pd.DataFrame(stats_list)
+
+    # Sort by celltype name
+    stats_df = stats_df.sort_values('celltype').reset_index(drop=True)
+
+    return stats_df
 
 
 @click.command()
@@ -82,22 +260,55 @@ def prepare_dfs(label_path, dataset_path, metadata_path):
 @click.option("-e", "--exp_name", default="enformer_style_split_data_v1")
 @click.option("--base_dir", default="./Data")
 @click.option("--num_worker", default=48)
-def main(output_dir, exp_name, base_dir, num_worker):
+@click.option("--celltype_patterns", default=None, help="Comma-separated patterns to filter cell types (e.g., 'BasalGanglia-Astrocyte,MiniAtlas-AST')")
+@click.option("--stats_only", is_flag=True, help="Only compute statistics, skip visualization")
+def main(output_dir, exp_name, base_dir, num_worker, celltype_patterns, stats_only):
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # load in data
-    dfs = prepare_dfs(
-        label_path=f"{base_dir}/{exp_name}/data/all_label.pt",
-        dataset_path=f"{base_dir}/{exp_name}/sequences.bed",
-        metadata_path=f"{base_dir}/{exp_name}/label_meta.csv",
-    )
+    # Parse celltype patterns if provided
+    patterns = None
+    if celltype_patterns:
+        patterns = [p.strip() for p in celltype_patterns.split(',')]
 
-    plot_func = partial(plot_manhattan, outdir=output_dir)
+    label_path = f"{base_dir}/{exp_name}/labels/"
 
-    print("Start ploting")
-    with mp.Pool(processes=num_worker) as pool:
-        pool.map(plot_func, dfs.items())
+    if stats_only:
+        # Compute and display statistics only
+        stats_df = compute_stats(
+            label_path=label_path,
+            celltype_patterns=patterns,
+            n_jobs=num_worker
+        )
+        stats_output_path = os.path.join(output_dir, "stats.csv")
+        stats_df.to_csv(stats_output_path, index=False)
+        print(f"Statistics saved to: {stats_output_path}")
+        print("\nData Statistics Summary:")
+        print(stats_df.to_string(index=False))
+
+        # Compute zero region check after stats
+        zero_df = zero_region_check(
+            dataset_path=f"{base_dir}/{exp_name}/sequences.bed",
+            label_path=label_path,
+            celltype_patterns=patterns,
+            n_jobs=num_worker
+        )
+        zero_output_path = os.path.join(output_dir, "zero_region_stats.csv")
+        zero_df.to_csv(zero_output_path, index=False)
+        print(f"\nZero region statistics saved to: {zero_output_path}")
+        print("\nZero Region Statistics Summary:")
+        print(zero_df.to_string(index=False))
+    else:
+        # load in data and generate plots in parallel
+        processed_celltypes = prepare_dfs(
+            label_path=label_path,
+            dataset_path=f"{base_dir}/{exp_name}/sequences.bed",
+            output_dir=output_dir,
+            n_jobs=num_worker,
+            celltype_patterns=patterns,
+        )
+
+        print(f"Completed processing and plotting for {len(processed_celltypes)} celltypes")
 
 
 if __name__ == "__main__":

@@ -4,14 +4,55 @@ model_name: ./Chk/borzoi_pretrain
 ## technical setup
 flashed: False  # whether to use FlashAttention
 use_autocast: False  # whether to use autocast, if using FlashAttention, always set to True, else, default as False
-finetune_method: lora 
+use_compile: False  # whether to use torch.compile for model optimization (PyTorch 2.0+). Can significantly speed up training. Note: For LoRA fine-tuning, base model is compiled BEFORE LoRA wrapping to avoid numerical instability
+compile_mode: default  # torch.compile mode: "default", "reduce-overhead", "max-autotune", or "max-autotune-no-cudagraphs". Use "default" for LoRA to avoid NaN errors
+compile_backend: inductor  # torch.compile backend: "inductor" (default), "aot_eager", "cudagraphs", etc.
+compile_fullgraph: False  # whether to require fullgraph compilation (can provide 10-20% extra speedup but may fail with dynamic control flow)
+finetune_method: lora  # using LoRA for both attention and conv layers (LoRA supports Conv1d natively in PEFT)
+# IMPORTANT: When using transfer learning, BatchNorm layers should be frozen (set to eval mode)
+# This matches Baskerville's behavior where frozen BatchNorm uses pretrained running statistics
+# See BASKERVILLE_BASE_MODEL_BEHAVIOR.md for details
 finetune_param:
-    target_modules: # add lora layer
-      - to_q
-      - to_v
-    modules_to_save:  # other layers requiring optimization
-      - prediction_head
-    r: 8  # lora rank
+    # Target modules: both attention and conv layers
+    target_modules:
+      - to_q                    # All Query projection in attention
+      - to_v                    # All Value projection in attention
+      - resol_8_conv.block.2    # Conv1d layers in residual tower (block.2 is the actual Conv1d)
+      - resol_16_conv.block.2
+      - resol_32_conv.block.2
+      - resol_64_conv.block.2
+                                # The pattern matches: res_tower.resol_X_conv.block.2
+
+    # Default parameters (applied to attention layers)
+    r: 8                    # Default LoRA rank for attention
+    lora_alpha: 16          # Default LoRA alpha for attention (scale = 16/8 = 2.0)
+    lora_dropout: 0.1       # No dropout for LoRA layers
+
+    # Pattern-based configuration for different layer types
+    # Use regex to match specific layers and assign different ranks/alphas
+    # Model has 7 conv layers with resolutions: 1, 2, 4, 8, 16, 32, 64
+    # Structure: res_tower.resol_X_conv.block.2 (where block.2 is the Conv1d layer)
+    # Applying LoRA to the LAST 4 conv layers (matching Baskerville's approach)
+    rank_pattern:  # Override rank for specific layers
+      "res_tower\\.resol_64_conv\\.block\\.2": 4    # Last conv layer (resolution 64): rank 4
+      "res_tower\\.resol_32_conv\\.block\\.2": 4    # 2nd to last (resolution 32): rank 4
+      "res_tower\\.resol_16_conv\\.block\\.2": 4    # 3rd to last (resolution 16): rank 4
+      "res_tower\\.resol_8_conv\\.block\\.2": 4     # 4th to last (resolution 8): rank 4
+
+    alpha_pattern:  # Override alpha for specific layers
+      "res_tower\\.resol_64_conv\\.block\\.2": 1    # Last conv layer: alpha 1 (scale = 1/4 = 0.25)
+      "res_tower\\.resol_32_conv\\.block\\.2": 1    # 2nd to last: alpha 1
+      "res_tower\\.resol_16_conv\\.block\\.2": 1    # 3rd to last: alpha 1
+      "res_tower\\.resol_8_conv\\.block\\.2": 1     # 4th to last: alpha 1
+
+    # Other modules to train (not LoRA, but full fine-tuning)
+    modules_to_save:
+      - prediction_head # final output head
+      - resol_8_conv.block.0  # Tune BatchNorm layer before Conv1d in last 4 conv blocks
+      - resol_16_conv.block.0
+      - resol_32_conv.block.0
+      - resol_64_conv.block.0
+      - fn.0  # Tune LayerNorm layers in all transformer blocks
 
 ## model hyperparameter
 conv_dna_param:  # parameters for the convolutional DNA layer
@@ -58,9 +99,10 @@ partial_load: # only load the given part of the pretrained model. If not provide
 # new output head setting for the model
 output_heads: # set up the prediction head name and trial number
   use_cell_encoder: True  # whether to use shared cell encoder for the output heads, if True, the output will be calculated as celltype embedding then shared task output, else, directly output separate celltype * modality
-  celltype_hidden_dim: 64  # the dimension of the cell type embedding, if use_cell_encoder is True, this will be used to calculate the cell type embedding
+  celltype_hidden_dim: 8  # the dimension of the cell type embedding, if use_cell_encoder is True, this will be used to calculate the cell type embedding
+  cell_encoder_activation: 'none'  # activation function for the cell type encoder
   regression:
-      track_num: 180
-      celltype_num: 36
-      modality_num: 5 # ATAC, H3K27ac, H3K27me3, H3K9me3, RNA
+      track_num: 209
+      celltype_num: 39
+      modality_num: 6 # ATAC, H3K27ac, H3K27me3, H3K9me3, RNA_plus, RNA_minus
       task: regression # choose from `regression` or `classification`

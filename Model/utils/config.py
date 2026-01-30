@@ -29,7 +29,7 @@ def input_check(
         exit(1)
 
 
-def load_config(config_dir: str = ".", config_name: str = "default", overrides: tuple[str, ...] = []):
+def load_config(config_dir: str = ".", config_name: str = "default", overrides: tuple[str, ...] = [], skip_validation: bool = False):
 
     if config_name.endswith((".yaml", ".yml")):
         logger.info(f"Loading complete config directly from {config_name}")
@@ -48,6 +48,9 @@ def load_config(config_dir: str = ".", config_name: str = "default", overrides: 
             )
             config = OmegaConf.to_container(config, resolve=True)
             config = OmegaConf.create(config)
+
+    if skip_validation:
+        return config
 
     # some input check
     input_check(
@@ -71,12 +74,13 @@ def load_config(config_dir: str = ".", config_name: str = "default", overrides: 
             "When testing, you must load a checkpoint by specifying in `training.load_checkpoint`",
             check="exclude",
         )
-        input_check(
-            "test",
-            config.data.get("used_dataset", []),
-            "When testing, you must use test dataset",
-            check="within",
-        )
+        # Commented out to allow validation-only testing
+        # input_check(
+        #     "test",
+        #     config.data.get("used_dataset", []),
+        #     "When testing, you must use test dataset",
+        #     check="within",
+        # )
     else:
         input_check(
             "train",

@@ -1,0 +1,5 @@
+defaults:
+  - default
+
+used_dataset: # the dataset to load in the training process
+  - train

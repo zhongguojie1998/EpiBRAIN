@@ -2,6 +2,7 @@ import logging
 import multiprocessing as mp
 import os
 import sys
+import time
 import warnings
 from pathlib import Path
 
@@ -34,6 +35,19 @@ def which_bins(s_idx: int, e_idx: int, window_size: int):
     bin_end = (e_idx - 1) // window_size
     return np.array(range(bin_start, bin_end + 1))
 
+class ModelWrapper(torch.nn.Module):
+    def __init__(self, model, output_key, target_dim, bin_range):
+        super().__init__()
+        self.model = model
+        self.output_key = output_key
+        self.target_dim = target_dim
+        self.bin_range = bin_range
+        
+    def forward(self, x):
+        output_dict = self.model(x)
+        output = output_dict[self.output_key]
+        # [batch, N, dim] -> [batch]
+        return output[:, self.bin_range, self.target_dim].mean(dim=1) 
 
 def process_region_chunk(args):
     (
@@ -43,6 +57,7 @@ def process_region_chunk(args):
         baseline_types,
         config_path,
         checkpoint_path,
+        label_meta_path,
         res_base,
         device,
         force_restart,
@@ -58,7 +73,7 @@ def process_region_chunk(args):
     logger = BaseLogger(name=f"Interpretation-{device}", level=logging.INFO)
 
     # Get label information
-    label_meta = pd.read_csv(f"{myconfig.data.storage_path}/label_meta.csv", index_col=1)
+    label_meta = pd.read_csv(label_meta_path, index_col=None)
     data_config = pd.read_csv(f"{myconfig.data.preprocess.trial_summary_path}", index_col=1)
 
     # Setup model
@@ -66,7 +81,7 @@ def process_region_chunk(args):
     model = setup_model(myconfig, logger)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
-    dl_model = DeepLift(model.to(device), multiply_by_inputs=False, eps=1e-7)
+    model.to(device)
 
     # Setup baseline
     baseline_seq_onehots = []
@@ -98,7 +113,7 @@ def process_region_chunk(args):
         )
 
         try:
-            trial_dim = label_meta.loc[trial, "dim"]
+            trial_dim = int(label_meta.dim[label_meta['trial'] == trial].values[0])
         except:
             logger.warning(f"{trial} cannot be found in label meta, skip")
             continue
@@ -153,63 +168,72 @@ def process_region_chunk(args):
         )
         np.save(unmap_npy, mseqs_unmap)
 
-        get_labels(
-            mseqs,
-            blacklist_bed=myconfig.data.preprocess.blacklist_bed,
-            pool_width=myconfig.data.preprocess.window_size,
-            kept_num_after_crop=myconfig.data.preprocess.n_window,
-            seqs_cov_file=label_h5,
-            genome_cov_file=data_config.loc[trial, "file"],
-            umap_npy_path=unmap_npy,
-            **data_config.loc[trial].drop(["Unnamed: 0", "file"]).to_dict(),
-        )
-        with h5py.File(label_h5, "r") as f:
-            label_trial = f["targets"][0]
+        try:
+            get_labels(
+                mseqs,
+                blacklist_bed=myconfig.data.preprocess.blacklist_bed,
+                pool_width=myconfig.data.preprocess.window_size,
+                kept_num_after_crop=myconfig.data.preprocess.n_window,
+                seqs_cov_file=label_h5,
+                genome_cov_file=data_config.loc[trial, "file"],
+                umap_npy_path=unmap_npy,
+                **data_config.loc[trial, ["sum_stat", "baseline_pct", "umap_pct", "scale", "clip", "clip_soft"]].to_dict(),
+            )
+            with h5py.File(label_h5, "r") as f:
+                label_trial = f["targets"][0]
+        except (ValueError, RuntimeError, IndexError) as e:
+            logger.warning(f"Failed to get labels for {name_base}: {str(e)}. Skipping this region.")
+            continue
 
         plot_data = [label_trial, pred_res_trial]
         plot_title = [f"{trial} Target", f"{trial} Pred"]
 
+        # prepare model wrapper, will sum the output over the interested bins
+        model.zero_grad()
+        model_wrapper = ModelWrapper(model, use_head, trial_dim, bin_range)
+        # init deep lift with new model wrapper
+        dl_model = DeepLift(model_wrapper, multiply_by_inputs=False, eps=1e-7)
+        
+        # Start timer for this sample
+        sample_start_time = time.time()
+
         for baseline_type, baseline_seq_onehot in baseline_seq_onehots:
             identifier = f"{name_base}_{baseline_type}"
             if not os.path.exists(f"{save_base}/interp/{identifier}.pt") or force_restart:
-                all_attribution = []
+                # clean up before new attribution
+                dl_model.model.zero_grad()
                 nan_occur = False
 
                 # Prepare inputs once to avoid repeated tensor operations
                 input_tensor = test_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device)
                 baseline_tensor = baseline_seq_onehot.unsqueeze(0).permute(0, 2, 1).to(device)
+                # calculate attribution for bin sum
+                attribution = dl_model.attribute(
+                    inputs=input_tensor,
+                    baselines=baseline_tensor,
+                )
+                if not torch.isfinite(attribution).all():
+                    logger.warning(f"NAN occur in {identifier}, bin num {bin}")
+                    nan_occur = True
 
-                for bin in bin_range:
-                    attribution = dl_model.attribute(
-                        inputs=input_tensor,
-                        baselines=baseline_tensor,
-                        target=(bin, trial_dim),
-                    )
-                    if not torch.isfinite(attribution).all():
-                        logger.warning(f"NAN occur in {identifier}, bin num {bin}")
-                        nan_occur = True
+                # Move to CPU immediately and clear GPU memory
+                attribution_cpu = attribution.detach().cpu().permute(0, 2, 1)
+                del attribution
 
-                    # Move to CPU immediately and clear GPU memory
-                    attribution_cpu = attribution.squeeze(0).detach().cpu()
-                    all_attribution.append(attribution_cpu)
-                    del attribution
-
-                    # Clear GPU cache periodically during attribution computation
-                    if device.startswith('cuda') and len(all_attribution) % 10 == 0:
-                        torch.cuda.empty_cache()
+                # Clear GPU cache after every iteration to prevent OOM
+                if device.startswith('cuda'):
+                    torch.cuda.empty_cache()
 
                 # Clean up input tensors
                 del input_tensor, baseline_tensor
                 if device.startswith('cuda'):
                     torch.cuda.empty_cache()
-
-                all_attribution = torch.stack(all_attribution)
-
+                    
                 if save_raw:
-                    torch.save(all_attribution, f"{save_base}/interp/{identifier}.pt")
+                    torch.save(attribution_cpu, f"{save_base}/interp/{identifier}.pt")
             else:
-                all_attribution = torch.load(f"{save_base}/interp/{identifier}.pt")
-                if not torch.isfinite(all_attribution).all():
+                attribution_cpu = torch.load(f"{save_base}/interp/{identifier}.pt")
+                if not torch.isfinite(attribution_cpu).all():
                     logger.warning(f"NAN occur in {identifier}")
                     nan_occur = True
                 else:
@@ -222,14 +246,13 @@ def process_region_chunk(args):
             # we only look at the contribution from the ref genome
             # [batch, N, 4] -> [batch, N] -> [N] -> [bin_num, window_size] -> [bin_num]
             with torch.no_grad():
-                signal = (all_attribution * test_seq_onehot).sum(dim=-1).mean(dim=0)
+                signal = (attribution_cpu * test_seq_onehot).sum(dim=-1).mean(dim=0)
                 signal = signal.reshape(-1, myconfig.data.preprocess.window_size)[trim:-trim]
                 signal = signal.mean(dim=-1).detach()
 
             plot_data.append(signal)
 
             # Clean up attribution tensor
-            del all_attribution
             plot_title.append(f"Importance Score ({baseline_type} baseline)")
             # # Plot
             # viz_sequence.plot_weights(all_attribution.mean(dim=0)[:, s_idx:e_idx].T, subticks_frequency=20)
@@ -285,6 +308,10 @@ def process_region_chunk(args):
             bbox_inches="tight",
         )
         plt.close()
+
+        # Log total time for this sample
+        sample_total_time = time.time() - sample_start_time
+        logger.info(f"Sample {name_base} interpretation completed in {sample_total_time:.2f}s")
 
         # Clean up variables at the end of each region processing
         del test_seq_onehot, plot_data, plot_title
@@ -353,11 +380,14 @@ def main(
             if prefix is not None
             else f"{chr_name}_{start}_{end}_{trial}"
         )
-        region_df.iloc[i, -1] = (
-            not os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp/{name_base}.png")
-            or force_restart
+        # Check if all output files exist
+        output_files_exist = (
+            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/plot/interp/{name_base}.png") and
+            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_mseqs_unmap.npy") and
+            os.path.exists(f"{RES_BASE}/{exp_name}/analysis_{chk}/raw_data/label/{name_base}_label.h5")
         )
-        if not region_df.iloc[i, -1]:
+        region_df.at[i, 'todo'] = not output_files_exist or force_restart
+        if not region_df.at[i, 'todo']:
             logger.info(f"Skip {name_base}, already exists")
     region_df = region_df[region_df["todo"]].copy()
 
@@ -418,6 +448,7 @@ def main(
             baseline,
             f"{LOG_BASE}/{exp_name}/overall_setting.yaml",
             f"{CHK_BASE}/{exp_name}/chk_epoch_{chk}.pt",
+            f"{LOG_BASE}/{exp_name}/regression_label_meta.csv",
             RES_BASE,
             f"cuda:{process_id}" if processor == "gpu" else "cpu",
             force_restart,
@@ -429,10 +460,14 @@ def main(
 
     # Run parallel processing
     logger.info("Starting processing...")
-    if processor == "gpu":
+    if processor == "gpu" and num_processes > 1:
         mp.set_start_method("spawn", force=True)
-    with mp.Pool(processes=num_processes) as pool:
-        pool.map(process_region_chunk, process_args)
+    if num_processes > 1:
+        with mp.Pool(processes=num_processes) as pool:
+            pool.map(process_region_chunk, process_args)
+    else:
+        for arg in tqdm(process_args):
+            process_region_chunk(arg)  # for debugging
 
 
 if __name__ == "__main__":

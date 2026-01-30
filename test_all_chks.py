@@ -20,7 +20,9 @@ def main(config, chk_base, start, end):
     all_chks = sorted([i for i in all_chks if i in np.arange(start, end + 1)])
 
     for chk in tqdm(all_chks):
-        cmd = ["python", "Model/train.py", "-c", config, "-x", f"training.load_checkpoint={chk_base}/chk_epoch_{chk}.pt"]
+        cmd = ["/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN/bin/python", "Model/train.py", "-c", config, "-x", f"training.load_checkpoint={chk_base}/chk_epoch_{chk}.pt", 
+               "-x", "training.test_only=True", "-x", "logging.exp_name=basel_ganglia_complete_v2_test", 
+               "-x", "training=default_nygc"]
 
         subprocess.run(cmd)
 

@@ -29,12 +29,15 @@ use_head: # list of heads to use for training
   - regression
 
 ## loss setup
-loss: poisson_mn # the name of the loss function (now support: poisson, poisson_mn)
-loss_params:
-  total_weight: 1
-  weight_range: 1
-  eps: 1e-7
-  reduction: mean
+loss:
+  poisson_mn:
+    loss_head: regression
+    loss_weight: 1.0
+    params:
+      total_weight: 1
+      weight_range: 1
+      eps: 1e-7
+      reduction: mean
 
 ## optimizer setup
 add_opt_group: True # whether to use optimizer parameter groups
@@ -76,10 +79,8 @@ scheduler_params: # scheduler parameters
 #   warmup_type: linear
 
 ## dataloader setup
-dataloader_params:  # dataloader parameters, should be accepted by torch.utils.data.DataLoader
+dataloader_params:
   batch_size: ${training.batch_size}
   pin_memory: True
   num_workers: 12
   persistent_workers: True
-
-

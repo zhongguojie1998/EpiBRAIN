@@ -3,6 +3,7 @@
 import collections
 import heapq
 import math
+import multiprocessing as mp
 import os
 import subprocess
 import tempfile
@@ -11,7 +12,7 @@ import h5py
 import intervaltree
 import numpy as np
 import pandas as pd
-import pyBigWig
+import pybigtools
 import pysam
 import torch
 from tqdm import tqdm
@@ -579,6 +580,9 @@ def get_labels(
             seq_cov = seq_cov.sum(axis=1, dtype="float32")
             # seq_cov = -1 + (1+seq_cov)**0.75
             seq_cov = -1 + np.sqrt(1 + seq_cov)
+        elif sum_stat == "sum_three_quarter":
+            seq_cov = seq_cov.sum(axis=1, dtype="float32")
+            seq_cov = seq_cov ** (3 / 4)
         elif sum_stat in ["mean", "avg"]:
             seq_cov = seq_cov.mean(axis=1, dtype="float32")
         elif sum_stat in ["mean_sqrt", "avg_sqrt"]:
@@ -596,7 +600,7 @@ def get_labels(
             logger.error('ERROR: Unrecognized summary statistic "%s".' % sum_stat)
             exit(1)
 
-        if umap_npy_path is not None:
+        if umap_npy_path is not None and umap_pct is not None and np.isfinite(umap_pct):
             umap_cov = np.percentile(seq_cov, 100 * umap_pct)
             seq_cov[unmap_mask[si, :]] = np.minimum(seq_cov[unmap_mask[si, :]], umap_cov)
 
@@ -670,7 +674,7 @@ class CovFace:
             self.preprocess_bed()
 
         elif cov_ext in [".bw", ".bigwig"]:
-            self.cov_open = pyBigWig.open(self.cov_file, "r")
+            self.cov_open = pybigtools.open(self.cov_file, "r")
             self.bigwig = True
 
         elif cov_ext in [".h5", ".hdf5", ".w5", ".wdf5"]:
@@ -701,7 +705,7 @@ class CovFace:
 
     def read(self, chrm, start, end):
         if self.bigwig:
-            cov = self.cov_open.values(chrm, start, end, numpy=True).astype("float16")
+            cov = self.cov_open.values(chrm, start, end).astype("float16")
 
         else:
             if chrm in self.cov_open:
@@ -729,8 +733,24 @@ class CovFace:
             self.cov_open.close()
 
 
+META_INFO_COLS = [
+    "exp",
+    "task",
+    "sum_stat",
+    "baseline_pct",
+    "umap_pct",
+    "scale",
+    "extreme_clip_pct",
+    "offset",
+    "anchor_target",
+    "anchor_pct",
+    "clip",
+    "clip_soft",
+]
+
+
 # TODO: the current implementation is based on regression task, we may need an extra function for classification task
-def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
+def aggregate_data(storage_path, preload_data, todo=pd.DataFrame(), meta_info=pd.DataFrame(), precision="float32"):
     """Aggregate the label data from multiple files into file designed for model training."""
 
     separate_label_file = [
@@ -751,6 +771,25 @@ def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
     label_meta[["cell_type", "modality"]] = label_meta["trial"].str.rsplit("_", n=1, expand=True)
     label_meta = label_meta.sort_values(["task", "cell_type", "modality"])
     label_meta = label_meta[["trial", "cell_type", "modality", "task", "file"]]
+    ## incorporate meta_info if provided
+    if not meta_info.empty:
+        meta_info = meta_info[[i for i in META_INFO_COLS if i in meta_info.columns]].copy()
+        # add default values for missing columns
+        if "sum_stat" not in meta_info.columns:
+            meta_info["sum_stat"] = "sum"
+        if "baseline_pct" not in meta_info.columns:
+            meta_info["baseline_pct"] = 0.5
+        if "umap_pct" not in meta_info.columns:
+            meta_info["umap_pct"] = 0.5
+        if "scale" not in meta_info.columns:
+            meta_info["scale"] = 1
+        label_meta = pd.merge(
+            label_meta, meta_info.rename(columns={"exp": "trial"}), on=["trial", "task"], how="left"
+        )
+    if label_meta.isnull().values.any():
+        logger.warning(
+            f"Some label files are missing meta information, please double check at `{storage_path}/raw_label_meta.csv`!"
+        )
     label_meta.to_csv(f"{storage_path}/raw_label_meta.csv", index=False)
 
     # get all the label data
@@ -773,7 +812,9 @@ def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
         label_data = torch.tensor(label_data, dtype=precision)
         label_dict[task_type] = label_data
 
-    # TODO: we need to add gene level mask here to enable RNA gene expression count loss
+    # TODO: we have added gene level mask here to enable RNA gene expression count loss,
+    # however we can't aggregate it all into a single tensor since different sequences
+    # may have different number of genes, we need to save it separately
     if preload_data:
         # save the aggregated data
         for dataset_type, tmp in tqdm(todo.groupby(3), desc="Saving label"):
@@ -791,3 +832,98 @@ def aggregate_data(storage_path, preload_data, todo=None, precision="float32"):
             for task_type, task_label_data in label_dict.items():
                 save_dict[task_type] = task_label_data[i].clone()
             torch.save({"label": save_dict}, f"{storage_path}/data/{chrom}_{start}_{end}.pt")
+
+def _process_single_datapoint(args):
+    """Helper function to process a single data point for multiprocessing."""
+    i, todo_row, label_meta, storage_path, precision = args
+
+    chrom, start, end = todo_row[0], todo_row[1], todo_row[2]
+    save_dict = {}
+
+    try:
+        torch_precision = getattr(torch, precision)
+    except AttributeError:
+        torch_precision = getattr(torch, "float32")
+
+    for task_type in label_meta["task"].unique():
+        label_data = []
+        for label_file in label_meta.loc[label_meta["task"] == task_type, "file"]:
+            with h5py.File(label_file, "r") as f:
+                label_data.append(f["targets"][i])
+
+        label_data = np.stack(label_data, axis=-1)
+        label_data = torch.tensor(label_data, dtype=torch_precision)
+        save_dict[task_type] = label_data
+
+    torch.save({"label": save_dict}, f"{storage_path}/data/{chrom}_{start}_{end}.pt")
+    return i
+
+# TODO: the current implementation is based on regression task, we may need an extra function for classification task
+def split_save_data(storage_path, todo=pd.DataFrame(), meta_info=pd.DataFrame(), precision="float32", n_workers=None):
+    # Set OpenMP threads to 1 when using multiprocessing to avoid resource conflicts
+    os.environ['OMP_NUM_THREADS'] = '1'
+    """Split and save the label data from multiple files into file designed for model training."""
+
+    separate_label_file = [
+        f"{storage_path}/labels/{i}" for i in os.listdir(f"{storage_path}/labels") if i.endswith(".h5")
+    ]
+    if not separate_label_file:
+        logger.error("No label files found in the specified directory.")
+        exit(1)
+    else:
+        logger.info(f"Found {len(separate_label_file)} label files to aggregate.")
+
+    # prepare raw label meta
+    label_meta = pd.DataFrame({"file": separate_label_file})
+    label_meta["trial"] = (
+        label_meta["file"].str.split("/").str[-1].str.split(".").str[0].str.split("_", n=1).str[-1]
+    )
+    label_meta["task"] = label_meta["file"].str.split("/").str[-1].str.split("_").str[0]
+    label_meta[["cell_type", "modality"]] = label_meta["trial"].str.rsplit("_", n=1, expand=True)
+    label_meta = label_meta.sort_values(["task", "cell_type", "modality"])
+    label_meta = label_meta[["trial", "cell_type", "modality", "task", "file"]]
+    ## incorporate meta_info if provided
+    if not meta_info.empty:
+        meta_info = meta_info[[i for i in META_INFO_COLS if i in meta_info.columns]].copy()
+        # add default values for missing columns
+        if "sum_stat" not in meta_info.columns:
+            meta_info["sum_stat"] = "sum"
+        if "baseline_pct" not in meta_info.columns:
+            meta_info["baseline_pct"] = 0.5
+        if "umap_pct" not in meta_info.columns:
+            meta_info["umap_pct"] = 0.5
+        if "scale" not in meta_info.columns:
+            meta_info["scale"] = 1
+        label_meta = pd.merge(
+            label_meta, meta_info.rename(columns={"exp": "trial"}), on=["trial", "task"], how="left"
+        )
+    if label_meta.isnull().values.any():
+        logger.warning(
+            f"Some label files are missing meta information, please double check at `{storage_path}/raw_label_meta.csv`!"
+        )
+    label_meta.to_csv(f"{storage_path}/raw_label_meta.csv", index=False)
+
+    # get all the label data and save directly per data point
+    os.makedirs(f"{storage_path}/data", exist_ok=True)
+
+    # set number of workers
+    if n_workers is None:
+        n_workers = min(mp.cpu_count() // 2, len(todo), 8)  # Use half cores, max 8 workers
+
+    logger.info(f"Using {n_workers} workers for multiprocessing")
+
+    # prepare arguments for multiprocessing
+    args_list = []
+    for i in todo.index:
+        todo_row = todo.loc[i, [0, 1, 2]].values
+        args_list.append((i, todo_row, label_meta, storage_path, precision))
+
+    # save per data point separately using multiprocessing
+    if n_workers > 1:
+        with mp.Pool(processes=n_workers) as pool:
+            list(tqdm(pool.imap(_process_single_datapoint, args_list),
+                     total=len(args_list), desc="Saving label"))
+    else:
+        # fallback to single-threaded processing
+        for args in tqdm(args_list, desc="Saving label"):
+            _process_single_datapoint(args)

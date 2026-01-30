@@ -159,7 +159,7 @@ def main(hdf5_file, chunk_dir, cleanup, force):
     # Concatenate all results
     print("Merging results...")
     all_indices = np.concatenate(all_indices, dtype='i8')
-    
+
     # Concatenate results for each score type
     merged_results = {}
     for score_name in score_names:
@@ -170,6 +170,28 @@ def main(hdf5_file, chunk_dir, cleanup, force):
             print(f"Warning: No results found for score {score_name}")
 
     print(f"Total successful computations: {total_successful}")
+
+    # Filter out score matrices with incorrect sizes
+    expected_size = len(all_indices)
+    valid_scores = {}
+    invalid_scores = []
+
+    for score_name, results in merged_results.items():
+        if results.shape[0] == expected_size:
+            valid_scores[score_name] = results
+        else:
+            invalid_scores.append(score_name)
+            print(f"WARNING: Skipping {score_name} - has {results.shape[0]} entries but expected {expected_size}")
+
+    if invalid_scores:
+        print(f"\nWARNING: The following scores will NOT be merged due to size mismatch:")
+        for score_name in invalid_scores:
+            print(f"  - {score_name}")
+        print("This usually means some chunks failed to compute these scores.\n")
+
+    if not valid_scores:
+        print("ERROR: No valid score matrices to merge!")
+        return
 
     # Update main HDF5 file
     print("Updating main HDF5 file...")
@@ -190,13 +212,12 @@ def main(hdf5_file, chunk_dir, cleanup, force):
 
         print("Batch updating results...")
         # Use fancy indexing for batch updates (much faster than individual updates)
-        for score_name in score_names:
-            if score_name in merged_results:
-                sorted_results = merged_results[score_name][sort_order]
-                if score_name in results_grp:
-                    results_grp[score_name][sorted_indices, :] = sorted_results
-                else:
-                    print(f"Warning: Score dataset {score_name} not found in main HDF5 file")
+        for score_name in valid_scores:
+            sorted_results = valid_scores[score_name][sort_order]
+            if score_name in results_grp:
+                results_grp[score_name][sorted_indices, :] = sorted_results
+            else:
+                print(f"Warning: Score dataset {score_name} not found in main HDF5 file")
 
         # Update metadata
         f.attrs['last_merge_at'] = pd.Timestamp.now().isoformat()

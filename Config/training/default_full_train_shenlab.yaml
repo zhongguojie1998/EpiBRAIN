@@ -1,0 +1,17 @@
+defaults:
+  - default
+
+finetune: False # whether to finetune the model
+
+world_size: 4
+
+batch_size: 1
+
+accum_step: 1
+
+lr: 5e-5 # maximum learning rate
+lr_warmup_step: 20000  # gradually increase lr from 0 to `lr` in given optimization steps
+
+scheduler_params:
+  num_warmup_steps: ${training.lr_warmup_step}
+  num_training_steps: 40000

@@ -16,6 +16,7 @@ westminster
 archive/
 local/
 .history/
+figures/
 
 # symbolic links
 logs
@@ -25,10 +26,39 @@ Res
 
 # other files
 hostfile
+*.tsv
 
 # slurm output
 *.out
 
 SLDP/
-local/
 .nfs*
+*.bw
+*.err
+
+# dot env
+.env
+
+# genomespy
+.genomespy_temp_*.html
+.genomespy_shared/
+
+# pygenometrack
+*.ini
+*.pdf
+
+# tfmodisco output
+meme-5.4.1/
+tfm_out/
+*.npy
+
+# incomplete pipelines
+Analysis/12_ldsc/
+Analysis/12_ldsc_archive/
+Analysis/13_gchromVAR/
+Analysis/example_*.sh
+Analysis/12_s_ldsc_continous
+Analysis/14_polyfun/
+Analysis/15_GWAS_finemap_interpret/
+Analysis/16_alphagenome/
+Analysis/17_MAGMA/

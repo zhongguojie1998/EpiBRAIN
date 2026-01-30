@@ -102,6 +102,8 @@ def assign_tasks_to_compute(task_indices, compute_assignments):
 )
 @click.option("--use_head", type=str, default="regression", help="Which prediction head to use")
 @click.option("--abs_path", is_flag=True, help="Use absolute paths for scripts and model")
+@click.option("--untransform", is_flag=True, help="Untransform predictions back to original scale")
+@click.option("--label_meta", type=str, help="Path to label metadata CSV file (required if --untransform is used)")
 def main(
     hdf5_file,
     output_dir,
@@ -113,8 +115,14 @@ def main(
     precision,
     use_head,
     abs_path,
+    untransform,
+    label_meta,
 ):
     """Distribute variant effect computation tasks"""
+
+    # Validate untransform option
+    if untransform and not label_meta:
+        raise ValueError("--label_meta is required when --untransform is enabled")
 
     os.makedirs(output_dir, exist_ok=True)
     if abs_path:
@@ -123,6 +131,8 @@ def main(
         compute_script = os.path.abspath(compute_script)
         hdf5_file = os.path.abspath(hdf5_file)
         output_dir = os.path.abspath(output_dir)
+        if label_meta:
+            label_meta = os.path.abspath(label_meta)
         PYTHON = sys.executable
     else:
         PYTHON = "python"
@@ -168,6 +178,12 @@ def main(
         # Generate individual script
         script_path = f"{output_dir}/run_chunk_{chunk_id}.sh"
         score_names_args = " ".join([f"--score_names {name}" for name in score_names])
+
+        # Build untransform arguments
+        untransform_args = ""
+        if untransform:
+            untransform_args = f"--untransform \\\n  --label_meta {label_meta} \\\n  "
+
         with open(script_path, "w") as f:
             f.write(
                 f"""#!/bin/bash
@@ -180,7 +196,7 @@ def main(
   --save_interval {save_interval} \\
   --precision {precision} \\
   --use_head {use_head} \\
-  {score_names_args}
+  {untransform_args}{score_names_args}
 """
             )
         os.chmod(script_path, 0o755)

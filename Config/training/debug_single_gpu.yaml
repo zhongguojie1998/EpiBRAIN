@@ -1,0 +1,10 @@
+defaults:
+  - default
+  - override /training/dataloader: default
+
+world_size: 1
+gpu_id: 0
+
+batch_size: 2
+
+accum_step: 1

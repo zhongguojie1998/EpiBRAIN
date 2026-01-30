@@ -1,0 +1,9 @@
+defaults:
+  - default
+
+world_size: 4
+
+batch_size: 2
+
+accum_step: 3
+

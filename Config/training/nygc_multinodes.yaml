@@ -1,0 +1,9 @@
+defaults:
+  - default
+  - override /training/dataloader: default
+
+world_size: 6
+
+batch_size: 2
+
+accum_step: 2
