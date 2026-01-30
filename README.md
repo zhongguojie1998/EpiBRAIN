@@ -1,5 +1,7 @@
-# BICAN_DL
+# EpiBRAIN
+This is the repository for EpiBRAIN (Epigenomics-based Brain Regulation Attention Inference Network), for our manuscript "Single-cell Analysis of Chromatin State and Transcriptome in Human Basal Ganglia" (in submission)
 
+# EpiBRAIN
 - [Installation](#installation)
   - [Optional packages](#optional-packages)
 - [Data Pipeline](#data-pipeline)
@@ -25,32 +27,8 @@
 # Installation
 
 ```bash
-conda create -n bican python=3.12
-conda activate bican
-
-# data processing
-conda install -c conda-forge -c bioconda pybigwig pybigtools  # get label from bw files
-conda install -c conda-forge -c bioconda pysam  # reading genome data
-conda install -c bioconda bedtools  # process bed files
-pip install pyfaidx==0.8.1.4  # reading genome data
-
-# model
-pip install "torch>=2.2.0" --index-url https://download.pytorch.org/whl/cu122 # need to first install torch to avoid automatic cpu version installation
-pip install "einops >= 0.5" "transformers >= 4.34.1" "intervaltree~=3.1.0" numpy pandas h5py torchmetrics peft==0.15.2
-
-## install flash attention
-pip install ninja # for fast compile
-conda install -c "nvidia/label/cuda-12.1.0" cuda-toolkit # for cuda toolkit, need nvcc
-pip install flash-attn --no-build-isolation  # flash attention
-
-## install deepspeed, make sure you've already installed cuda-toolkit in the former step
-pip install deepspeed
-pip install cupy-cuda12x # if want to use onebitadam
-
-# util packages
-pip install click # command line tool
-pip install hydra-core  # better config
-pip install tensorboard  # better logging
+conda create -f EpiBRAIN.yml
+conda activate EpiBRAIN
 ```
 
 ## Optional packages
@@ -156,79 +134,16 @@ python Model/train.py -c finetune -x "logging=debug" -x "logging.exp_name=250605
 
 # Analysis
 
-- [Plot data distribution](./Analysis/00_visualize_data.py)
-- [Analyze model performance based on pearson correlation](./Analysis/01_test_correlation.py)
-- [Important motif identification](./Analysis/02_motif_interpretation.py)
-
-
-# Developer notes
-
-## Exp Notes
-
-### Data
-
-1. Data v1: Default pipeline, sum_stat mean, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
-2. Data v2: Default pipeline, sum_stat mean, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, offset `out_peak_non_zero_median`, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
-3. Data v3: Default pipeline, sum_stat mean, baseline_pct 0.25, scale 1, extreme_clip_pct 0.9999999, offset `out_peak_mean`, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300
-4. Data v4: Default pipeline, sum_stat mean, baseline_pct 0.25, scale 1, extreme_clip_pct None, offset None, anchor_target 100, anchor_pct 0.999, clip_threshold None, softclip_threshold 300 (New source: MACS2_bw, discard GP-GABA-Glut trials)
-5. Data v5: Default pipeline, sum_stat sum, baseline_pct 0.5, umap_pct 0.5, scale 1, extreme_clip_pct None, offset None, anchor_target None, anchor_pct 0.999, clip_threshold None, softclip_threshold None (New source: bamCoverage_bw, discard GP-GABA-Glut trials, change blacklist (blacklist.bed), add umap (umap_k36_t10_l32.bed))
-6. Data v6: Default pipeline 2.0 (put scale in the very end, after clip), sum_stat mean, baseline_pct 0.5, umap_pct 0.5, scale 2, extreme_clip_pct None, offset None, anchor_target None, anchor_pct 0.999, clip_threshold 128, softclip_threshold 32 (New source: bamCoverage_bw, discard GP-GABA-Glut, SMC trials, change blacklist (blacklist.bed), add umap (umap_k36_t10_l32.bed))
-
-### Training
-
-Details see the config generated in the corresponding folder
-
-#### Current Hyperparameter Setting
-
-- batch size: 196 (12 (btz) * 8 (gpu) * 2 (accum step))
-  - per epoch, 202 step (btz 96), 101 step (btz 196)
-- lr: 1e-4 (both for scratch / finetune)
-
-#### Milestones
-
-1. `250606_finetune_new_data`
-   - Data: v1
-   - Model: Finetune (Lora)
-   - Training (no trick)
-2. `250614_scratch_gc`
-   - Data: v1
-   - Model: Full
-   - Training (with gradient compression)
-
-
-## Data Preprocessing
-
-1. Just in case, we may need to remap the raw reads to the genome to get better signal calls (follow [Basenji](https://pmc.ncbi.nlm.nih.gov/articles/PMC5932613/) pipeline)
-2. Exlude region: By avoiding assembly gaps and unmappable regions >1 kb, we extracted (217=) 131-kb nonoverlapping sequences across the chromosomes. We discarded sequences with >35% unmappable sequence, leaving 14,533 sequences. (Basenji)
-3. Correct read value ([Basenji2](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1008050#sec017)): 
-   - For ENCODE blacklist, RepeatMasker satellite repeats, unmappable regions of >32 bp where 24-mers align to >10 genomic sites using Umap mappability tracks (all are false positive regions), set signal values overlapping these regions 25th percentile value of each dataset (background value)
-   - soft clipped high values with the function f(x) = min(x, tc + sqrt(max(0, x − tc))), to reduce the contribution of rare very large values that one would not expect to generalize to other genomic locations. Via this procedure, we decided to clip all CAGE data with tc = 384, ENCODE with tc = 32, and GEO with tc = 64.
-
-
-## Data Pipeline
-
-1. Org data format: bw (UCSC bigwig file). Get the data summary stats (serve as **label**) with [`pyBigWig`](https://github.com/deeptools/pyBigWig)
-2. preprocess the data and get the train/valid/test in the .bed file (essentially a tsv file, contain the chr, start, end info). Presample all the data points (across all the genomes) and Precompute all the labels in the preprocessing stage, reference the [preprocess script](https://github.com/calico/basenji/blob/master/tutorials/preprocess.ipynb), save in the torch pt files
-3. [DNA Tokenizer](https://github.com/lucidrains/enformer-pytorch/blob/5a5974d2821c728f93294731c50b55f1f55fd86d/enformer_pytorch/data.py), Dataset, get the tokenized DNA (one hot, L * 4) and the label of the correponding region (cell type * modality * central bin num)
-
-Final data point: a 196,608 length DNA window, further truncated into 128 (bin width) * 896 (bin num), for each bin, calculate the label (for each cell type, each modality, we have a label value). When training, we only calculate the loss for the central bins, not for the marginal bins (marginal ones don't have enough information)
-
-
-## Model Setting
-
-1. Model backbone: [borzoi-pytorch](https://github.com/johahi/borzoi-pytorch) with flash atten
-   - remove human/mouse head, only keep one head (human), but need to change the output channel number to fit our data (cell type * modality * central bin num)
-   - check the model crop behavior
-2. Training code (Premode trainer)
-   - config file
-   - trainer function
-   - logs (tensorboard)
-   - checkpoint autosave
-   - continue training
-   - DDP (if use DDP, set the model forward, `data_parallel_training = True`)
-   - multi machine training
-
-## Q & A
-
-1. model, set_track_subset? Annotated version?
-   - used to add prompt to the enformer, leave it now
+- **00 - Data Visualization & Conversion**: [Plot data distribution](./Analysis/00_visualize_data.py), [IGV visualization](./Analysis/00_igv_visualization.py), [pyGenomeTracks visualization](./Analysis/00_visualize_data_pygenometrack.py), [TF to PyTorch conversion](./Analysis/00_tf_to_torch/)
+- **01 - Model Inference & Performance**: [Quick inference to BigWig](./Analysis/01_0_quick_inference_bigwig.py), [Bin-level correlation](./Analysis/01_1_test_correlation.py), [Cross-celltype correlation](./Analysis/01_2_test_correlation_across_celltypes.py), [Gene-level correlation](./Analysis/01_5_test_correlation_by_gene.py), [Performance plots](./Analysis/01_6_plots.py)
+- **02 - Motif Interpretation**: [DeepLift motif interpretation](./Analysis/02_motif_interpretation_DeepLift.py), [Gradient-input motif interpretation](./Analysis/02_motif_interpretation_gradient_input.py), [Differential motif interpretation](./Analysis/02_motif_diff_interpretation_DeepLift.py), [TOMTOM motif validation](./Analysis/02_motif_region_tomtom.py)
+- **03 - Variant Effect Prediction**: [Variant effect prediction](./Analysis/03_0_variant_effect.py), [CRISPRi validation](./Analysis/03_0_crispri.py), [Variant effect visualization](./Analysis/03_1_variant_effect_viz.ipynb), [S-LDSC analysis](./Analysis/03_2_run_sldp_analysis.py), [Variant effect to BigWig](./Analysis/03_5_variant_effect_to_bigwig.py), [Large-scale variant screening pipeline](./Analysis/03_variant_effect_screen/)
+- **04 - Prediction Comparison**: [View prediction differences](./Analysis/04_view_prediction_differences.py)
+- **05 - Transcript Performance**: [Gene/transcript-level performance evaluation](./Analysis/05_transcripts_performance.py)
+- **06 - GTEx Preprocessing**: [GTEx eQTL data preprocessing](./Analysis/06_GTEx_preprocessing.py)
+- **07 - eQTL Analysis**: [eQTL analysis](./Analysis/07_eQTL_analysis.py), [Borzoi eQTL](./Analysis/07_eQTL_borzoi_analysis.py), [ChromBPNet eQTL](./Analysis/07_eQTL_chrombpnet_analysis.py), [H3K27me3 eQTL](./Analysis/07_eQTL_me3_analysis.py)
+- **08 - TraitGym**: [TraitGym preprocessing](./Analysis/08_TraitGym_preprocessing.py), [TraitGym analysis](./Analysis/08_TraitGym_analysis.py)
+- **09 - ABC Loop Analysis**: [ABC data preparation](./Analysis/09_1_ABC_prepare.py), [ABC attribution screening](./Analysis/09_3_ABC_screen_significant_attributions.py), [ABC attribution plots](./Analysis/09_4_ABC_screen_significant_attributions_plot.py)
+- **10 - Differential Peak Analysis**: [Link DiffExpress to DiffPeak](./Analysis/10_1_link_DiffExpress_DiffPeak.py), [Screen DiffPeak attributions](./Analysis/10_3_screen_DiffPeak_attributions.py), [DiffPeak attribution plots](./Analysis/10_4_screen_DiffPeak_attributions_plot.py)
+- **11 - Differential Expression & TF Motif Discovery**: [Differential expression](./Analysis/11_1_DiffExpress.py), [TF-MoDISco motif discovery](./Analysis/11_4_DiffExpress_TFMoDisco.py), [TOMTOM validation](./Analysis/11_5_DiffExpress_TOMTOM.py), [cCRE annotation](./Analysis/11_6_DiffExpress_cCRE.py)
+- **12 - LDSC (LD Score Regression)**: [Continuous S-LDSC](./Analysis/12_s_ldsc_continous/)

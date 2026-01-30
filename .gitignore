@@ -55,9 +55,15 @@ tfm_out/
 # incomplete pipelines
 Analysis/12_ldsc/
 Analysis/12_ldsc_archive/
+Analysis/12_s_ldsc_continous/.claude/
+Analysis/12_s_ldsc_continous/anno*
+Analysis/12_s_ldsc_continous/background*
+Analysis/12_s_ldsc_continous/partition*
+Analysis/12_s_ldsc_continous/results*
+Analysis/12_s_ldsc_continous/track_lists/
+Analysis/12_s_ldsc_continous/quantile_results_by_trait/
 Analysis/13_gchromVAR/
 Analysis/example_*.sh
-Analysis/12_s_ldsc_continous
 Analysis/14_polyfun/
 Analysis/15_GWAS_finemap_interpret/
 Analysis/16_alphagenome/
