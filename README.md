@@ -74,9 +74,9 @@ The data preprocess pipeline would be:
 
 # Usage
 
-## Variant Effect Predictions
+## Only do variant effect predictions
 
-1. Download pretrained model weights
+1. Download pretrained model weights, see `Chk/full_finetune_original_loss_celltype_head_dim8_linear/README.md` and `Chk/full_finetune_original_loss_celltype_head_dim8_linear_full_atlas/README.md` for details.
 2. Run the `Analysis/variant_analysis_pipeline.sh`, see the script for details of documentation.
 ```bash
 bash Analysis/variant_analysis_pipeline.sh --variant chrXX:POS:REF:ALT --track CellTypeName --variant-name rsXXX --gene GeneName --disease DiseaseName(Optional) --method gradient_input --tomtom-db /path/to/meme
