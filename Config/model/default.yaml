@@ -102,7 +102,7 @@ output_heads: # set up the prediction head name and trial number
   celltype_hidden_dim: 8  # the dimension of the cell type embedding, if use_cell_encoder is True, this will be used to calculate the cell type embedding
   cell_encoder_activation: 'none'  # activation function for the cell type encoder
   regression:
-      track_num: 209
-      celltype_num: 39
+      track_num: 200
+      celltype_num: 37
       modality_num: 6 # ATAC, H3K27ac, H3K27me3, H3K9me3, RNA_plus, RNA_minus
       task: regression # choose from `regression` or `classification`

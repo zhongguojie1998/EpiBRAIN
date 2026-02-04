@@ -1,5 +1,5 @@
 defaults:
-  - data: default
-  - model: default
-  - training: default
+  - data: drop_celltype
+  - model: full_train
+  - training: full_finetune_nygc
   - logging: default

@@ -1,5 +1,5 @@
 defaults:
-  - data: default
-  - model: borzoi_enformer_style_finetune
-  - training: finetune
+  - data: drop_celltype
+  - model: full_finetune
+  - training: full_finetune_nygc
   - logging: default
