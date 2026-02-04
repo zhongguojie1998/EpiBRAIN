@@ -1,0 +1,161 @@
+data:
+  storage_path: ./Data/basal_ganglia_miniatlas_complete_v1/
+  refer_genom: ./Data/source/hg38/hg38.fa
+  context_length: 524288
+  preload_data: false
+  used_dataset:
+  - train
+  - valid
+  - test
+  preprocess:
+    storage_path: ./Data/basal_ganglia_miniatlas_complete_v1/
+    refer_genom: ./Data/source/hg38/hg38.fa
+    trial_summary_path: ./Data/data_config/basal_ganglia_miniatlas_complete_v1.csv
+    gap_bed: ./Data/source/merged_blacklist_gaps.bed
+    unmap_bed: ./Data/source/umap_k36_t10_l32.bed
+    unmap_threshold: 0.5
+    blacklist_bed: ./Data/source/blacklist.bed
+    break_threshold: 3145728
+    stride_train: 174775
+    stride_test: 522253
+    snap: 1
+    context_length: 524288
+    window_size: 32
+    n_window: 16320
+    folds: null
+    valid_pct_or_chr: 0.1
+    test_pct_or_chr: 0.1
+    sample_pct: 1.0
+    seed: 42
+    num_worker: 24
+    preload_data: false
+    force_restart: false
+    precision: float32
+  dataset:
+    storage_path: ./Data/basal_ganglia_miniatlas_complete_v1/
+    refer_genom: ./Data/source/hg38/hg38.fa
+    context_length: 524288
+    preload_data: false
+    shift_augs:
+    - -3
+    - 3
+    rc_aug: true
+model:
+  model_name: ./Chk/borzoi_pretrain
+  flashed: false
+  use_autocast: false
+  use_compile: true
+  compile_mode: default
+  compile_backend: inductor
+  compile_fullgraph: false
+  finetune_method: cont_from_pretrain
+  finetune_param: null
+  conv_dna_param:
+    out_channels: 512
+    kernel_size: 15
+  res_tower_param:
+    filters_init: 608
+    filters_end: 1536
+    divisible_by: 32
+    kernel_size: 5
+    pool_size: 2
+    depth: 6
+    res_link: false
+  transformer_param:
+    heads: 8
+    attn_dim_key: 64
+    attn_dim_value: 192
+    pos_dropout: 0.01
+    attn_dropout: 0.05
+    dropout: 0.2
+    depth: 8
+  crop_param:
+    return_center_bins_only: true
+    bins_to_return: 16320
+  upsample_param:
+    upsample_layer_num: 2
+    kernel_size: 3
+    res_link: false
+  final_joined_conv_param:
+    out_channels: 1920
+    dropout: 0.1
+  partial_load:
+  - res_tower
+  - transformer
+  - upsample_tower
+  - final_joined_convs
+  output_heads:
+    use_cell_encoder: true
+    celltype_hidden_dim: 8
+    cell_encoder_activation: none
+    regression:
+      track_num: 386
+      celltype_num: 70
+      modality_num: 6
+      task: regression
+training:
+  world_size: 8
+  gpu_id: null
+  MASTER_ADDR: localhost
+  MASTER_PORT: 12320
+  use_grad_compression: false
+  deepspeed: false
+  load_checkpoint: null
+  test_only: false
+  finetune: true
+  lr: 0.0001
+  lr_warmup_step: 625
+  batch_size: 1
+  total_epoch: 200
+  accum_step: 4
+  clip_grad_norm: 1.0
+  seed: 42
+  use_head:
+  - regression
+  loss:
+    poisson_mn:
+      loss_head: regression
+      loss_weight: 1.0
+      params:
+        total_weight: 0.2
+        weight_range: 1
+        eps: 1.0e-07
+        reduction: mean
+  add_opt_group: true
+  optimizer: AdamW
+  optimizer_params:
+    lr: 0.0001
+  weight_decay:
+    overall: 0.002
+    transformer: 0.002
+    lora: 0.002
+    exclude:
+    - bias
+    - ndim_1
+  scheduler: WarmupThenPolynomialDecay
+  scheduler_params:
+    num_warmup_steps: 625
+    num_training_steps: 25625
+    lr_end: 1.0e-05
+    power: 1.0
+  dataloader_params:
+    batch_size: 1
+    pin_memory: false
+    num_workers: 0
+    persistent_workers: false
+  torchrun: true
+logging:
+  exp_name: full_finetune_original_loss_celltype_head_dim8_linear_full_atlas
+  log_level: 20
+  log_dir: ./logs/full_finetune_original_loss_celltype_head_dim8_linear_full_atlas
+  write_log_to_file: true
+  overwrite_log_file: false
+  use_tensorboard: true
+  checkpoint_dir: ./Chk/full_finetune_original_loss_celltype_head_dim8_linear_full_atlas
+  res_dir: ./Res/full_finetune_original_loss_celltype_head_dim8_linear_full_atlas
+  save_every: 1
+  report_every: 1
+  tensorboard_log_every: 100
+  log_more: true
+  save_method: split
+  diagnose: false
