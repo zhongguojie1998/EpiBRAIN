@@ -303,10 +303,10 @@ if [ -n "$REGION" ] && [ -n "$GENE" ]; then
 fi
 
 # Set defaults
-EXP_NAME=${EXP_NAME:-"full_finetune_original_loss_celltype_head_dim8_linear_full_atlas"}
-CHECKPOINT=${CHECKPOINT:-17}
+EXP_NAME=${EXP_NAME:-"full_finetune_original_loss_celltype_head_dim8_linear_full_atlas"} # change to full_finetune_original_loss_celltype_head_dim8_linear if only work on Basal Ganglia
+CHECKPOINT=${CHECKPOINT:-17} # change to 20 if only work on Basal Ganglia
 OUTPUT_BASE=${OUTPUT_BASE:-"Analysis/figures"}
-GTF_FILE=${GTF_FILE:-"Data/source/gencode.v48.annotation.gtf.gz"}
+GTF_FILE=${GTF_FILE:-"Data/source/gencode.v48.annotation.gtf.gz"} # download from gencode website
 NUM_GPUS=${NUM_GPUS:-4}
 METHOD=${METHOD:-"DeepLift"}
 TRACK_HEIGHT=${TRACK_HEIGHT:-2}
