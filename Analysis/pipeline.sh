@@ -521,7 +521,6 @@ if ! $SKIP_12; then
         --variant-name rs6581593 \
         --gene LRRK2 \
         --disease Parkinsons \
-        --skip-steps 1,2,3,5,7 \
         --method gradient_input \
         --tomtom-db Data/source/meme-5.4.1/motif_databases/HOCOMOCO/H12CORE_meme_format.meme \
         --tomtom-region chr12:40208962-40208969 \

@@ -76,9 +76,10 @@ The data preprocess pipeline would be:
 
 ## Only do variant effect predictions
 
-1. Download pretrained model weights, see `Chk/full_finetune_original_loss_celltype_head_dim8_linear/README.md` (model with subclasses ≥ 1000 cells) and `Chk/full_finetune_original_loss_celltype_head_dim8_linear_full_atlas/README.md` (full model) for details.
+1. Download pretrained model weights, see `Chk/borzoi_pretrain/README.md` (Borzoi), `Chk/full_finetune_original_loss_celltype_head_dim8_linear/README.md` (model with subclasses ≥ 1000 cells) and `Chk/full_finetune_original_loss_celltype_head_dim8_linear_full_atlas/README.md` (full model) for details.
 2. Download gencode v48 from GENCODE website: https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_48/gencode.v48.annotation.gtf.gz, and put it under `Data/source/`
-3. Run the `Analysis/variant_analysis_pipeline.sh`, see the script for details of documentation and configuration. If you want to change the model to use, modify `line 307-310` in the script.
+3. Download hg38 fasta file (https://drive.google.com/file/d/1hk_jplOuujIobdXXhjZ9fd7tLmVmrVNE/view?usp=sharing) and put it under `Data/source/hg38/hg38.fa`
+4. Run the `Analysis/variant_analysis_pipeline.sh`, see the script for details of documentation and configuration. If you want to change the model to use, modify `line 307-310` in the script.
 ```bash
 bash Analysis/variant_analysis_pipeline.sh --variant chrXX:POS:REF:ALT --track CellTypeName --variant-name rsXXX(anything) --gene GeneName --disease DiseaseName(Optional,anything) --method gradient_input --tomtom-db /path/to/meme
 ```
