@@ -74,6 +74,14 @@ The data preprocess pipeline would be:
 
 # Usage
 
+## Variant Effect Predictions
+
+1. Download pretrained model weights
+2. Run the `Analysis/variant_analysis_pipeline.sh`, see the script for details of documentation.
+```bash
+bash Analysis/variant_analysis_pipeline.sh --variant chrXX:POS:REF:ALT --track CellTypeName --variant-name rsXXX --gene GeneName --disease DiseaseName(Optional) --method gradient_input --tomtom-db /path/to/meme
+```
+
 ## Only to generate labels
 
 ```bash
