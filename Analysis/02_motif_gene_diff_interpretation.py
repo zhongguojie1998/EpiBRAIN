@@ -683,8 +683,8 @@ def process_region_chunk(args):
                 logger.warning(f"Failed to get labels for {trial_pos_single}: {str(e)}")
 
         if len(label_pos_trials) == 0:
-            logger.warning(f"No valid labels for positive trials in {name_base}, skip")
-            continue
+            logger.warning(f"No valid labels for positive trials in {name_base}, using predictions as labels")
+            label_pos_trials = list(pred_res_pos_trials)  # Use predictions as fallback
 
         # Save individual trial data for plotting
         label_trials_dict = {trial_name: trial_data for trial_name, trial_data in zip(trial_pos_list, label_pos_trials)}

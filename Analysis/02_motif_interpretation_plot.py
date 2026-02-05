@@ -130,10 +130,12 @@ def load_interpretation_data(data_dir, name_base, baseline_types):
 
     # Load individual trial label data
     label_trials_file = f"{data_dir}/{name_base}_label_trials.npy"
-    if not os.path.exists(label_trials_file):
-        raise FileNotFoundError(f"Label trials file not found: {label_trials_file}")
-    label_trials = np.load(label_trials_file, allow_pickle=True).item()
-    logger.info(f"Loaded {len(label_trials)} label trials from: {label_trials_file}")
+    if os.path.exists(label_trials_file):
+        label_trials = np.load(label_trials_file, allow_pickle=True).item()
+        logger.info(f"Loaded {len(label_trials)} label trials from: {label_trials_file}")
+    else:
+        label_trials = {}
+        logger.warning(f"Label trials file not found: {label_trials_file}, proceeding without labels")
 
     # Load individual trial prediction data
     pred_trials_file = f"{data_dir}/{name_base}_pred_trials.npy"
