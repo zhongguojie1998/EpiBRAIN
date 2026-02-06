@@ -84,7 +84,7 @@ The data preprocess pipeline would be:
 bash Analysis/variant_analysis_pipeline.sh --variant chrXX:POS:REF:ALT --track CellTypeName --variant-name rsXXX(anything) --gene GeneName --disease DiseaseName(Optional,anything) --method gradient_input --tomtom-db /path/to/meme
 ```
 
-## Only to generate labels
+## Only to generate labels (h5 files) from bigWig files
 
 ```bash
 python Model/train.py -x "logging=debug" -x "logging.exp_name=data_generation" --only_data
@@ -106,7 +106,7 @@ python Model/train.py -c default -x "logging=debug" -x "logging.exp_name=test" -
 
 - For training from scratch
 
-Config used: data (default), model (default), training (default), logging (default)
+Config used: data (drop_celltype), model (full_train), training (full_finetune_nygc), logging (default)
 
 ```bash
 python Model/train.py -c default -x "logging.exp_name=your_exp_name"
@@ -114,7 +114,7 @@ python Model/train.py -c default -x "logging.exp_name=your_exp_name"
 
 - For fine tuning from Borzoi
 
-Config used: data (default), model (finetune, extra configs for building finetune model), training (finetune), logging (default)
+Config used: data (drop_celltype), model (full_finetune, extra configs for building finetune model), training (full_finetune_nygc), logging (default)
 
 ```bash
 python Model/train.py -c finetune -x "logging.exp_name=your_exp_name"
