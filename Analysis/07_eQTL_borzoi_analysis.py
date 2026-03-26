@@ -1,6 +1,7 @@
 # %% import libs
 import os
 import sys
+import argparse
 
 import h5py
 import numpy as np
@@ -10,9 +11,22 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score, average_precision_score
 
+parser = argparse.ArgumentParser(description='eQTL Borzoi track analysis')
+parser.add_argument('--brain_only', action='store_true',
+                    help='Only use brain-related tracks')
+args = parser.parse_args()
+brain_only = args.brain_only
+
 PWD = f'{os.environ["workingHOME"]}/BICAN'
 sys.path.append(f'{PWD}')
 os.chdir(f'{PWD}')
+# %% brain-only track filter option
+brain_track_pattern = (
+    r'brain|cerebr|hippocamp|hypothalam|amygdal|frontal.*(lobe|gyrus)|'
+    r'neuron|astrocyte|oligodendrocyte|microglia|cerebellum|thalamus|'
+    r'parietal|temporal lobe|occipital|putamen|caudate|substantia|'
+    r'spinal cord|neurosphere'
+)
 # %% read in eQTL files
 eqtl = pd.read_csv('Data/source/eQTL/all.vcf', sep='\t')
 eqtl_info = pd.read_csv('Data/source/eQTL/info.csv', sep=',')
@@ -221,6 +235,11 @@ for organ in ['All', 'Brain', 'Basal_ganglia', 'Cortex']:
     # load track annotations
     track_anno = pd.read_csv('borzoi.published.targets.txt', index_col=0, sep='\t')
     track_anno['modality'] = track_anno['file'].str.split('/').str[6]
+    if brain_only:
+        brain_mask = track_anno['description'].str.contains(brain_track_pattern, case=False, na=False)
+        brain_indices = track_anno.index[brain_mask].values
+        track_anno = track_anno.loc[brain_mask].reset_index(drop=True)
+        eqtl_scores = eqtl_scores[:, brain_indices]
     track_anno['organ'] = organ
     # get overall precision recall
     for group in ['all', '<3k', '3k-12k', '12k-35k', '>35k']:
@@ -258,7 +277,8 @@ for organ in ['All', 'Brain', 'Basal_ganglia', 'Cortex']:
 # %% add annotation
 track_results['mod'] = 'borzoi'
 # %% save results
-track_results.to_csv('Data/source/eQTL/borzoi_track_results.csv')
+suffix = '_brain' if brain_only else ''
+track_results.to_csv(f'Data/source/eQTL/borzoi_track_results{suffix}.csv')
 # %% plot
 organs = ['All', 'Brain', 'Basal_ganglia']
 for organ in organs:

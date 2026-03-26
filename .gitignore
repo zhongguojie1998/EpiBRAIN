@@ -68,6 +68,8 @@ Analysis/14_polyfun/
 Analysis/15_GWAS_finemap_interpret/
 Analysis/16_alphagenome/
 Analysis/17_MAGMA/
+Analysis/chrom_emb/
+Analysis/gradient_input_miniatlas/
 
 # add config files
 !logs/full_finetune_original_loss_celltype_head_dim8_linear_full_atlas/overall_setting.yaml

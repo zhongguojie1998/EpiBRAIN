@@ -194,7 +194,9 @@ def process_region_chunk(args):
     # Setup model
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model = setup_model(myconfig, logger)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    # If model was wrapped by torch.compile, load into the original module
+    load_target = model._orig_mod if hasattr(model, '_orig_mod') else model
+    load_target.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     model.to(device)
 

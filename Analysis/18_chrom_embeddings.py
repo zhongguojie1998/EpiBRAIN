@@ -88,7 +88,7 @@ class EmbeddingExtractor:
 
         # Derive C and H from model config
         self.celltype_num = self.cfg.model.output_heads.regression.celltype_num
-        self.celltype_hidden_dim = self.cfg.model.celltype_hidden_dim
+        self.celltype_hidden_dim = self.cfg.model.output_heads.celltype_hidden_dim
 
         # Setup FASTA
         fasta_path = os.path.abspath(self.cfg.data.refer_genom)
@@ -123,8 +123,8 @@ class EmbeddingExtractor:
 
     def _register_hook(self) -> None:
         """Register forward hook on prediction_head.shared_cell_encoder."""
-        # Navigate through potential PEFT wrapper
-        if hasattr(self.model, 'base_model'):
+        # Navigate through potential PEFT wrapper (PeftModel has base_model.model)
+        if hasattr(self.model, 'base_model') and hasattr(self.model.base_model, 'model'):
             pred_head = self.model.base_model.model.prediction_head
         else:
             pred_head = self.model.prediction_head
@@ -220,6 +220,73 @@ class EmbeddingExtractor:
 
         return emb_np[bin_start:bin_end], bin_start, bin_end
 
+    def get_ccre_embedding_all(
+        self,
+        chrom: str,
+        start: int,
+        end: int,
+        use_rev_aug: bool = True,
+    ) -> tuple[np.ndarray, int, int]:
+        """
+        Extract shared_cell_embs for a cCRE for ALL cell types in one forward pass.
+
+        Returns:
+            emb: float32 array [L_bins, C, H] — all cell types
+            bin_start: inclusive bin index
+            bin_end: exclusive bin index
+        """
+        center_pos = (start + end) // 2
+
+        token_dict = self.fasta(
+            chr_name=chrom,
+            start=center_pos - self.seq_len // 2,
+            end=center_pos + self.seq_len // 2,
+            return_augs=False,
+            return_rela_idx=True,
+        )
+        seq_onehot = token_dict["one_hot"]   # [L, 4]
+        real_start, _ = token_dict["real_region"]
+
+        with torch.no_grad():
+            seq_fwd = seq_onehot.unsqueeze(0).permute(0, 2, 1).to(self.device)  # [1, 4, L]
+            self.model(seq_fwd, 'regression')
+            emb_raw_fwd = self._cell_embs_holder['value']  # [1, n_window, C*H]
+            emb_fwd = emb_raw_fwd.view(1, self.n_window, self.celltype_num, self.celltype_hidden_dim)
+
+            if use_rev_aug:
+                seq_rev = one_hot_reverse_complement(seq_onehot).unsqueeze(0).permute(0, 2, 1).to(self.device)
+                self.model(seq_rev, 'regression')
+                emb_raw_rev = self._cell_embs_holder['value']  # [1, n_window, C*H]
+                emb_rev = emb_raw_rev.view(1, self.n_window, self.celltype_num, self.celltype_hidden_dim)
+                emb_rev = torch.flip(emb_rev, dims=[1])
+                emb_combined = (emb_fwd + emb_rev) / 2.0
+            else:
+                emb_combined = emb_fwd
+
+            # [n_window, C, H] — all cell types
+            emb_np = emb_combined[0, :, :, :].cpu().float().numpy()
+
+        # Compute overlapping bins
+        bin_start = (start - real_start) // self.window_size
+        bin_end = (end - real_start + self.window_size - 1) // self.window_size
+        bin_start = max(0, bin_start)
+        bin_end = min(self.n_window, bin_end)
+
+        if bin_start >= bin_end:
+            center_bin = (center_pos - real_start) // self.window_size
+            center_bin = max(0, min(self.n_window - 1, center_bin))
+            bin_start = center_bin
+            bin_end = center_bin + 1
+
+        return emb_np[bin_start:bin_end], bin_start, bin_end
+
+
+def _sanitize_celltype_name(name: str) -> str:
+    """Replace characters unsafe for filenames with underscores."""
+    for ch in ' /\\:*?"<>|':
+        name = name.replace(ch, '_')
+    return name
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract shared_cell_embs for cCREs")
@@ -232,14 +299,24 @@ def main() -> None:
         "--use_rev_aug", type=lambda x: x.lower() != 'false', default=True,
         help="RC augmentation (default: True)"
     )
+    parser.add_argument("--rank", type=int, default=0,
+                        help="Rank of this process (0-based). Used for multi-GPU sharding.")
+    parser.add_argument("--world_size", type=int, default=1,
+                        help="Total number of parallel processes. Each handles 1/world_size of peaks.")
     args = parser.parse_args()
 
     # Load BED file (0-based coordinates assumed)
-    bed = pd.read_csv(args.bed, sep='\t', header=None)
-    if bed.shape[1] < 4:
-        raise ValueError("BED file must have at least 4 columns: chr, start, end, celltype")
-    bed.columns = list(bed.columns)  # keep numeric column names
-    logger.info(f"Loaded {len(bed)} cCREs from {args.bed}")
+    bed_full = pd.read_csv(args.bed, sep='\t', header=None)
+    bed_full.columns = list(bed_full.columns)  # keep numeric column names
+    logger.info(f"Loaded {len(bed_full)} cCREs from {args.bed}")
+
+    # Shard by rank — preserve original row indices as dataset keys
+    if args.world_size > 1:
+        bed = bed_full.iloc[args.rank::args.world_size]
+        logger.info(f"Rank {args.rank}/{args.world_size}: processing {len(bed)} peaks "
+                    f"(rows {args.rank}, {args.rank + args.world_size}, ...)")
+    else:
+        bed = bed_full
 
     extractor = EmbeddingExtractor(
         checkpoint_path=args.checkpoint,
@@ -248,69 +325,166 @@ def main() -> None:
     )
 
     output_path = Path(args.output)
+    # Add _rank{N} suffix when running in multi-process mode
+    if args.world_size > 1:
+        output_path = output_path.with_stem(f"{output_path.stem}_rank{args.rank}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Metadata accumulators
-    meta_chrom: list[str] = []
-    meta_start: list[int] = []
-    meta_end: list[int] = []
-    meta_celltype: list[str] = []
-    meta_celltype_idx: list[int] = []
-    meta_bin_start: list[int] = []
-    meta_bin_end: list[int] = []
+    # Detect mode: all-cell-types vs single-cell-type (sample from full BED for reliability)
+    all_celltypes_mode = False
+    if bed_full.shape[1] < 4:
+        all_celltypes_mode = True
+        logger.info("No 4th column — running in all-cell-types mode")
+    else:
+        sample_values = bed_full.iloc[:min(20, len(bed_full)), 3].astype(str).tolist()
+        if not any(v in extractor.celltype_to_idx for v in sample_values):
+            all_celltypes_mode = True
+            logger.info("4th column does not contain cell types — running in all-cell-types mode")
 
-    with h5py.File(output_path, 'w') as hf:
-        emb_grp = hf.create_group("embeddings")
-        meta_grp = hf.create_group("metadata")
+    if all_celltypes_mode:
+        # One HDF5 file per cell type (output_path already has _rankN suffix if world_size > 1)
+        # Strip the _rankN suffix to build per-celltype names, then re-add it
+        stem = output_path.stem
+        suffix = output_path.suffix
+        parent = output_path.parent
 
-        for i, row in tqdm(bed.iterrows(), total=len(bed), desc="Extracting embeddings"):
-            chrom = str(row.iloc[0])
-            start = int(row.iloc[1])
-            end = int(row.iloc[2])
-            celltype = str(row.iloc[3])
+        celltypes = extractor.celltypes_ordered
+        ct_safe = [_sanitize_celltype_name(ct) for ct in celltypes]
+        ct_paths = [parent / f"{stem}_{safe}{suffix}" for safe in ct_safe]
 
-            try:
-                emb, bin_s, bin_e = extractor.get_ccre_embedding(
-                    chrom, start, end, celltype, use_rev_aug=args.use_rev_aug
-                )
-                celltype_idx = extractor.celltype_to_idx[celltype]
-            except Exception as e:
-                logger.warning(f"Skipping cCRE {i} ({chrom}:{start}-{end} {celltype}): {e}")
-                # Store zero embedding to keep indices aligned
-                emb = np.zeros((1, extractor.celltype_hidden_dim), dtype=np.float32)
-                bin_s = 0
-                bin_e = 1
-                celltype_idx = -1
+        # Per-cell-type metadata accumulators
+        per_ct_meta: list[dict] = [
+            {"chrom": [], "start": [], "end": [], "bin_start": [], "bin_end": []}
+            for _ in celltypes
+        ]
 
-            emb_grp.create_dataset(str(i), data=emb.astype(np.float32), compression="gzip")
+        # Open all output files
+        hf_list = [h5py.File(p, 'w') for p in ct_paths]
+        emb_grps = [hf.create_group("embeddings") for hf in hf_list]
+        for hf in hf_list:
+            hf.create_group("metadata")
 
-            meta_chrom.append(chrom)
-            meta_start.append(start)
-            meta_end.append(end)
-            meta_celltype.append(celltype)
-            meta_celltype_idx.append(celltype_idx)
-            meta_bin_start.append(bin_s)
-            meta_bin_end.append(bin_e)
+        try:
+            for i, row in tqdm(bed.iterrows(), total=len(bed), desc="Extracting embeddings (all cell types)"):
+                chrom = str(row.iloc[0])
+                start = int(row.iloc[1])
+                end = int(row.iloc[2])
 
-        # Write metadata arrays
-        dt_str = h5py.special_dtype(vlen=str)
-        meta_grp.create_dataset("chrom", data=np.array(meta_chrom, dtype=object), dtype=dt_str)
-        meta_grp.create_dataset("start", data=np.array(meta_start, dtype=np.int32))
-        meta_grp.create_dataset("end", data=np.array(meta_end, dtype=np.int32))
-        meta_grp.create_dataset("celltype", data=np.array(meta_celltype, dtype=object), dtype=dt_str)
-        meta_grp.create_dataset("celltype_idx", data=np.array(meta_celltype_idx, dtype=np.int32))
-        meta_grp.create_dataset("bin_start", data=np.array(meta_bin_start, dtype=np.int32))
-        meta_grp.create_dataset("bin_end", data=np.array(meta_bin_end, dtype=np.int32))
+                try:
+                    emb_all, bin_s, bin_e = extractor.get_ccre_embedding_all(
+                        chrom, start, end, use_rev_aug=args.use_rev_aug
+                    )
+                    # emb_all: [L_bins, C, H]
+                    for ci in range(len(celltypes)):
+                        emb_grps[ci].create_dataset(
+                            str(i), data=emb_all[:, ci, :].astype(np.float32), compression="gzip"
+                        )
+                        per_ct_meta[ci]["chrom"].append(chrom)
+                        per_ct_meta[ci]["start"].append(start)
+                        per_ct_meta[ci]["end"].append(end)
+                        per_ct_meta[ci]["bin_start"].append(bin_s)
+                        per_ct_meta[ci]["bin_end"].append(bin_e)
+                except Exception as e:
+                    logger.warning(f"Skipping cCRE {i} ({chrom}:{start}-{end}): {e}")
+                    zero_emb = np.zeros((1, extractor.celltype_hidden_dim), dtype=np.float32)
+                    for ci in range(len(celltypes)):
+                        emb_grps[ci].create_dataset(str(i), data=zero_emb, compression="gzip")
+                        per_ct_meta[ci]["chrom"].append(chrom)
+                        per_ct_meta[ci]["start"].append(start)
+                        per_ct_meta[ci]["end"].append(end)
+                        per_ct_meta[ci]["bin_start"].append(0)
+                        per_ct_meta[ci]["bin_end"].append(1)
 
-        # Top-level attributes
-        hf.attrs['H'] = extractor.celltype_hidden_dim
-        hf.attrs['C'] = extractor.celltype_num
-        hf.attrs['window_size'] = extractor.window_size
-        hf.attrs['celltype_list'] = json.dumps(extractor.celltypes_ordered)
-        hf.attrs['use_rev_aug'] = args.use_rev_aug
-        hf.attrs['n_ccres'] = len(bed)
+            # Write metadata and attributes for each file
+            dt_str = h5py.special_dtype(vlen=str)
+            for ci, (hf, ct, p) in enumerate(zip(hf_list, celltypes, ct_paths)):
+                m = per_ct_meta[ci]
+                mg = hf["metadata"]
+                mg.create_dataset("chrom", data=np.array(m["chrom"], dtype=object), dtype=dt_str)
+                mg.create_dataset("start", data=np.array(m["start"], dtype=np.int32))
+                mg.create_dataset("end", data=np.array(m["end"], dtype=np.int32))
+                mg.create_dataset("bin_start", data=np.array(m["bin_start"], dtype=np.int32))
+                mg.create_dataset("bin_end", data=np.array(m["bin_end"], dtype=np.int32))
+                hf.attrs['H'] = extractor.celltype_hidden_dim
+                hf.attrs['C'] = extractor.celltype_num
+                hf.attrs['window_size'] = extractor.window_size
+                hf.attrs['celltype_list'] = json.dumps(extractor.celltypes_ordered)
+                hf.attrs['use_rev_aug'] = args.use_rev_aug
+                hf.attrs['n_ccres'] = len(bed)
+                hf.attrs['total_n_ccres'] = len(bed_full)
+                hf.attrs['rank'] = args.rank
+                hf.attrs['world_size'] = args.world_size
+                hf.attrs['celltype'] = ct
+                hf.attrs['celltype_idx'] = extractor.celltype_to_idx[ct]
+                logger.info(f"Saved embeddings for '{ct}' to {p}")
+        finally:
+            for hf in hf_list:
+                hf.close()
 
-    logger.info(f"Saved {len(bed)} cCRE embeddings to {output_path}")
+    else:
+        # Single-cell-type mode (original behaviour)
+        meta_chrom: list[str] = []
+        meta_start: list[int] = []
+        meta_end: list[int] = []
+        meta_celltype: list[str] = []
+        meta_celltype_idx: list[int] = []
+        meta_bin_start: list[int] = []
+        meta_bin_end: list[int] = []
+
+        with h5py.File(output_path, 'w') as hf:
+            emb_grp = hf.create_group("embeddings")
+            meta_grp = hf.create_group("metadata")
+
+            for i, row in tqdm(bed.iterrows(), total=len(bed), desc="Extracting embeddings"):
+                chrom = str(row.iloc[0])
+                start = int(row.iloc[1])
+                end = int(row.iloc[2])
+                celltype = str(row.iloc[3])
+
+                try:
+                    emb, bin_s, bin_e = extractor.get_ccre_embedding(
+                        chrom, start, end, celltype, use_rev_aug=args.use_rev_aug
+                    )
+                    celltype_idx = extractor.celltype_to_idx[celltype]
+                except Exception as e:
+                    logger.warning(f"Skipping cCRE {i} ({chrom}:{start}-{end} {celltype}): {e}")
+                    emb = np.zeros((1, extractor.celltype_hidden_dim), dtype=np.float32)
+                    bin_s = 0
+                    bin_e = 1
+                    celltype_idx = -1
+
+                emb_grp.create_dataset(str(i), data=emb.astype(np.float32), compression="gzip")
+
+                meta_chrom.append(chrom)
+                meta_start.append(start)
+                meta_end.append(end)
+                meta_celltype.append(celltype)
+                meta_celltype_idx.append(celltype_idx)
+                meta_bin_start.append(bin_s)
+                meta_bin_end.append(bin_e)
+
+            # Write metadata arrays
+            dt_str = h5py.special_dtype(vlen=str)
+            meta_grp.create_dataset("chrom", data=np.array(meta_chrom, dtype=object), dtype=dt_str)
+            meta_grp.create_dataset("start", data=np.array(meta_start, dtype=np.int32))
+            meta_grp.create_dataset("end", data=np.array(meta_end, dtype=np.int32))
+            meta_grp.create_dataset("celltype", data=np.array(meta_celltype, dtype=object), dtype=dt_str)
+            meta_grp.create_dataset("celltype_idx", data=np.array(meta_celltype_idx, dtype=np.int32))
+            meta_grp.create_dataset("bin_start", data=np.array(meta_bin_start, dtype=np.int32))
+            meta_grp.create_dataset("bin_end", data=np.array(meta_bin_end, dtype=np.int32))
+
+            # Top-level attributes
+            hf.attrs['H'] = extractor.celltype_hidden_dim
+            hf.attrs['C'] = extractor.celltype_num
+            hf.attrs['window_size'] = extractor.window_size
+            hf.attrs['celltype_list'] = json.dumps(extractor.celltypes_ordered)
+            hf.attrs['use_rev_aug'] = args.use_rev_aug
+            hf.attrs['n_ccres'] = len(bed)
+            hf.attrs['total_n_ccres'] = len(bed_full)
+            hf.attrs['rank'] = args.rank
+            hf.attrs['world_size'] = args.world_size
+
+        logger.info(f"Saved {len(bed)} cCRE embeddings to {output_path}")
 
 
 if __name__ == "__main__":
