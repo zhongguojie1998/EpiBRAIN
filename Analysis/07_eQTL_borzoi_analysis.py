@@ -12,21 +12,35 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import roc_auc_score, average_precision_score
 
 parser = argparse.ArgumentParser(description='eQTL Borzoi track analysis')
-parser.add_argument('--brain_only', action='store_true',
-                    help='Only use brain-related tracks')
+parser.add_argument('--filter', type=str, default=None,
+                    choices=['brain', 'basal_ganglia', 'cortex', 'gtex_brain'],
+                    help='Filter tracks by region: brain, basal_ganglia, cortex, or gtex_brain')
 args = parser.parse_args()
-brain_only = args.brain_only
+track_filter = args.filter
 
 PWD = f'{os.environ["workingHOME"]}/BICAN'
 sys.path.append(f'{PWD}')
 os.chdir(f'{PWD}')
 # %% brain-only track filter option
 brain_track_pattern = (
-    r'brain|cerebr|hippocamp|hypothalam|amygdal|frontal.*(lobe|gyrus)|'
+    r'brain|cerebr|hippocamp|amygdal|'
+    r'frontal.*(lobe|gyrus|cortex|area)|'
     r'neuron|astrocyte|oligodendrocyte|microglia|cerebellum|thalamus|'
-    r'parietal|temporal lobe|occipital|putamen|caudate|substantia|'
+    r'parietal.*(lobe|cortex)|temporal.*(lobe|gyrus)|occipital|'
+    r'putamen|caudate|substantia|nucleus accumbens|cingulate|'
     r'spinal cord|neurosphere'
 )
+basal_ganglia_track_pattern = (
+    r'putamen|caudate|nucleus accumbens|globus pallidus|striatum|basal.ganglia'
+)
+cortex_track_pattern = (
+    r'cerebral cortex|frontal cortex|occipital cortex|parietal cortex|'
+    r'frontal.*(?:lobe|gyrus)|parietal lobe|temporal lobe|occipital.*(?:lobe|pole)|'
+    r'cingulate|prefrontal'
+)
+gtex_brain_track_pattern = r'^RNA:brain$'
+embryo_fetal_track_pattern = r'embryo|fetal|fetus|embryonic|prenatal|newborn'
+disease_track_pattern = r'disease|disorder|syndrome|cancer|tumor|tumour|carcinoma|leukemia|lymphoma|alzheimer|parkinson|huntington|autism|schizophrenia|epilepsy|atrophy|injury|stroke|glioma|glioblastoma'
 # %% read in eQTL files
 eqtl = pd.read_csv('Data/source/eQTL/all.vcf', sep='\t')
 eqtl_info = pd.read_csv('Data/source/eQTL/info.csv', sep=',')
@@ -235,11 +249,30 @@ for organ in ['All', 'Brain', 'Basal_ganglia', 'Cortex']:
     # load track annotations
     track_anno = pd.read_csv('borzoi.published.targets.txt', index_col=0, sep='\t')
     track_anno['modality'] = track_anno['file'].str.split('/').str[6]
-    if brain_only:
-        brain_mask = track_anno['description'].str.contains(brain_track_pattern, case=False, na=False)
-        brain_indices = track_anno.index[brain_mask].values
-        track_anno = track_anno.loc[brain_mask].reset_index(drop=True)
-        eqtl_scores = eqtl_scores[:, brain_indices]
+    # modality filter: keep CAGE, DNASE, RNA, and CHIP for H3K27ac/H3K27me3/H3K9me3 only
+    chip_histone_pattern = r'H3K27ac|H3K27me3|H3K9me3'
+    modality_mask = (
+        track_anno['description'].str.contains(r'\bCAGE\b|\bDNASE\b|\bDNase\b|\bRNA\b', case=False, na=False) |
+        track_anno['description'].str.contains(chip_histone_pattern, case=False, na=False)
+    )
+    modality_indices = track_anno.index[modality_mask].values
+    track_anno = track_anno[modality_mask].reset_index(drop=True)
+    eqtl_scores = eqtl_scores[:, modality_indices]
+    if track_filter:
+        filter_pattern_map = {
+            'brain': brain_track_pattern,
+            'basal_ganglia': basal_ganglia_track_pattern,
+            'cortex': cortex_track_pattern,
+            'gtex_brain': gtex_brain_track_pattern,
+        }
+        embryo_fetal_mask = track_anno['description'].str.contains(embryo_fetal_track_pattern, case=False, na=False)
+        disease_mask = track_anno['description'].str.contains(disease_track_pattern, case=False, na=False)
+        track_mask = track_anno['description'].str.contains(filter_pattern_map[track_filter], case=False, na=False) & ~embryo_fetal_mask & ~disease_mask
+        track_indices = track_anno.index[track_mask].values
+        track_anno = track_anno.loc[track_mask].reset_index(drop=True)
+        # print number of tracks kept
+        print(f'Organ: {organ}, Filter: {track_filter}, Tracks kept: {len(track_indices)}\n{track_anno["description"].values}')
+        eqtl_scores = eqtl_scores[:, track_indices]
     track_anno['organ'] = organ
     # get overall precision recall
     for group in ['all', '<3k', '3k-12k', '12k-35k', '>35k']:
@@ -277,7 +310,7 @@ for organ in ['All', 'Brain', 'Basal_ganglia', 'Cortex']:
 # %% add annotation
 track_results['mod'] = 'borzoi'
 # %% save results
-suffix = '_brain' if brain_only else ''
+suffix = f'_{track_filter}' if track_filter else ''
 track_results.to_csv(f'Data/source/eQTL/borzoi_track_results{suffix}.csv')
 # %% plot
 organs = ['All', 'Brain', 'Basal_ganglia']

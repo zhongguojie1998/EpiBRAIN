@@ -19,6 +19,8 @@ sys.path.append(PWD)
 # load the bin level results
 bin_level_results = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/raw_data/Test_metric.csv', index_col=0)
 bin_level_results_orig = pd.read_csv('Res/full_finetune_original_loss/analysis_20/raw_data/Test_metric.csv', index_col=0)
+gene_level_results = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_metrics_rpkm.csv', index_col=0)
+gene_level_results_orig = pd.read_csv('Res/full_finetune_original_loss/analysis_20/gene_level/raw_data/Test_gene_metrics_rpkm.csv', index_col=0)
 # get the number of cells from meta data
 cell_type_meta = pd.read_csv('Data/data_config/basal_ganglia_miniatlas_drop_celltype_v1.csv', index_col=0)
 cell_type_meta.reset_index(inplace=True, drop=True)
@@ -30,8 +32,8 @@ bin_level_results['modality'] = bin_level_results['modality'].replace(
     {'RNAplus': 'RNA-', 'RNAminus': 'RNA+', 'K27Ac': 'H3K27ac', 'K27Me3': 'H3K27me3', 'K9Me3': 'H3K9me3'})
 bin_level_results_orig['modality'] = bin_level_results_orig['modality'].replace(
     {'RNAplus': 'RNA-', 'RNAminus': 'RNA+', 'K27Ac': 'H3K27ac', 'K27Me3': 'H3K27me3', 'K9Me3': 'H3K9me3'})
-bin_level_results = bin_level_results[bin_level_results['atlas_name'] == 'BasalGanglia']
-bin_level_results_orig = bin_level_results_orig[bin_level_results_orig['atlas_name'] == 'BasalGanglia']
+# bin_level_results = bin_level_results[bin_level_results['atlas_name'] == 'MiniAtlas']
+# bin_level_results_orig = bin_level_results_orig[bin_level_results_orig['atlas_name'] == 'MiniAtlas']
 
 
 # %% plot the density plots of PearsonR for each modality and atlas
@@ -76,6 +78,30 @@ ax.set_ylim(0, 1)
 ax.set_title('Comparison of Cell Type Head and No Cell Type Head Models')
 fig.tight_layout()
 fig.savefig('figures/Comparison_PearsonR_boxplot_celltype_head_vs_original.pdf')
+
+# %% plot relative change (%) per modality: violin + jitter + box
+bin_merged = bin_level_results[['exp', 'modality', 'PearsonR']].merge(
+    bin_level_results_orig[['exp', 'modality', 'PearsonR']],
+    on=['exp', 'modality'], suffixes=('_new', '_orig')
+)
+bin_merged['rel_change'] = (bin_merged['PearsonR_new'] - bin_merged['PearsonR_orig']) / bin_merged['PearsonR_orig'] * 100
+
+fig, ax = plt.subplots(figsize=(6, 4))
+modality_order = sorted(bin_merged['modality'].unique())
+sns.violinplot(data=bin_merged, x='modality', y='rel_change', order=modality_order,
+               ax=ax, inner=None, color='lightgray', linewidth=1)
+sns.boxplot(data=bin_merged, x='modality', y='rel_change', order=modality_order,
+            ax=ax, width=0.15, showfliers=False, boxprops=dict(zorder=2),
+            medianprops=dict(color='black'), whiskerprops=dict(linewidth=1),
+            capprops=dict(linewidth=1))
+sns.stripplot(data=bin_merged, x='modality', y='rel_change', order=modality_order,
+              ax=ax, size=3, alpha=0.6, jitter=True, color='steelblue', zorder=3)
+ax.axhline(0, color='black', lw=1, linestyle='--')
+ax.set_xlabel('Modality')
+ax.set_ylabel('Relative Change (%)')
+ax.set_title('Relative PearsonR Change: Cell Type Head vs Original')
+fig.tight_layout()
+fig.savefig('figures/Comparison_PearsonR_rel_change_violin_celltype_head_vs_original.pdf')
 
 
 
@@ -156,6 +182,25 @@ ax_scatter.set_title('ATAC-only vs Full Model')
 fig_scatter.tight_layout()
 fig_scatter.savefig('figures/Gene_level_PearsonR_comparison_ATAC_vs_Full_model.pdf')
 
+# %%
+# bar plot of relative change per cell type (Full vs ATAC-only)
+merged_res['rel_change'] = (merged_res['pearsonr_log_full'] - merged_res['pearsonr_log_atac_only']) / merged_res['pearsonr_log_atac_only'] * 100
+merged_res_sorted = merged_res.sort_values('rel_change', ascending=False)
+celltype_labels = merged_res_sorted['celltype'].str.replace('BasalGanglia-', '', regex=False)
+
+fig, ax = plt.subplots(figsize=(10, 4))
+colors = [palette_reversed.get(a, 'gray') for a in merged_res_sorted['atlas_name']]
+ax.bar(range(len(merged_res_sorted)), merged_res_sorted['rel_change'], color=colors)
+ax.set_xticks(range(len(merged_res_sorted)))
+ax.set_xticklabels(celltype_labels, rotation=45, ha='right', fontsize=8)
+ax.axhline(0, color='black', lw=1, linestyle='--')
+ax.set_xlabel('Cell Type')
+ax.set_ylabel('Relative Change (%)')
+ax.set_title('Gene-level PearsonR Relative Change: Full vs ATAC-only Model')
+fig.tight_layout()
+fig.savefig('figures/Gene_level_PearsonR_rel_change_barplot_Full_vs_ATAC_by_celltype.pdf')
+
+# %%
 # ============================================================================
 # Combined figure with 2 subplots (plot 1 wider than plot 3)
 # ============================================================================
@@ -282,7 +327,6 @@ ax.set_title('Model Comparison')
 # Save combined figure
 fig.tight_layout()
 fig.savefig('figures/Combined_PearsonR_analysis.pdf')
-
 
 # %% get gene level raw counts
 gene_pred_raw = pd.read_csv('Res/full_finetune_original_loss_celltype_head_dim8_linear/analysis_20/gene_level/raw_data/Test_gene_preds_raw_length.tsv', index_col=0, sep='\t')

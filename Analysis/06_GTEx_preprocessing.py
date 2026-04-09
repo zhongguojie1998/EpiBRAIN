@@ -9,6 +9,7 @@ getx_files = os.listdir('/gpfs/commons/groups/ren_lab/guojiezhong/Data/GTEx/v10/
 tissues = [f.split('/')[-1].replace('.v10.eQTLs.SuSiE_summary.parquet', '') for f in getx_files if f.endswith('.v10.eQTLs.SuSiE_summary.parquet')]
 # %%
 for tissue in tissues:
+# %%
     print(tissue)
     gtex = pd.read_parquet(f'/gpfs/commons/groups/ren_lab/guojiezhong/Data/GTEx/v10/SuSiE/{tissue}.v10.eQTLs.SuSiE_summary.parquet')
     gtex['chr'] = gtex['variant_id'].apply(lambda x: x.split('_')[0])
@@ -18,11 +19,14 @@ for tissue in tissues:
     gtex['build'] = gtex['variant_id'].apply(lambda x: x.split('_')[4])
     # filter to only contain snp
     gtex = gtex[(gtex['ref'].str.len() == 1) & (gtex['alt'].str.len() == 1)]
+    # filter to positive or negative
+    gtex = gtex[(gtex['pip'] >= 0.9) | (gtex['pip'] < 0.0001)].copy()
     #  read tss file
-    tss = pd.read_csv('/gpfs/commons/groups/ren_lab/guojiezhong/Data/GENCODE/v48/gencode.v48.hg38.sga', sep='\t', skipinitialspace=True, header=None)
+    tss = pd.read_csv('/gpfs/commons/groups/ren_lab/guojiezhong/Data/GENCODE/v39/gencode.v39.hg38.all.sga', sep='\t', skipinitialspace=True, header=None)
     tss.columns = ['chr', 'type', 'pos', 'strand', 'tag_counts', 'info']
     tss['transcript'] = tss['info'].apply(lambda x: x.split('..')[0])
     tss['gene'] = tss['info'].apply(lambda x: x.split('..')[1])
+    tss['gene_ID'] = tss['info'].apply(lambda x: x.split('..')[2])
     #  get closest distance to tss
     def get_closest_tss(row):
         chr = row['chr']
@@ -30,16 +34,23 @@ for tissue in tissues:
         if row['gene_name'] in tss['gene'].values:
             tss_sel = tss[tss['gene'] == row['gene_name']]
         else:
-            tss_sel = tss[tss['chr'] == chr]
+            # try gene id
+            if row['gene_name'] in tss['gene_ID'].values:
+                tss_sel = tss[tss['gene_ID'] == row['gene_name']]
+            else:
+                print(f"Gene {row['gene_name']} not found in TSS data, using chromosome-based search.")
+                tss_sel = tss[tss['chr'] == chr]
         if tss_sel.empty:
             return np.nan, np.nan, np.nan, np.nan
         tss_sel['distance'] = abs(tss_sel['pos'] - pos)
         closest_tss = tss_sel.loc[tss_sel['distance'].idxmin()]
         return closest_tss['transcript'], closest_tss['gene'], closest_tss['distance'], closest_tss['strand']
     gtex[['closest_transcript', 'closest_gene', 'closest_distance', 'closest_strand']] = gtex.apply(get_closest_tss, axis=1, result_type='expand')
-    #  filter to PIP ≥ 0.9
+# %% filter to PIP ≥ 0.9
     positive = gtex[gtex['pip'] >= 0.9].copy()
     negative = gtex[gtex['pip'] < 0.0001].copy() # PMID: 34099641
+    print(f"Positive variants: {len(positive)}, Negative variants: {len(negative)}")
+    print(f"{sum(positive['variant_id'].isin(negative['variant_id']))} variants are in both positive and negative sets.")
     if not positive.empty:
         positive.loc[positive.index, 'label'] = 'positive'
     if not negative.empty:
@@ -65,8 +76,8 @@ for tissue in tissues:
         vcf['biotype'] = all_group['biotype'].copy()
         vcf['pip'] = all_group['pip'].copy()
         vcf['af'] = all_group['af'].copy()
-        vcf.to_csv(f'../Data/source/eQTL/{tissue}/{group.replace('>', '_').replace('<', '_').replace('-', '_')}.vcf', sep='\t', index=False, header=True)
-    all.to_csv(f'../Data/source/eQTL/{tissue}/info.csv', index=False)
+        vcf.to_csv(f'../Data/source/eQTL/{tissue}/{group.replace('>', '_').replace('<', '_').replace('-', '_')}.v39.vcf', sep='\t', index=False, header=True)
+    all.to_csv(f'../Data/source/eQTL/{tissue}/info.v39.csv', index=False)
     all['tissue'] = tissue
     all_tissue = pd.concat([all_tissue, all], axis=0, ignore_index=True)
 for group in all_tissue['group'].unique().tolist() + ['all']:
@@ -79,6 +90,6 @@ for group in all_tissue['group'].unique().tolist() + ['all']:
         vcf['QUAL'] = '.'
         vcf['FILTER'] = '.'
         vcf['INFO'] = all_group['label'].copy()
-        vcf.to_csv(f'../Data/source/eQTL/{group.replace('>', '_').replace('<', '_').replace('-', '_')}.vcf', sep='\t', index=False, header=True)
-all_tissue.to_csv(f'../Data/source/eQTL/info.csv', index=False)
+        vcf.to_csv(f'../Data/source/eQTL/{group.replace('>', '_').replace('<', '_').replace('-', '_')}.v39.vcf', sep='\t', index=False, header=True)
+all_tissue.to_csv(f'../Data/source/eQTL/info.v39.csv', index=False)
 # %%
