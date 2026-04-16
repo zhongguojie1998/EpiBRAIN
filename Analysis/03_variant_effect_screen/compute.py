@@ -1,6 +1,8 @@
+import gzip
 import logging
 import os
 import pickle
+import re
 import sys
 import time
 import warnings
@@ -342,10 +344,147 @@ def get_model(checkpoint, device, config=None):
     return model, dna_tokenizer, myconfig
 
 
+def parse_vcf_gene_map(vcf_path):
+    """Parse VCF INFO column for gene_ID / gene_name.
+
+    Returns dict mapping (chr, pos, ref, alt) -> gene identifier (Ensembl version stripped).
+    Prefers gene_ID over gene_name.
+    """
+    open_func = gzip.open if vcf_path.endswith(".gz") else open
+    mode = "rt" if vcf_path.endswith(".gz") else "r"
+    gene_map = {}
+    with open_func(vcf_path, mode) as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 8:
+                continue
+            chrom, pos, _id, ref, alt, _qual, _filter, info = parts[:8]
+            try:
+                pos_i = int(pos)
+            except ValueError:
+                continue
+            ref = ref.strip().upper()
+            alt = alt.strip().upper()
+            gene_id = None
+            gene_name = None
+            for kv in info.split(";"):
+                if "=" not in kv:
+                    continue
+                k, v = kv.split("=", 1)
+                if k == "gene_ID":
+                    gene_id = v.strip()
+                elif k == "gene_name":
+                    gene_name = v.strip()
+            gene = gene_id if gene_id else gene_name
+            if gene:
+                gene = gene.split(".")[0]
+                gene_map[(chrom, pos_i, ref, alt)] = gene
+    return gene_map
+
+
+def parse_gtf_exons(gtf_path, gene_keys):
+    """Parse GTF for exon features; keep only genes whose id or name is in gene_keys.
+
+    Returns dict: gene_key -> list of (chrom, start_1based, end_1based) tuples (unique exons).
+    Keys are indexed by both stripped gene_id and gene_name to allow either lookup.
+    """
+    open_func = gzip.open if gtf_path.endswith(".gz") else open
+    mode = "rt" if gtf_path.endswith(".gz") else "r"
+    gid_re = re.compile(r'gene_id "([^"]+)"')
+    gname_re = re.compile(r'gene_name "([^"]+)"')
+    gene_exons = {}
+    with open_func(gtf_path, mode) as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 9 or parts[2] != "exon":
+                continue
+            chrom = parts[0]
+            try:
+                start = int(parts[3])
+                end = int(parts[4])
+            except ValueError:
+                continue
+            attrs = parts[8]
+            m_gid = gid_re.search(attrs)
+            m_gname = gname_re.search(attrs)
+            gid = m_gid.group(1).split(".")[0] if m_gid else None
+            gname = m_gname.group(1) if m_gname else None
+            for key in (gid, gname):
+                if key is not None and key in gene_keys:
+                    gene_exons.setdefault(key, set()).add((chrom, start, end))
+    return {k: list(v) for k, v in gene_exons.items()}
+
+
+def compute_gene_lfc_scores(pred_mut, pred_wt, task_ids, variant_info, gene_map, gene_exons, context_length, bin_size):
+    """Compute gene_lfc = log(mean_exon_bins(ALT)+eps) - log(mean_exon_bins(REF)+eps).
+
+    pred_mut, pred_wt: np.ndarray shape (B, L, T).
+    task_ids: shape (B,), task indices corresponding to rows of pred_*.
+    variant_info: dict task_index -> (chrom, pos, ref, alt).
+    gene_map: dict (chrom, pos, ref, alt) -> gene_id.
+    gene_exons: dict gene_id -> list of (chrom, start_1based, end_1based).
+    context_length: int, model input context length in bp.
+    bin_size: int, bp per output bin (from config.data.preprocess.window_size).
+
+    The L output bins are the center-cropped portion of the context window
+    (L*bin_size bp centered on the variant).
+
+    Returns (B, T) float32 array; rows for variants without exon overlap are NaN.
+    """
+    B, L, T = pred_wt.shape
+    covered = L * bin_size
+    crop_bp = (context_length - covered) // 2
+    eps = 0.001
+
+    scores = np.full((B, T), np.nan, dtype=np.float32)
+    for b in range(B):
+        tid = int(task_ids[b])
+        info = variant_info.get(tid)
+        if info is None:
+            continue
+        chrom, pos, ref, alt = info
+        gene = gene_map.get((chrom, int(pos), ref, alt))
+        if gene is None:
+            continue
+        exons = gene_exons.get(gene)
+        if not exons:
+            continue
+
+        # 0-based half-open model context window centered on the variant
+        context_start = (int(pos) - 1) - ((context_length - 1) // 2)
+        # Output bins cover [bins_start, bins_end), a center-crop of the context
+        bins_start = context_start + crop_bp
+        bins_end = bins_start + covered
+
+        mask = np.zeros(L, dtype=bool)
+        for ec, es, ee in exons:
+            if ec != chrom:
+                continue
+            es0 = es - 1
+            ee0 = ee
+            if ee0 <= bins_start or es0 >= bins_end:
+                continue
+            lo = max(0, (es0 - bins_start) // bin_size)
+            hi = min(L, (ee0 - bins_start + bin_size - 1) // bin_size)
+            if hi > lo:
+                mask[lo:hi] = True
+        if not mask.any():
+            continue
+        mean_alt = pred_mut[b, mask, :].mean(axis=0)
+        mean_ref = pred_wt[b, mask, :].mean(axis=0)
+        scores[b] = np.log(mean_alt + eps) - np.log(mean_ref + eps)
+    return scores
+
+
 def validate_score_names(score_names):
     """Validate and filter score names based on implemented scores."""
-    IMPLEMENTED_SCORES = {"raw_diff", "raw_log_diff", "l1_sum", "l2_sum", "log_square", 
-                          "local_raw_diff", "local_raw_log_diff", "local_l1_sum", "local_l2_sum", "local_log_square"}  # Add more score names as you implement them
+    IMPLEMENTED_SCORES = {"raw_diff", "raw_log_diff", "l1_sum", "l2_sum", "log_square",
+                          "local_raw_diff", "local_raw_log_diff", "local_l1_sum", "local_l2_sum", "local_log_square",
+                          "gene_lfc"}  # Add more score names as you implement them
     original_score_names = set(score_names)
     score_names = [name for name in score_names if name in IMPLEMENTED_SCORES]
 
@@ -430,7 +569,9 @@ def vep_score(pred_mut, pred_wt, score_name):
 @click.option("-s", "--score_names", multiple=True, help="Score names to compute (will read from HDF5 if not provided)")
 @click.option("--untransform", is_flag=True, default=False, help="Untransform predictions back to original scale")
 @click.option("--label_meta", type=str, help="Path to label metadata CSV file (required if --untransform is used)")
-def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, save_interval, precision, use_head, score_names, untransform, label_meta):
+@click.option("--gtf", type=str, help="Path to GENCODE GTF (required if 'gene_lfc' is in score_names)")
+@click.option("--vcf", type=str, help="Path to VCF with gene_ID/gene_name in INFO (required if 'gene_lfc' is in score_names)")
+def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, save_interval, precision, use_head, score_names, untransform, label_meta, gtf, vcf):
 
     # Sort task indices for optimal HDF5 access pattern
     task_indices = np.load(chunk_indices)
@@ -488,9 +629,53 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
 
     print(f"Score names: {score_names}")
 
+    # Set up gene_lfc auxiliary data (gene map from VCF, exon spans from GTF)
+    need_gene_lfc = "gene_lfc" in score_names
+    gene_map = None
+    gene_exons = None
+    variant_info = None
+    context_length_bp = None
+    bin_size_bp = None
+    if need_gene_lfc:
+        if not gtf or not vcf:
+            raise ValueError("--gtf and --vcf are required when 'gene_lfc' is in score_names")
+        print(f"Loading gene map from VCF: {vcf}")
+        gene_map = parse_vcf_gene_map(vcf)
+        print(f"  Loaded {len(gene_map)} variant->gene entries")
+        unique_genes = set(gene_map.values())
+        print(f"Loading exons for {len(unique_genes)} unique genes from GTF: {gtf}")
+        gene_exons = parse_gtf_exons(gtf, unique_genes)
+        print(f"  Loaded exons for {len(gene_exons)} genes")
+        context_length_bp = int(config.data.context_length)
+        bin_size_bp = int(config.data.preprocess.window_size)
+        print(f"  Using context_length={context_length_bp} bp, bin_size={bin_size_bp} bp")
+
     dataset = VariantDataset(hdf5_file, task_indices, dna_tokenizer)
+
+    # Build task_index -> (chr, pos, ref, alt) lookup for gene_lfc
+    if need_gene_lfc:
+        variant_info = {int(tid): (c, int(p), r, a) for (tid, c, p, r, a) in dataset.variants}
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True, drop_last=False, persistent_workers=True)
     trial_dims = load_label_meta_from_h5(hdf5_file)
+
+    # Remap rc_orig/rc_swap from full-dim space to positions within trial_dims,
+    # since predictions are sliced by trial_dims below (axis 2 size = len(trial_dims)).
+    if rc_swap_index is not None:
+        trial_dims_arr = np.asarray(trial_dims).astype(int)
+        dim_to_pos = {int(d): i for i, d in enumerate(trial_dims_arr)}
+        remapped_orig, remapped_swap = [], []
+        for o, s in zip(rc_orig_index, rc_swap_index):
+            o, s = int(o), int(s)
+            if o in dim_to_pos and s in dim_to_pos:
+                remapped_orig.append(dim_to_pos[o])
+                remapped_swap.append(dim_to_pos[s])
+        if remapped_orig:
+            rc_orig_index = np.array(remapped_orig, dtype=np.int64)
+            rc_swap_index = np.array(remapped_swap, dtype=np.int64)
+            print(f"Remapped rc swap index to trial_dims space: {len(remapped_orig)} pairs")
+        else:
+            rc_orig_index = rc_swap_index = None
+            print("No rc swap pairs survived trial_dims filter; disabling swap")
 
     print(f"Computing variant effects for chunk {chunk_id}...")
     start_time = time.time()
@@ -545,8 +730,14 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
                 pred_mut = untransform_predictions(pred_mut, label_meta=label_meta_df)
 
             # Calculate different scores based on score_names
+            valid_task_ids = task_ids[masks]
             for score_name in score_names:
-                scores = vep_score(pred_mut, pred_wt, score_name)
+                if score_name == "gene_lfc":
+                    scores = compute_gene_lfc_scores(
+                        pred_mut, pred_wt, valid_task_ids, variant_info, gene_map, gene_exons, context_length_bp, bin_size_bp
+                    )
+                else:
+                    scores = vep_score(pred_mut, pred_wt, score_name)
                 all_success_res[score_name].append(scores)
         all_success.append(task_ids[masks])
         all_error.append(task_ids[~masks])

@@ -80,6 +80,21 @@ def load_atac_peaks(peaks_bed):
     return pr.PyRanges(peaks)
 
 
+def load_subclass_peaks(peaks_tsv):
+    """Load per-subclass MACS3 peaks TSV (has header) into PyRanges.
+
+    Expected columns: chrom, start, end, name, score, strand, signal_value,
+    p_value, q_value, peak.
+    """
+    peaks = pd.read_csv(peaks_tsv, sep='\t')
+    peaks = peaks[['chrom', 'start', 'end']].copy()
+    peaks.columns = ['Chromosome', 'Start', 'End']
+    peaks['peak_id'] = (peaks['Chromosome'].astype(str) + ':' +
+                        peaks['Start'].astype(str) + '-' +
+                        peaks['End'].astype(str))
+    return pr.PyRanges(peaks)
+
+
 def load_eqtl_finemapped(eqtl_dir, tissues, pip_threshold):
     """Load and aggregate fine-mapped eQTL variants from multiple tissues."""
     all_variants = []
@@ -126,7 +141,11 @@ def main():
     parser = argparse.ArgumentParser(description='EpiBRAIN vs eQTL ATAC peak overlap')
     parser.add_argument('--h5-file', default='Data/source/GWAS/full_finetune.dim8.chk20.h5')
     parser.add_argument('--trait', default='Schizophrenia_fullinfo.sumstats')
-    parser.add_argument('--atac-peaks', default='Data/source/ATAC_peak/Subclass.filtered.peaks.bed')
+    parser.add_argument('--atac-peaks', default='Data/source/ATAC_peak/Subclass.filtered.peaks.bed',
+                        help='(Unused for per-cell-type overlap; kept for backward compat.)')
+    parser.add_argument('--subclass-peaks-dir',
+                        default='/gpfs/commons/groups/ren_lab/guojiezhong/Data/BICAN/ATAC-seq/Subclass.peaks',
+                        help='Directory with per-subclass MACS3 peak TSVs: {Subclass}.macs3.peak.tsv')
     parser.add_argument('--eqtl-dir', default='Data/source/eQTL')
     parser.add_argument('--pip-threshold', type=float, default=0.5)
     parser.add_argument('--top-pct', type=float, default=5.0,
@@ -139,19 +158,11 @@ def main():
     # --- Step 1: Load data ---
     variants, scores, track_names = load_variants_and_scores_from_h5(args.h5_file, args.trait)
 
-    print("\nLoading ATAC peaks...")
-    peaks_pr = load_atac_peaks(args.atac_peaks)
-
     print("\nLoading eQTL fine-mapped variants...")
     eqtl_df = load_eqtl_finemapped(args.eqtl_dir, BASAL_GANGLIA_EQTL_TISSUES, args.pip_threshold)
-
-    # --- Step 2: eQTL overlap with ATAC peaks (set_2, computed once) ---
-    print("\nOverlapping eQTL variants with ATAC peaks...")
     eqtl_pr = variants_to_pyranges(eqtl_df['chr'], eqtl_df['pos'])
-    set_2 = overlap_peaks(eqtl_pr, peaks_pr)
-    print(f"  set_2 (eQTL peaks): {len(set_2):,} peaks")
 
-    # --- Step 3: Per-subclass K27Ac quantile → overlap ---
+    # --- Step 2: Per-subclass K27Ac quantile → overlap (set_2 computed per cell type) ---
     k27ac_tracks = [(i, name) for i, name in enumerate(track_names)
                     if name.startswith('BasalGanglia-') and name.endswith('_K27Ac')]
     print(f"\nFound {len(k27ac_tracks)} BasalGanglia K27Ac tracks")
@@ -160,6 +171,18 @@ def main():
     for track_idx, track_name in k27ac_tracks:
         # Extract subclass name: BasalGanglia-{Subclass}_K27Ac → Subclass
         subclass = track_name.replace('BasalGanglia-', '').replace('_K27Ac', '')
+
+        # Load this subclass's ATAC peaks (cell-type-specific cCREs).
+        # Track names use '-' as separator; peak filenames use '_'.
+        subclass_fname = subclass.replace('-', '_')
+        peaks_tsv = os.path.join(args.subclass_peaks_dir, f'{subclass_fname}.macs3.peak.tsv')
+        if not os.path.exists(peaks_tsv):
+            print(f"  {subclass}: peaks file {peaks_tsv} not found, skipping")
+            continue
+        peaks_pr = load_subclass_peaks(peaks_tsv)
+
+        # set_2: eQTL cCREs restricted to this cell type's peaks
+        set_2 = overlap_peaks(eqtl_pr, peaks_pr)
 
         k27ac_scores = scores[:, track_idx]
 
@@ -174,7 +197,7 @@ def main():
             print(f"  {subclass}: 0 variants in top {args.top_pct}%, skipping")
             continue
 
-        # Overlap top variants with ATAC peaks → set_1
+        # Overlap top variants with this cell type's ATAC peaks → set_1
         top_pr = variants_to_pyranges(top_variants['CHR'], top_variants['BP'])
         set_1 = overlap_peaks(top_pr, peaks_pr)
 

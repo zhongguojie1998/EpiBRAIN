@@ -23,6 +23,8 @@
 # --merge if set, only run the merge step (skip all processing steps)
 # --timeout is timeout in seconds for waiting for all chunks to complete, optional (if not specified, defaults based on input type: 24h for VCF, 48h for filelist)
 # --untransform if set, untransform predictions back to original scale (requires --label_meta)
+# --gene_lfc if set, also compute gene-level LFC score (requires --gtf and --vcf with gene_ID/gene_name in INFO)
+# --gtf path to GENCODE GTF (used only when --gene_lfc is set)
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -93,6 +95,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --untransform)
             UNTRANSFORM="true"
+            shift 1
+            ;;
+        --gtf)
+            GTF_FILE="$2"
+            shift 2
+            ;;
+        --gene_lfc)
+            GENE_LFC="true"
             shift 1
             ;;
         *)
@@ -245,6 +255,12 @@ if [ "$MERGE_ONLY" != "true" ]; then
         LOAD_EXISTING_FLAG="--load_existing $LOAD_EXISTING"
     fi
 
+    # Build score_names args; add gene_lfc if requested
+    SCORE_ARGS="-s raw_diff -s raw_log_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_raw_log_diff -s local_l1_sum -s local_l2_sum -s local_log_square"
+    if [ "$GENE_LFC" = "true" ]; then
+        SCORE_ARGS="$SCORE_ARGS -s gene_lfc"
+    fi
+
     # Only run init_tasks if H5 file doesn't exist or force flag is on or load_existing is specified or force-init is on
     if [ ! -f "$H5_FILE" ] || [ "$FORCE" = "true" ] || [ -n "$LOAD_EXISTING" ] || [ "$FORCE_INIT" = "true" ]; then
         if [ -n "$VCF_FILE" ]; then
@@ -252,13 +268,13 @@ if [ "$MERGE_ONLY" != "true" ]; then
             python Analysis/03_variant_effect_screen/init_tasks.py -f "$VCF_FILE" \
                 -h5 "$H5_FILE" \
                 -l "$LABEL_META" \
-                -e "$EXPERIMENT" -s raw_diff -s raw_log_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_raw_log_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG $LOAD_EXISTING_FLAG
+                -e "$EXPERIMENT" $SCORE_ARGS $FORCE_FLAG $LOAD_EXISTING_FLAG
         else
             # Filelist mode
             python Analysis/03_variant_effect_screen/init_tasks.py -fl "$FILE_LIST" \
                 -h5 "$H5_FILE" \
                 -l "$LABEL_META" \
-                -e "$EXPERIMENT" -s raw_diff -s raw_log_diff -s l1_sum -s l2_sum -s log_square -s local_raw_diff -s local_raw_log_diff -s local_l1_sum -s local_l2_sum -s local_log_square $FORCE_FLAG $LOAD_EXISTING_FLAG
+                -e "$EXPERIMENT" $SCORE_ARGS $FORCE_FLAG $LOAD_EXISTING_FLAG
         fi
     else
         echo "H5 file already exists and neither --force nor --force-init specified. Skipping init_tasks."
@@ -302,8 +318,18 @@ if [ "$MERGE_ONLY" != "true" ]; then
         UNTRANSFORM_ARGS="--untransform --label_meta $LABEL_META"
     fi
 
+    # Build gene_lfc arguments (GTF/VCF passthrough to compute.py)
+    GENE_LFC_ARGS=""
+    if [ "$GENE_LFC" = "true" ]; then
+        if [ -z "$GTF_FILE" ] || [ -z "$VCF_FILE" ]; then
+            echo "Error: --gtf and --vcf are required when --gene_lfc is enabled"
+            exit 1
+        fi
+        GENE_LFC_ARGS="--gtf $GTF_FILE --vcf $VCF_FILE"
+    fi
+
     python Analysis/03_variant_effect_screen/assign_tasks.py -h5 "$H5_FILE" \
-        -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path $UNTRANSFORM_ARGS
+        -o "$JOB_SCRIPT_PATH" -m "$MODEL_FILE" -c Analysis/03_variant_effect_screen/compute.py $G_ARGS --abs_path $UNTRANSFORM_ARGS $GENE_LFC_ARGS
 
     # Job submission based on mode
     RESULTS_DIR="$(realpath "$(dirname "$H5_FILE")")/${H5_BASENAME}_chunk_results"

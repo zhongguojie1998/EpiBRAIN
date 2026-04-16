@@ -1,0 +1,34 @@
+{
+  "output_dir": "Analysis/07_eQTL_new/output.ag_like/",
+  "vcf": "Data/source/eQTL/alphagenome/ag_like.brain.vcf",
+  "info": "Data/source/eQTL/alphagenome/ag_like.brain.info.csv",
+  "exclude": "Data/source/eQTL/alphagenome/ag_like.exclude_variants.txt",
+  "models": {
+    "bican": {
+      "type": "bican",
+      "h5": "Data/source/eQTL/alphagenome/EpiBRAIN/EpiBRAIN.ag_like.brain.h5",
+      "score_name": "results/gene_lfc",
+      "score_transform": "abs",
+      "track_anno": "logs/full_finetune_original_loss_celltype_head_dim8_linear/regression_label_meta.csv"
+    },
+    "borzoi": {
+      "type": "borzoi",
+      "h5": "Data/source/eQTL/alphagenome/Borzoi/borzoi.ag_like.brain.h5",
+      "score_name": "results/gene_lfc",
+      "score_transform": "abs",
+      "track_anno": "borzoi.published.targets.txt"
+    },
+    "alphagenome_524k": {
+      "type": "alphagenome",
+      "h5": "/gpfs/commons/groups/ren_lab/guojiezhong/alphagenome-pytorch/eQTL.ag_like.524k/merged.h5",
+      "score_name": "scores/{head}/gene_abs_lfc",
+      "track_anno": "Analysis/16_alphagenome/alphagenome.predictions.track.catalog.csv",
+      "heads": ["atac", "cage", "chip_histone", "chip_tf", "dnase", "procap", "rna_seq"]
+    }
+  },
+  "plot_name": {                                                                                                              
+    "bican": "EpiBRAIN",                                                                                                        
+    "borzoi": "Borzoi",                                                              
+    "alphagenome_524k": "AlphaGenome 524k"                                                                                      
+  }
+}

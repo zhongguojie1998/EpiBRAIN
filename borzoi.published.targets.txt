@@ -7538,9 +7538,9 @@
 7536	GTEX-Y3IK-2826-SM-4WWDW.1	/home/drk/tillage/datasets/human/rna/recount3/blood_vessel/GTEX-Y3IK-2826-SM-4WWDW.1/coverage.w5	768	384	0.01	sum_sqrt	7536	RNA:blood_vessel
 7537	K-562-SM-5KM2I.1	/home/drk/tillage/datasets/human/rna/recount3/bone_marrow/K-562-SM-5KM2I.1/coverage.w5	768	384	0.01	sum_sqrt	7537	RNA:bone_marrow
 7538	K-562-SM-7LG4B.1	/home/drk/tillage/datasets/human/rna/recount3/bone_marrow/K-562-SM-7LG4B.1/coverage.w5	768	384	0.01	sum_sqrt	7538	RNA:bone_marrow
-7539	GTEX-13FTY-0011-R11a-SM-5IJEA.1	/home/drk/tillage/datasets/human/rna/recount3/brain/GTEX-13FTY-0011-R11a-SM-5IJEA.1/coverage.w5	768	384	0.01	sum_sqrt	7539	RNA:brain
-7540	GTEX-1EX96-0011-R4a-SM-ARU82.1	/home/drk/tillage/datasets/human/rna/recount3/brain/GTEX-1EX96-0011-R4a-SM-ARU82.1/coverage.w5	768	384	0.01	sum_sqrt	7540	RNA:brain
-7541	GTEX-1H3O1-1726-SM-9WYSR.1	/home/drk/tillage/datasets/human/rna/recount3/brain/GTEX-1H3O1-1726-SM-9WYSR.1/coverage.w5	768	384	0.01	sum_sqrt	7541	RNA:brain
+7539	GTEX-13FTY-0011-R11a-SM-5IJEA.1	/home/drk/tillage/datasets/human/rna/recount3/brain/GTEX-13FTY-0011-R11a-SM-5IJEA.1/coverage.w5	768	384	0.01	sum_sqrt	7539	RNA:brain - Brain_Cerebellar_Hemisphere
+7540	GTEX-1EX96-0011-R4a-SM-ARU82.1	/home/drk/tillage/datasets/human/rna/recount3/brain/GTEX-1EX96-0011-R4a-SM-ARU82.1/coverage.w5	768	384	0.01	sum_sqrt	7540	RNA:brain - Brain_Amygdala
+7541	GTEX-1H3O1-1726-SM-9WYSR.1	/home/drk/tillage/datasets/human/rna/recount3/brain/GTEX-1H3O1-1726-SM-9WYSR.1/coverage.w5	768	384	0.01	sum_sqrt	7541	RNA:brain - Brain_Cortex
 7542	GTEX-13W3W-1226-SM-5LU4H.1	/home/drk/tillage/datasets/human/rna/recount3/breast/GTEX-13W3W-1226-SM-5LU4H.1/coverage.w5	768	384	0.01	sum_sqrt	7542	RNA:breast
 7543	GTEX-1GN1W-1926-SM-7P8TH.1	/home/drk/tillage/datasets/human/rna/recount3/breast/GTEX-1GN1W-1926-SM-7P8TH.1/coverage.w5	768	384	0.01	sum_sqrt	7543	RNA:breast
 7544	GTEX-ZYT6-0126-SM-5E45J.1	/home/drk/tillage/datasets/human/rna/recount3/breast/GTEX-ZYT6-0126-SM-5E45J.1/coverage.w5	768	384	0.01	sum_sqrt	7544	RNA:breast

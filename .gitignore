@@ -70,7 +70,11 @@ Analysis/16_alphagenome/
 Analysis/17_MAGMA/
 Analysis/chrom_emb/
 Analysis/gradient_input_miniatlas/
-Analysis/07_eQTL_new/
+Analysis/archive/
+Analysis/07_eQTL/distance_qc/
+Analysis/07_eQTL/logs*/
+Analysis/07_eQTL/output*/
+Analysis/07_eQTL/*.feather
 
 # add config files
 !logs/full_finetune_original_loss_celltype_head_dim8_linear_full_atlas/overall_setting.yaml

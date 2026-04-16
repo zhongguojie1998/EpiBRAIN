@@ -1,0 +1,49 @@
+{
+  "output_dir": "Analysis/07_eQTL_new/output",
+  "output_dir_addition": "Analysis/07_eQTL_new/output.addition",
+  "neg_addition_vcf": "Data/source/eQTL/negative_addition.vcf",
+  "tissue_vcf_files": {
+    "vcf": "all.v39.vcf",
+    "info": "info.v39.csv"
+  },
+  "models": {
+    "bican": {
+      "type": "bican",
+      "h5": "Data/source/eQTL/full_finetune.dim8.chk20.h5",
+      "h5_addition": "Data/source/eQTL/full_finetune.dim8.chk20.additional.h5",
+      "score_name": "results/log_square",
+      "track_anno": "logs/full_finetune_original_loss_celltype_head_dim8_linear/regression_label_meta.csv"
+    },
+    "borzoi": {
+      "type": "borzoi",
+      "h5": "Data/source/eQTL/borzoi_res.h5",
+      "h5_addition": "Data/source/eQTL/borzoi_res.additional.h5",
+      "score_name": "results/log_square",
+      "track_anno": "borzoi.published.targets.txt"
+    },
+    "alphagenome131k": {
+      "type": "alphagenome",
+      "h5": "../alphagenome-pytorch/eQTL.131k/merged.h5",
+      "h5_addition": "../alphagenome-pytorch/eQTL.131k.addition/merged.h5",
+      "score_name": "scores/{head}/l2_sum",
+      "track_anno": "Analysis/16_alphagenome/alphagenome.predictions.track.catalog.csv",
+      "heads": ["atac", "cage", "chip_histone", "chip_tf", "dnase", "procap", "rna_seq"]
+    },
+    "alphagenome524k": {
+      "type": "alphagenome",
+      "h5": "../alphagenome-pytorch/eQTL.524k/merged.h5",
+      "h5_addition": "../alphagenome-pytorch/eQTL.524k.addition/merged.h5",
+      "score_name": "scores/{head}/l2_sum",
+      "track_anno": "Analysis/16_alphagenome/alphagenome.predictions.track.catalog.csv",
+      "heads": ["atac", "cage", "chip_histone", "chip_tf", "dnase", "procap", "rna_seq"]
+    },
+    "alphagenome1m": {
+      "type": "alphagenome",
+      "h5": "../alphagenome-pytorch/eQTL.1M/merged.h5",
+      "h5_addition": "../alphagenome-pytorch/eQTL.1M.addition/merged.h5",
+      "score_name": "scores/{head}/l2_sum",
+      "track_anno": "Analysis/16_alphagenome/alphagenome.predictions.track.catalog.csv",
+      "heads": ["atac", "cage", "chip_histone", "chip_tf", "dnase", "procap", "rna_seq"]
+    }
+  }
+}

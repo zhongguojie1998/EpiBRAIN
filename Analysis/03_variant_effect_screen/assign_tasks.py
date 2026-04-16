@@ -104,6 +104,8 @@ def assign_tasks_to_compute(task_indices, compute_assignments):
 @click.option("--abs_path", is_flag=True, help="Use absolute paths for scripts and model")
 @click.option("--untransform", is_flag=True, help="Untransform predictions back to original scale")
 @click.option("--label_meta", type=str, help="Path to label metadata CSV file (required if --untransform is used)")
+@click.option("--gtf", type=str, help="Path to GENCODE GTF (required if 'gene_lfc' is in score_names)")
+@click.option("--vcf", type=str, help="Path to VCF with gene_ID/gene_name in INFO (required if 'gene_lfc' is in score_names)")
 def main(
     hdf5_file,
     output_dir,
@@ -117,6 +119,8 @@ def main(
     abs_path,
     untransform,
     label_meta,
+    gtf,
+    vcf,
 ):
     """Distribute variant effect computation tasks"""
 
@@ -133,6 +137,10 @@ def main(
         output_dir = os.path.abspath(output_dir)
         if label_meta:
             label_meta = os.path.abspath(label_meta)
+        if gtf:
+            gtf = os.path.abspath(gtf)
+        if vcf:
+            vcf = os.path.abspath(vcf)
         PYTHON = sys.executable
     else:
         PYTHON = "python"
@@ -184,9 +192,17 @@ def main(
         if untransform:
             untransform_args = f"--untransform \\\n  --label_meta {label_meta} \\\n  "
 
+        # Build gene_lfc arguments (GTF/VCF passthrough to compute.py)
+        gene_lfc_args = ""
+        if "gene_lfc" in score_names:
+            if not gtf or not vcf:
+                raise ValueError("--gtf and --vcf are required when 'gene_lfc' is in score_names")
+            gene_lfc_args = f"--gtf {gtf} \\\n  --vcf {vcf} \\\n  "
+
         with open(script_path, "w") as f:
             f.write(
                 f"""#!/bin/bash
+export TORCHINDUCTOR_CACHE_DIR=/scratch/torchinductor_guojiezhong_chunk_{chunk_id}
 {PYTHON} -u {compute_script} \\
   --hdf5_file {hdf5_file} \\
   --chunk_indices {output_dir}/chunk_{chunk_id}_indices.npy \\
@@ -196,7 +212,7 @@ def main(
   --save_interval {save_interval} \\
   --precision {precision} \\
   --use_head {use_head} \\
-  {untransform_args}{score_names_args}
+  {untransform_args}{gene_lfc_args}{score_names_args}
 """
             )
         os.chmod(script_path, 0o755)
