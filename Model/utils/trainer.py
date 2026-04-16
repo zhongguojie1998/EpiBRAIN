@@ -363,7 +363,7 @@ class DNASeqModelTrainer:
                     full_info.loc[p, ["cell_type", "modality"]] = [i, j]
                 task_label_meta = full_info.merge(
                     task_label_meta, on=["cell_type", "modality"], how="left"
-                ).dropna()
+                ).dropna(subset=["trial"])
 
             task_label_meta["label_dim"] = range(len(task_label_meta))
             # move index to column, and move to front

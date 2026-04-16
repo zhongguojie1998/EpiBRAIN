@@ -65,17 +65,29 @@ def get_trail_value_mp(
     task = trial["task"]
     seqs_cov_file = f"{storage_path}/labels/{task}_{exp}.h5"
 
+    # helper: treat NaN from CSV as missing (use default)
+    def _get(key, default):
+        val = trial.get(key, default)
+        if val is None:
+            return default
+        try:
+            if pd.isna(val):
+                return default
+        except (TypeError, ValueError):
+            pass
+        return val
+
     # for data transformation
-    sum_stat = trial.get("sum_stat", "sum")
-    baseline_pct = trial.get("baseline_pct", 0.5)
-    umap_pct = trial.get("umap_pct", 0.5)
-    scale = trial.get("scale", 1)
-    extreme_clip_pct = trial.get("extreme_clip_pct", None)
-    offset = trial.get("offset", None)
-    anchor_target = trial.get("anchor_target", None)
-    anchor_pct = trial.get("anchor_pct", 0.999)
-    clip = trial.get("clip", None)
-    clipsoft = trial.get("clip_soft", None)
+    sum_stat = _get("sum_stat", "sum")
+    baseline_pct = _get("baseline_pct", 0.5)
+    umap_pct = _get("umap_pct", 0.5)
+    scale = _get("scale", 1)
+    extreme_clip_pct = _get("extreme_clip_pct", None)
+    offset = _get("offset", None)
+    anchor_target = _get("anchor_target", None)
+    anchor_pct = _get("anchor_pct", 0.999)
+    clip = _get("clip", None)
+    clipsoft = _get("clip_soft", None)
 
     if os.path.exists(seqs_cov_file) and not restart:
         logger.info("Skipping existing %s" % seqs_cov_file)
