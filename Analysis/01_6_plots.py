@@ -929,20 +929,27 @@ bin_level_results = bin_level_results.merge(cell_type_meta, left_on='trial', rig
 # rename modality of RNA strands
 bin_level_results['modality'] = bin_level_results['modality'].replace(
     {'RNAplus': 'RNA-', 'RNAminus': 'RNA+', 'K27Ac': 'H3K27ac', 'K27Me3': 'H3K27me3', 'K9Me3': 'H3K9me3'})
+# calibrate the basal ganglia
+basal_ganglia_calibrate = pd.read_csv('Data/source/BGC_cell_type_counts.csv', index_col=0)
+basal_ganglia_calibrate.index = basal_ganglia_calibrate.index.str.replace(' ', '-')
+basal_ganglia_calibrate.index = 'BasalGanglia-' + basal_ganglia_calibrate.index
+# update celltype_n for ATAC modality using calibrated basal ganglia counts
+atac_mask = (bin_level_results['modality'] == 'ATAC') & (bin_level_results['celltype'].isin(basal_ganglia_calibrate.index))
+bin_level_results.loc[atac_mask, 'celltype_n'] = bin_level_results.loc[atac_mask, 'celltype'].map(basal_ganglia_calibrate['ATAC'])
 # plot PearsonR vs number of cells
 # log transform the cell type number
 bin_level_results['log_celltype_n'] = np.log10(bin_level_results['celltype_n'])
-# create bins for cell type sizes
-bin_level_results['celltype_bin'] = pd.cut(bin_level_results['log_celltype_n'], bins=10)
+# create bins for cell type sizes per modality
+bin_level_results['celltype_bin'] = bin_level_results.groupby('modality')['log_celltype_n'].transform(
+    lambda x: pd.cut(x, bins=10)
+)
 # calculate mean and standard error for each bin and modality
 grouped_stats = bin_level_results.groupby(['celltype_bin', 'modality'])['PearsonR'].agg(['mean', 'sem', 'count']).reset_index()
 # get bin centers for plotting
 grouped_stats['bin_center'] = grouped_stats['celltype_bin'].apply(lambda x: x.mid)
 
 fig, ax = plt.subplots(figsize=(6, 4))
-modalities = grouped_stats['modality'].unique()
-modalities = modalities[modalities != 'RNA+']  # exclude RNA+ and RNA- for this plot
-modalities = modalities[modalities != 'RNA-']
+modalities = ['ATAC', 'H3K27ac', 'H3K27me3', 'H3K9me3']
 palette = sns.color_palette()
 for i, modality in enumerate(modalities):
     modality_data = grouped_stats[grouped_stats['modality'] == modality]

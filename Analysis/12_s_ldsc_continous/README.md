@@ -1,91 +1,77 @@
-# S-LDSC Pipeline for Continuous Annotations
+# Analysis 12: S-LDSC continuous & variant-overlap pipelines
 
-This directory contains a complete pipeline for stratified LD score regression (S-LDSC) analysis using continuous annotations.
+Two independent pipelines organized into subdirectories. All scripts expect the
+working directory to be the **project root** (`/gpfs/commons/groups/ren_lab/guojiezhong/BICAN`)
+unless noted.
 
-## Overview
-
-The pipeline follows the procedure described in Gazal et al. (2017) and the LDSC wiki for analyzing partitioned heritability using continuous annotations.
-
-## Pipeline Steps
-
-### Step 1: Create Annotation Files
-**Script**: `01_create_annotation_files.py`
-
-Creates annotation files from continuous values.
-
-**Output**: `annotations/*/` - Annotation files for each track
-
-### Step 2: Compute LD Scores
-**Script**: `slurm_02_compute_ld_per_chrom.sh`
-
-Computes LD scores for each track-chromosome combination.
-
-**Output**: `annotations/*/*.l2.ldscore.gz`
-
-### Step 3: Run S-LDSC Regression
-**Script**: `slurm_03_regression_per_track.sh`
-
-Runs partitioned heritability analysis.
-
-**Output**: `results/*.results`, `results/*.part_delete`
-
-### Step 4: Quantile Enrichment Analysis
-**Script**: `04_quantile_enrichment.sh`
-
-Partitions continuous annotations into quantiles and computes enrichment.
-
-**Output**: `quantile_results/*.quantile_h2g.txt`, `quantile_results/summary_enrichment.txt`
-
-### Step 5: Visualization
-**Script**: `05_plot_quantile_enrichment.R`
-
-Creates plots of quantile enrichment results.
-
-**Output**: `quantile_results/enrichment_plot_*.pdf`
-
-## Running the Pipeline
-
-### Full Pipeline
-```bash
-./run_pipeline_ultra_parallel.sh
+```
+heritability/      # Pipeline A — partitioned heritability (S-LDSC)
+overlap/           # Pipeline B — variant overlap counts (no heritability)
+annotations_by_trait/ results_by_trait/ quantile_results_by_trait/
+ccre_ldsc/  results_overlap/  logs/  track_lists/
+listHM3.txt  w_hm3.snplist  hapmap3_snps/
+archive/           # Legacy scripts (run_pipeline.sh, 05_plot_quantile_enrichment.R)
 ```
 
-### Only "all" Track
-```bash
-./run_pipeline_ultra_parallel.sh --only-all
-```
+---
 
-### Individual Steps
-```bash
-# Step 4: Quantile enrichment
-./04_quantile_enrichment.sh
+## Pipeline A — Heritability
 
-# Step 5: Visualization
-Rscript 05_plot_quantile_enrichment.R
-```
+Entry point: `heritability/run_heritability_pipeline.sh` (was `run_pipeline_ultra_parallel.sh`).
+It orchestrates the four annotation variants below by driving the `continuous/` subfolder.
 
-## Interpreting Results
+### A1. Continuous annotation from model `.h5` predictions (default, 20-quantile)
+`heritability/continuous/`
+- `00_extract_trait_from_h5.py` — extract trait predictions + sumstats from `.h5`; liftover hg38→hg19.
+- `01_create_annotation_files.py` — per-chrom per-track `.annot.gz` files.
+- `02_compute_ld_scores.sh` (+ `02a_slurm_compute_ld_per_chrom.sh`) — LD scores per track×chrom.
+- `03_run_sldsc_regression.sh` (+ `03a_slurm_regression_per_track.sh`) — S-LDSC regression.
+- `04_quantile_enrichment.sh` — quantile-stratified h² (default 20 quantiles).
+- `05_plot_quantile_enrichment.py` — enrichment plots. *Run from `Analysis/12_s_ldsc_continous/`.*
 
-### Quantile Enrichment
+Outputs: `annotations_by_trait/annotations_<TRAIT>/`, `results_by_trait/results_<TRAIT>/`, `quantile_results_by_trait/quantile_results_<TRAIT>/`.
 
-- **enr > 1**: Over-representation of heritability
-- **enr < 1**: Under-representation of heritability  
-- **enr_pval < 0.05**: Statistically significant enrichment
+### A2. Binary cCRE annotations
+`heritability/binary/`
+- `00_create_binary_annot.py` — 0/1 annotation from ATAC peak TSVs (optionally eQTL-restricted).
+- `01_ccre_full_ldsc.sh` — S-LDSC on full (unfiltered) cCRE annotations, per cell type (36-subclass SLURM array).
+- `02_ccre_eqtl_ldsc.sh` — S-LDSC on eQTL-restricted cCRE annotations.
 
-## Important Notes
+Outputs: `ccre_ldsc/{full,eqtl}/`, `ccre_ldsc/results_{full,eqtl}/`.
 
-1. **Continuous annotations**: Use quantile-based enrichment, not standard enrichment from .results files
-2. **Multiple testing**: Consider Bonferroni correction (p < 0.05/N_tracks)
-3. **Frequency files**: Generated automatically if missing
+### A3. Borzoi brain L2-sum annotation
+`heritability/borzoi_brain/`
+- `00_borzoi_brain_annot.py` — sum L2 of brain-related Borzoi tracks → continuous annotation.
+- `01_borzoi_brain_ldsc.sh` — S-LDSC + quantile enrichment on that annotation. Supports `--eqtl-matched` (reads `ccre_ldsc/results_eqtl/`).
 
+Outputs: `ccre_ldsc/borzoi_brain/`, `ccre_ldsc/results_borzoi_brain/`, `quantile_results_by_trait/quantile_results_<TRAIT>/borzoi_brain_*`.
 
-## Requirements
+### A4. Variable-quantile top-bin (eQTL-matched proportion)
+`heritability/variable_quantile/`
+- `00_compute_topbin_quantile_M.py` — 2-bin quantile_M in single pass.
+- `01_quantile_enrichment_based_on_eqtl.sh` — top-bin enrichment using proportion from `ccre_ldsc/results_eqtl/`.
 
-- **Conda environment**: `ldsc` (provides plink, perl, R, and LDSC tools)
-  ```bash
-  conda activate ldsc
-  ```
+Outputs: `quantile_results_by_trait/quantile_results_<TRAIT>/` (2-bin).
 
-- **Python packages**: numpy, pandas (for Step 1)
-- **R packages**: ggplot2, dplyr, tidyr (for Step 5 visualization)
+---
 
+## Pipeline B — Variant overlap counts (no heritability)
+
+`overlap/`
+- `00_overlap_eQTL.py` — count top-K% prioritized variants overlapping eQTL cCREs per cell type; two sources (EpiBRAIN K27Ac, Borzoi L2-sum).
+- `01_overlap_eQTL_by_quantile.sh` — SLURM array over thresholds {0.5, 1, 2, 3, 4, 5, 10}%.
+- `02_overlap_eQTL_by_quantile_plot.py` — bar plots comparing EpiBRAIN vs Borzoi.
+- `03_number_of_variants_overlap_eQTL_cCRE.py` — summary stats per subclass.
+- `04_number_of_variants_overlap_eQTL_cCRE.sh` — SLURM wrapper.
+
+Outputs: `results_overlap/`.
+
+---
+
+## Reference data (top level, unchanged)
+- `listHM3.txt`, `w_hm3.snplist`, `hapmap3_snps/` — HapMap3 SNP references.
+- `track_lists/` — per-trait track and track×chrom lists.
+- `example_visualizations.sh` — pyGenomeTracks example calls.
+
+## Archive
+`archive/` holds superseded scripts (`run_pipeline.sh`, `05_plot_quantile_enrichment.R`).

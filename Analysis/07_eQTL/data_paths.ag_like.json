@@ -1,5 +1,5 @@
 {
-  "output_dir": "Analysis/07_eQTL_new/output.ag_like/",
+  "output_dir": "Analysis/07_eQTL/output.ag_like/",
   "vcf": "Data/source/eQTL/alphagenome/ag_like.brain.vcf",
   "info": "Data/source/eQTL/alphagenome/ag_like.brain.info.csv",
   "exclude": "Data/source/eQTL/alphagenome/ag_like.exclude_variants.txt",
@@ -20,7 +20,7 @@
     },
     "alphagenome_524k": {
       "type": "alphagenome",
-      "h5": "/gpfs/commons/groups/ren_lab/guojiezhong/alphagenome-pytorch/eQTL.ag_like.524k/merged.h5",
+      "h5": "/gpfs/commons/groups/ren_lab/guojiezhong/alphagenome-pytorch/results/eQTL/eQTL.ag_like.524k/merged.h5",
       "score_name": "scores/{head}/gene_abs_lfc",
       "track_anno": "Analysis/16_alphagenome/alphagenome.predictions.track.catalog.csv",
       "heads": ["atac", "cage", "chip_histone", "chip_tf", "dnase", "procap", "rna_seq"]

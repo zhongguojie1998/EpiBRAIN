@@ -1,6 +1,6 @@
 {
-  "output_dir": "Analysis/07_eQTL_new/output",
-  "output_dir_addition": "Analysis/07_eQTL_new/output.addition",
+  "output_dir": "Analysis/07_eQTL/output",
+  "output_dir_addition": "Analysis/07_eQTL/output.addition",
   "neg_addition_vcf": "Data/source/eQTL/negative_addition.vcf",
   "tissue_vcf_files": {
     "vcf": "all.v39.vcf",

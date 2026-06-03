@@ -10,9 +10,20 @@ from matplotlib.transforms import blended_transform_factory
 
 from .config import VARIANT_GROUPS, OUTPUT_DIR
 from .data import _load_paths_cfg
+import matplotlib.font_manager as fm
 
+fm._load_fontmanager(try_read_cache=False)
+_ARIAL_VARIANTS = ['arial.ttf', 'arialbd.ttf', 'ariali.ttf', 'arialbi.ttf', 'ariblk.ttf']
+_TTF_DIR = os.path.join(os.path.dirname(fm.__file__), 'mpl-data', 'fonts', 'ttf')
+for _f in _ARIAL_VARIANTS:
+    _p = os.path.join(_TTF_DIR, _f)
+    if os.path.exists(_p):
+        fm.fontManager.addfont(_p)
 plt.rcParams['pdf.fonttype'] = 42
 plt.rcParams['ps.fonttype'] = 42
+plt.rcParams['text.usetex'] = False
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['Arial']
 
 _AGG_ORGANS = {'Brain_agg', 'Basal_ganglia_agg', 'Cortex_agg'}
 _AGG_ORGAN_MAP = {
@@ -91,7 +102,20 @@ def _display_exp(exp: str, plot_names: dict[str, str], models: list[str]) -> str
 
 
 def _build_color_maps(models: list[str]) -> dict[str, plt.cm.ScalarMappable]:
-    return {m: _CMAP_CYCLE[i % len(_CMAP_CYCLE)] for i, m in enumerate(models)}
+    color_map = {}
+    cycle_idx = 0
+    for m in models:
+        m_lower = m.lower()
+        if 'borzoi' in m_lower:
+            color_map[m] = plt.cm.Blues
+        elif 'alphagenome' in m_lower:
+            color_map[m] = plt.cm.Greens
+        elif 'bican' in m_lower or 'epirain' in m_lower:
+            color_map[m] = plt.cm.Oranges
+        else:
+            color_map[m] = _CMAP_CYCLE[cycle_idx % len(_CMAP_CYCLE)]
+            cycle_idx += 1
+    return color_map
 
 
 def _organ_key(organ: str) -> str:
@@ -165,7 +189,9 @@ def plot_overall_comparison(combined: pd.DataFrame, organ: str,
                             metric: str = 'AUROC',
                             ymin: float | None = None,
                             ymax: float | None = None,
-                            plot_num: bool = False):
+                            plot_num: bool = False,
+                            figx: float | None = None,
+                            figy: float | None = None):
     base_metric, show_se = _resolve_metric(metric)
     se_col = f'{base_metric}_SE'
     models = _model_names()
@@ -210,7 +236,7 @@ def plot_overall_comparison(combined: pd.DataFrame, organ: str,
     n_groups = len(VARIANT_GROUPS)
     color_arrays = {k: cm(np.linspace(0.9, 0.3, n_groups)) for k, cm in color_maps.items()}
 
-    fig, ax = plt.subplots(figsize=(16, 6))
+    fig, ax = plt.subplots(figsize=(figx if figx is not None else 16, figy if figy is not None else 6))
     bw = 0.15
     x = np.arange(len(exp_order))
 
@@ -258,7 +284,9 @@ def plot_model_comparison(combined: pd.DataFrame, organ: str,
                           metric: str = 'AUROC',
                           ymin: float | None = None,
                           ymax: float | None = None,
-                          plot_num: bool = False):
+                          plot_num: bool = False,
+                          figx: float | None = None,
+                          figy: float | None = None):
     base_metric, show_se = _resolve_metric(metric)
     se_col = f'{base_metric}_SE'
     models = _model_names()
@@ -283,7 +311,7 @@ def plot_model_comparison(combined: pd.DataFrame, organ: str,
         if len(df):
             data_by_group[g] = df
 
-    fig, ax = plt.subplots(figsize=(10, 4))
+    fig, ax = plt.subplots(figsize=(figx if figx is not None else 10, figy if figy is not None else 4))
     bw = 0.15
     x = np.arange(n_groups)
 
@@ -335,7 +363,9 @@ def plot_per_tissue_auroc(combined: pd.DataFrame, organ: str,
                           metric: str = 'AUROC',
                           ymin: float | None = None,
                           ymax: float | None = None,
-                          plot_num: bool = False):
+                          plot_num: bool = False,
+                          figx: float | None = None,
+                          figy: float | None = None):
     base_metric, show_se = _resolve_metric(metric)
     se_col = f'{base_metric}_SE'
     models = _model_names()
@@ -372,7 +402,8 @@ def plot_per_tissue_auroc(combined: pd.DataFrame, organ: str,
     bw = 0.15
     x = np.arange(n_t)
 
-    fig, ax = plt.subplots(figsize=(max(6, n_t * 0.8 + 2), 5))
+    default_figx = max(6, n_t * 0.8 + 2)
+    fig, ax = plt.subplots(figsize=(figx if figx is not None else default_figx, figy if figy is not None else 5))
     for mi, exp in enumerate(model_exps):
         sub = data[data['exp'] == exp].set_index('tissue')
         vals = [sub.loc[t, base_metric] if t in sub.index else np.nan for t in tissue_order]
@@ -412,7 +443,9 @@ def plot_per_tissue_comparison(combined: pd.DataFrame, organ: str,
                                metric: str = 'AUROC',
                                ymin: float | None = None,
                                ymax: float | None = None,
-                               plot_num: bool = False):
+                               plot_num: bool = False,
+                               figx: float | None = None,
+                               figy: float | None = None):
     base_metric, show_se = _resolve_metric(metric)
     se_col = f'{base_metric}_SE'
     models = _model_names()
@@ -441,7 +474,9 @@ def plot_per_tissue_comparison(combined: pd.DataFrame, organ: str,
     n_groups = len(groups)
     bw = 0.8 / n_models
 
-    fig, axes = plt.subplots(n_tissues, 1, figsize=(max(6, n_groups * 1.5 + 2), 3.5 * n_tissues),
+    default_figx = max(6, n_groups * 1.5 + 2)
+    default_figy = 3.5 * n_tissues
+    fig, axes = plt.subplots(n_tissues, 1, figsize=(figx if figx is not None else default_figx, figy if figy is not None else default_figy),
                              sharex=True, squeeze=False)
 
     for ti, tissue in enumerate(tissues):
@@ -507,10 +542,10 @@ def plot_all(organ: str, output_dir: str | None = None,
              bican_suffix: str = '', borzoi_suffix: str = '',
              ag_suffix: str = '', metric: str = 'AUROC',
              ymin: float | None = None, ymax: float | None = None,
-             plot_num: bool = False):
+             plot_num: bool = False, figx: float | None = None, figy: float | None = None):
     combined = load_all_results(organ, output_dir, bican_suffix, borzoi_suffix, ag_suffix)
-    plot_overall_comparison(combined, organ, output_dir, metric=metric, ymin=ymin, ymax=ymax, plot_num=plot_num)
-    plot_model_comparison(combined, organ, output_dir, metric=metric, ymin=ymin, ymax=ymax, plot_num=plot_num)
+    plot_overall_comparison(combined, organ, output_dir, metric=metric, ymin=ymin, ymax=ymax, plot_num=plot_num, figx=figx, figy=figy)
+    plot_model_comparison(combined, organ, output_dir, metric=metric, ymin=ymin, ymax=ymax, plot_num=plot_num, figx=figx, figy=figy)
     if organ not in _AGG_ORGANS:
-        plot_per_tissue_auroc(combined, organ, output_dir, metric=metric, ymin=ymin, ymax=ymax, plot_num=plot_num)
-        plot_per_tissue_comparison(combined, organ, output_dir, metric=metric, ymin=ymin, ymax=ymax, plot_num=plot_num)
+        plot_per_tissue_auroc(combined, organ, output_dir, metric=metric, ymin=ymin, ymax=ymax, plot_num=plot_num, figx=figx, figy=figy)
+        plot_per_tissue_comparison(combined, organ, output_dir, metric=metric, ymin=ymin, ymax=ymax, plot_num=plot_num, figx=figx, figy=figy)

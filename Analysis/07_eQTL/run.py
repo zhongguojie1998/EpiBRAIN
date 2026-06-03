@@ -3,10 +3,10 @@
 Unified eQTL analysis entry point.
 
 Usage:
-    python Analysis/07_eQTL_new/run.py evaluate --model bican [--filter basal_ganglia]
-    python Analysis/07_eQTL_new/run.py evaluate --model borzoi [--filter brain]
-    python Analysis/07_eQTL_new/run.py evaluate --model alphagenome [--filter gtex]
-    python Analysis/07_eQTL_new/run.py plot --organ Basal_ganglia [--bican-filter ...] [--borzoi-filter ...] [--ag-filter ...]
+    python Analysis/07_eQTL/run.py evaluate --model bican [--filter basal_ganglia]
+    python Analysis/07_eQTL/run.py evaluate --model borzoi [--filter brain]
+    python Analysis/07_eQTL/run.py evaluate --model alphagenome [--filter gtex]
+    python Analysis/07_eQTL/run.py plot --organ Basal_ganglia [--bican-filter ...] [--borzoi-filter ...] [--ag-filter ...]
 """
 import argparse
 import importlib
@@ -20,9 +20,9 @@ _project_root = os.path.dirname(_analysis_dir)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-# Import the package via importlib (can't use normal import for '07_eQTL_new')
-_pkg = importlib.import_module('Analysis.07_eQTL_new')
-_cfg = importlib.import_module('Analysis.07_eQTL_new.config')
+# Import the package via importlib (can't use normal import for '07_eQTL')
+_pkg = importlib.import_module('Analysis.07_eQTL')
+_cfg = importlib.import_module('Analysis.07_eQTL.config')
 
 os.chdir(_cfg.PWD)
 
@@ -32,8 +32,8 @@ _AGG_ORGANS     = ['Brain_agg', 'Basal_ganglia_agg', 'Cortex_agg']
 
 
 def cmd_evaluate(args):
-    data_mod = importlib.import_module('Analysis.07_eQTL_new.data')
-    eval_mod = importlib.import_module('Analysis.07_eQTL_new.evaluate')
+    data_mod = importlib.import_module('Analysis.07_eQTL.data')
+    eval_mod = importlib.import_module('Analysis.07_eQTL.evaluate')
 
     if args.json:
         data_mod.set_paths_json(args.json)
@@ -56,8 +56,8 @@ def cmd_evaluate(args):
 
 
 def cmd_plot(args):
-    data_mod = importlib.import_module('Analysis.07_eQTL_new.data')
-    plot_mod = importlib.import_module('Analysis.07_eQTL_new.plot')
+    data_mod = importlib.import_module('Analysis.07_eQTL.data')
+    plot_mod = importlib.import_module('Analysis.07_eQTL.plot')
 
     if args.json:
         data_mod.set_paths_json(args.json)
@@ -79,6 +79,8 @@ def cmd_plot(args):
         ymin=args.ymin,
         ymax=args.ymax,
         plot_num=args.plot_num,
+        figx=args.figx,
+        figy=args.figy,
     )
 
 
@@ -121,6 +123,10 @@ def main():
                         help='Y-axis upper bound (default: 1)')
     p_plot.add_argument('--plot-num', action='store_true', default=False,
                         help='Annotate each bar with its AUROC/AUPRC value and each group with n_pos/n_neg counts')
+    p_plot.add_argument('--figx', type=float, default=None,
+                        help='Figure width in inches')
+    p_plot.add_argument('--figy', type=float, default=None,
+                        help='Figure height in inches')
     p_plot.add_argument('--add-addition', action='store_true', default=False,
                         help='Read from output.addition/ and save to figure.addition/')
 

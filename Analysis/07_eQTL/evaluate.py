@@ -116,14 +116,23 @@ def evaluate_model(model: ModelData, organ: str | None = None, suffix: str = '',
         track_results.loc[track_results['exp'].isna(), 'exp'] = \
             track_results['identifier'][track_results['exp'].isna()].copy()
 
-    # --- Cross-tissue aggregation: mean/std across tissues per track ---
+    # --- Cross-tissue aggregation: mean across tissues, SE = (1/n)*sqrt(sum(SE_i^2)) ---
+    def _combined_se(se_vals: pd.Series) -> float:
+        vals = se_vals.dropna().values
+        n = len(vals)
+        return (1.0 / n) * np.sqrt(np.sum(vals ** 2)) if n > 0 else np.nan
+
     grp_cols = ['exp', 'modality', 'celltype', 'organ', 'group']
     valid = track_results.dropna(subset=['AUROC'])
-    agg_auroc = valid.groupby(grp_cols, dropna=False)['AUROC'].agg(['mean', 'std']).reset_index()
-    agg_auroc = agg_auroc.rename(columns={'mean': 'AUROC', 'std': 'AUROC_SE'})
+    agg_auroc = valid.groupby(grp_cols, dropna=False).agg(
+        AUROC=('AUROC', 'mean'),
+        AUROC_SE=('AUROC_SE', _combined_se),
+    ).reset_index()
     valid_prc = track_results.dropna(subset=['AUPRC'])
-    agg_auprc = valid_prc.groupby(grp_cols, dropna=False)['AUPRC'].agg(['mean', 'std']).reset_index()
-    agg_auprc = agg_auprc.rename(columns={'mean': 'AUPRC', 'std': 'AUPRC_SE'})
+    agg_auprc = valid_prc.groupby(grp_cols, dropna=False).agg(
+        AUPRC=('AUPRC', 'mean'),
+        AUPRC_SE=('AUPRC_SE', _combined_se),
+    ).reset_index()
     agg = agg_auroc.merge(agg_auprc, on=grp_cols, how='outer')
     agg['tissue'] = 'all'
     agg['mod'] = name

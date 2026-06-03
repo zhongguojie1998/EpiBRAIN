@@ -5,6 +5,18 @@ import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+fm._load_fontmanager(try_read_cache=False)
+_ARIAL_VARIANTS = ['arial.ttf', 'arialbd.ttf', 'ariali.ttf', 'arialbi.ttf', 'ariblk.ttf']
+_TTF_DIR = os.path.join(os.path.dirname(fm.__file__), 'mpl-data', 'fonts', 'ttf')
+for _f in _ARIAL_VARIANTS:
+    _p = os.path.join(_TTF_DIR, _f)
+    if os.path.exists(_p):
+        fm.fontManager.addfont(_p)
+plt.rcParams['pdf.fonttype'] = 42
+plt.rcParams['ps.fonttype'] = 42
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['Arial']
 from sklearn.preprocessing import quantile_transform
 PWD = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(f'{PWD}/../')

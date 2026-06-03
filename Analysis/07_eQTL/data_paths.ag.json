@@ -1,5 +1,5 @@
 {
-  "output_dir": "Analysis/07_eQTL_new/output.ag",
+  "output_dir": "Analysis/07_eQTL/output.ag",
   "vcf": "Data/source/eQTL/alphagenome/ag.brain.vcf",
   "info": "Data/source/eQTL/alphagenome/ag.brain.info.csv",
   "exclude": "Data/source/eQTL/alphagenome/ag.exclude_variants.txt",
