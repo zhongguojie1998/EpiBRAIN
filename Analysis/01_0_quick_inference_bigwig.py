@@ -43,6 +43,7 @@ from pathlib import Path
 import multiprocessing
 from multiprocessing import Pool
 from functools import partial
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import h5py
 import numpy as np
@@ -1332,7 +1333,7 @@ class RegionInference:
                     untransformed[:, track_idx] = untransformed[:, track_idx] * 100
         return untransformed
 
-    def export_to_bigwig(self, predictions, chr, window_start, track_names, output_dir, prefix="pred"):
+    def export_to_bigwig(self, predictions, chr, window_start, track_names, output_dir, prefix="pred", max_workers=None):
         """
         Export predictions to bigwig files.
 
@@ -1345,6 +1346,7 @@ class RegionInference:
             track_names: List of track names
             output_dir: Output directory
             prefix: Prefix for output folder (pred, label, alt, diff)
+            max_workers: Number of parallel writer threads. Defaults to min(len(track_names), os.cpu_count()).
         """
         output_path = Path(output_dir) / prefix
         output_path.mkdir(parents=True, exist_ok=True)
@@ -1366,23 +1368,29 @@ class RegionInference:
                     if len(parts) == 2:
                         chrom_sizes[parts[0]] = int(parts[1])
 
-        # Export each track
-        for track_idx, track_name in enumerate(tqdm(track_names, desc=f"Exporting {prefix}")):
-            output_file = output_path / f"{track_name}.bw"
+        # Precompute chromosome header size (shared across all tracks)
+        chr_size = chrom_sizes.get(chr, window_start + predictions.shape[0] * self.window_size + 1000000)
 
-            # Get the correct dimension index from label_meta
+        # Precompute window coordinates once (identical for every track)
+        n_windows = predictions.shape[0]
+        starts = [window_start + i * self.window_size for i in range(n_windows)]
+        ends = [s + self.window_size for s in starts]
+        chroms = [chr] * n_windows
+
+        def _resolve_dim_idx(track_idx, track_name):
+            """Resolve the source column for a track from label_meta."""
             if self.label_meta is not None and 'dim' in self.label_meta.columns:
-                # Find the row for this track name
                 matching_rows = self.label_meta[self.label_meta['trial'] == track_name]
                 if len(matching_rows) > 0:
-                    dim_idx = int(matching_rows.iloc[0]['dim'])
-                else:
-                    # Fallback to sequential index if not found
-                    logger.warning(f"Track {track_name} not found in label_meta, using sequential index")
-                    dim_idx = track_idx
-            else:
-                # Fallback to sequential index if no label_meta
-                raise ValueError("label_meta is not available or does not contain 'dim' column")
+                    return int(matching_rows.iloc[0]['dim'])
+                logger.warning(f"Track {track_name} not found in label_meta, using sequential index")
+                return track_idx
+            # Fallback to sequential index if no label_meta
+            raise ValueError("label_meta is not available or does not contain 'dim' column")
+
+        def _write_track(track_idx, track_name):
+            output_file = output_path / f"{track_name}.bw"
+            dim_idx = _resolve_dim_idx(track_idx, track_name)
 
             # Get track predictions - no untransformation here anymore
             if prefix == 'label':
@@ -1390,32 +1398,28 @@ class RegionInference:
             else:
                 track_predictions = predictions[:, dim_idx]
 
-            # Create bigwig file
+            values = [float(v) for v in track_predictions]
+
+            # Each track is an independent file; writers touch no shared state
             bw = pyBigWig.open(str(output_file), "w")
-
-            # Add header with chromosome sizes
-            chr_size = chrom_sizes.get(chr, window_start + predictions.shape[0] * self.window_size + 1000000)
             bw.addHeader([(chr, chr_size)])
-
-            # Add values for each window
-            chroms = []
-            starts = []
-            ends = []
-            values = []
-
-            for i in range(len(track_predictions)):
-                pos_start = window_start + i * self.window_size
-                pos_end = pos_start + self.window_size
-                value = float(track_predictions[i])
-
-                chroms.append(chr)
-                starts.append(pos_start)
-                ends.append(pos_end)
-                values.append(value)
-
-            # Write entries
             bw.addEntries(chroms, starts, ends=ends, values=values)
             bw.close()
+
+        # Write tracks in parallel. pyBigWig writes to independent files and
+        # releases the GIL during the C-level addEntries call, so threads scale
+        # this I/O-bound work without pickling the large predictions array.
+        if max_workers is None:
+            max_workers = min(len(track_names), os.cpu_count() or 1)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_write_track, track_idx, track_name): track_name
+                for track_idx, track_name in enumerate(track_names)
+            }
+            for future in tqdm(as_completed(futures), total=len(futures), desc=f"Exporting {prefix}"):
+                # Surface any writer exception instead of silently dropping the file
+                future.result()
 
         logger.info(f"Exported {len(track_names)} bigwig files to {output_path}")
 
