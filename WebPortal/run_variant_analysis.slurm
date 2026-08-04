@@ -110,6 +110,7 @@ fi
 
 # ----- environment (mirrors inference.slurm / 09_2_ABC_run.slurm) -----
 date; hostname; pwd
+export USE_TF=0   # keep transformers off its TF path; see variant_analysis_pipeline.sh
 export CUDA_HOME=/gpfs/commons/home/guojiezhong/miniconda3/envs/BICAN
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib:$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}

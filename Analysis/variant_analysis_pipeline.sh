@@ -10,6 +10,12 @@
 
 set -e  # Exit on error
 
+# transformers is only ever used through its PyTorch path here, but because
+# TensorFlow is installed in the env, transformers.modeling_utils reaches
+# image_transforms.py and imports all of TF (~11s per step, every step).
+# USE_TF=0 makes is_tf_available() return False and skips that entirely.
+export USE_TF=0
+
 # Print usage
 usage() {
     echo "Usage: $0 [OPTIONS]"
