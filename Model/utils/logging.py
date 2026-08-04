@@ -4,8 +4,6 @@ import sys
 import time
 from typing import Optional
 
-from torch.utils.tensorboard import SummaryWriter
-
 LOGGER_PREFIX = "BICAN"
 LOGGING_MODULE = [
     f"{LOGGER_PREFIX}-{i}"
@@ -145,6 +143,11 @@ class TrainingLogger(BaseLogger):
     # add tensorboard writer
     @check_rank
     def add_tb(self, diagnose=False):
+        # Imported lazily: torch.utils.tensorboard pulls in all of TensorFlow
+        # (~10s), which every inference entry point would otherwise pay for a
+        # training-only feature.
+        from torch.utils.tensorboard import SummaryWriter
+
         os.makedirs(f"{self.log_dir}/tb", exist_ok=True)
         self.writer = SummaryWriter(log_dir=f"{self.log_dir}/tb")
 

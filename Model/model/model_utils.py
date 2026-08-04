@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import numpy as np
 import torch.nn as nn
 from torch import compile
-from peft import LoraConfig, get_peft_model
 
 from model.model_building_block import Attention, FlashAttention
 
@@ -328,16 +327,23 @@ def setup_model(config, logger, checkpoint=None):
     # Track whether we've loaded checkpoint
     checkpoint_loaded = False
 
-    # initialize the model or load checkpoint
-    if training_config.load_checkpoint is None:
+    # initialize the model or load checkpoint.
+    # A caller-supplied `checkpoint` counts as much as a configured
+    # `load_checkpoint` path: outside the LoRA case it overwrites every
+    # parameter, so both init_weights() and the pretrained-backbone load below
+    # are dead work and are skipped.
+    if checkpoint is None and training_config.load_checkpoint is None:
         model.init_weights()
-    else:
-        # If loading checkpoint and NOT using LoRA (or not finetuning), load full checkpoint now
-        if not training_config.finetune or model_config.finetune_method != "lora":
-            logger.info("Loading full checkpoint (non-LoRA case)")
-            model.load_state_dict(checkpoint["model_state_dict"])
-            checkpoint_loaded = True
-        # If using LoRA, we'll load after compilation and LoRA setup
+    elif not training_config.finetune or model_config.finetune_method != "lora":
+        if checkpoint is None:
+            raise ValueError(
+                f"training.load_checkpoint={training_config.load_checkpoint} is set but no "
+                "checkpoint was passed to setup_model()"
+            )
+        logger.info("Loading full checkpoint (non-LoRA case)")
+        model.load_state_dict(checkpoint["model_state_dict"])
+        checkpoint_loaded = True
+    # If using LoRA, we'll load after compilation and LoRA setup
 
     should_compile = model_config_dict.get("use_compile", False)
 
@@ -362,6 +368,10 @@ def setup_model(config, logger, checkpoint=None):
 
         # initialize the finetune model
         if model_config.finetune_method == "lora":
+            # Imported lazily: peft costs several seconds to import and is only
+            # needed on the LoRA path.
+            from peft import LoraConfig, get_peft_model
+
             logger.info("LORA Finetune")
             finetune_config = LoraConfig(**model_config.finetune_param)
             model = get_peft_model(model, finetune_config)

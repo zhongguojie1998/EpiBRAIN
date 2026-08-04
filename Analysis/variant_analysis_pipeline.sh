@@ -25,6 +25,7 @@ usage() {
     echo "  --region REGION             Genomic region in format chr:start-end (e.g., chr19:19657165-19658165)"
     echo "                              Replaces --gene for aggregation and motif interpretation (Steps 2,4,5,6,7)"
     echo "  --no-gene                   Disable gene detection, use variant-centered mode (aggregation over variant ±500bp)"
+    echo "  --no-labels                 Skip observed-coverage (label/) bigwigs in Step 1; these do not depend on the variant"
     echo "  --disease DISEASE           Disease name (e.g., Schizophrenia)"
     echo "  --midpoint POSITION         Central position for analysis in format chr:pos"
     echo "                              - Step 1: Switches to region inference mode (full gene region centered at midpoint)"
@@ -143,6 +144,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-gene)
             NO_GENE=true
+            shift
+            ;;
+        --no-labels)
+            NO_LABELS=true
             shift
             ;;
         --track)
@@ -336,6 +341,107 @@ case "$METHOD" in
         ;;
 esac
 
+# ---------------------------------------------------------------------------
+# Gene coordinate index
+#
+# Decompressing the ~60MB GENCODE GTF costs ~15-30s per scan and the pipeline
+# needs two lookups (closest gene, then that gene's span). Both are answered
+# from a 4-column "gene_name chr start end" table derived from the GTF once and
+# reused by every subsequent run.
+# ---------------------------------------------------------------------------
+GENE_INDEX_FILE="${GTF_FILE%.gz}.gene_index.tsv"
+
+build_gene_index() {
+    # Already current? (index newer than the GTF it came from)
+    if [ -s "$GENE_INDEX_FILE" ] && [ "$GENE_INDEX_FILE" -nt "$GTF_FILE" ]; then
+        return 0
+    fi
+
+    local cat_cmd="cat"
+    [[ "$GTF_FILE" == *.gz ]] && cat_cmd="zcat"
+
+    echo "Building gene coordinate index from $GTF_FILE (one-time, ~30s)..."
+
+    # Write to a private temp file and rename: concurrent pipeline runs must
+    # never observe a half-written index.
+    local tmp_index
+    tmp_index="$(mktemp "${GENE_INDEX_FILE}.XXXXXX")" || {
+        echo "Warning: cannot write gene index next to GTF; falling back to direct GTF scans" >&2
+        return 1
+    }
+
+    if $cat_cmd "$GTF_FILE" | awk -F'\t' '
+            $3 == "gene" {
+                match($9, /gene_name "([^"]+)"/, arr)
+                if (arr[1] != "") print arr[1] "\t" $1 "\t" $4 "\t" $5
+            }
+        ' > "$tmp_index" && [ -s "$tmp_index" ]; then
+        # mktemp creates 0600; the index is shared by everyone running the
+        # pipeline (e.g. the web portal service account).
+        chmod 664 "$tmp_index" 2>/dev/null || true
+        mv -f "$tmp_index" "$GENE_INDEX_FILE"
+        echo "Gene index written to $GENE_INDEX_FILE"
+        return 0
+    fi
+
+    rm -f "$tmp_index"
+    echo "Warning: gene index build failed; falling back to direct GTF scans" >&2
+    return 1
+}
+
+# Populate GENE_INDEX_FILE if possible; empty means "scan the GTF directly".
+build_gene_index || GENE_INDEX_FILE=""
+
+# Emits "<gene_name>" of the gene closest to $2 on $1, or "unknown".
+gtf_closest_gene() {
+    local chr="$1" pos="$2"
+    local src="$GENE_INDEX_FILE" reader="cat"
+    if [ -z "$src" ]; then
+        src="$GTF_FILE"
+        [[ "$GTF_FILE" == *.gz ]] && reader="zcat"
+        $reader "$src" | awk -F'\t' -v chr="$chr" -v pos="$pos" '
+            $3 == "gene" && $1 == chr {
+                match($9, /gene_name "([^"]+)"/, arr)
+                print arr[1] "\t" $1 "\t" $4 "\t" $5
+            }' | _closest_from_index "$pos"
+    else
+        awk -F'\t' -v chr="$chr" '$2 == chr' "$src" | _closest_from_index "$pos"
+    fi
+}
+
+# Reads "<name> <chr> <start> <end>" rows on stdin, prints the closest name.
+_closest_from_index() {
+    awk -F'\t' -v pos="$1" '
+        BEGIN { min_dist = 999999999; closest_gene = "unknown" }
+        {
+            start = $3; end = $4
+            if (pos >= start && pos <= end)      dist = 0
+            else if (pos < start)                dist = start - pos
+            else                                 dist = pos - end
+            if (dist < min_dist) { min_dist = dist; closest_gene = $1 }
+        }
+        END { print closest_gene }
+    '
+}
+
+# Emits "<start> <end>" for $2 on $1, or nothing when the gene is absent.
+gtf_gene_span() {
+    local chr="$1" gene="$2"
+    if [ -z "$GENE_INDEX_FILE" ]; then
+        local reader="cat"
+        [[ "$GTF_FILE" == *.gz ]] && reader="zcat"
+        $reader "$GTF_FILE" | awk -F'\t' -v gene="$gene" -v chr="$chr" '
+            $1 == chr && $3 == "gene" {
+                match($9, /gene_name "([^"]+)"/, arr)
+                if (arr[1] == gene) { print $4, $5; exit }
+            }'
+    else
+        awk -F'\t' -v gene="$gene" -v chr="$chr" '
+            $1 == gene && $2 == chr { print $3, $4; exit }
+        ' "$GENE_INDEX_FILE"
+    fi
+}
+
 # Parse variant to extract chromosome and position
 IFS=':' read -r CHR POS REF ALT <<< "$VARIANT"
 
@@ -391,43 +497,8 @@ elif [ -z "$GENE" ]; then
         GENE_MODE="variant"
         GENE="variant"  # Placeholder
     else
-        # Extract genes from GTF and find the closest one
-        # Use zcat if file is gzipped, otherwise cat
-        if [[ "$GTF_FILE" == *.gz ]]; then
-            CAT_CMD="zcat"
-        else
-            CAT_CMD="cat"
-        fi
-
         # Find closest gene (looking for genes on the same chromosome)
-        # GTF format: chr source feature start end score strand frame attributes
-        GENE=$($CAT_CMD "$GTF_FILE" | \
-            awk -v chr="$CHR" -v pos="$POS" '
-            BEGIN { min_dist = 999999999; closest_gene = "unknown" }
-            $1 == chr && $3 == "gene" {
-                # Extract gene_name from attributes
-                match($0, /gene_name "([^"]+)"/, arr)
-                gene_name = arr[1]
-
-                start = $4
-                end = $5
-
-                # Calculate distance (0 if inside gene, otherwise distance to nearest boundary)
-                if (pos >= start && pos <= end) {
-                    dist = 0
-                } else if (pos < start) {
-                    dist = start - pos
-                } else {
-                    dist = pos - end
-                }
-
-                if (dist < min_dist) {
-                    min_dist = dist
-                    closest_gene = gene_name
-                }
-            }
-            END { print closest_gene }
-        ')
+        GENE=$(gtf_closest_gene "$CHR" "$POS")
 
         if [ "$GENE" = "unknown" ] || [ -z "$GENE" ]; then
             echo "Warning: Could not find a gene near variant $VARIANT in GTF file"
@@ -516,25 +587,7 @@ if [ -z "$GENE_REGION" ]; then
     else
         # Gene-based mode: Extract gene coordinates from GTF to find gene center
         echo "Extracting gene coordinates from GTF..."
-
-        # Use zcat if file is gzipped, otherwise cat
-        if [[ "$GTF_FILE" == *.gz ]]; then
-            CAT_CMD="zcat"
-        else
-            CAT_CMD="cat"
-        fi
-
-        # Extract gene start and end from GTF file
-        GENE_COORDS=$($CAT_CMD "$GTF_FILE" | \
-            awk -v gene="$GENE" -v chr="$CHR" '
-            $1 == chr && $3 == "gene" {
-                match($0, /gene_name "([^"]+)"/, arr)
-                if (arr[1] == gene) {
-                    print $4, $5
-                    exit
-                }
-            }
-        ')
+        GENE_COORDS=$(gtf_gene_span "$CHR" "$GENE")
 
         if [ -z "$GENE_COORDS" ]; then
             echo "Warning: Could not find gene $GENE in GTF, using variant position ± 262144bp"
@@ -629,6 +682,11 @@ echo ""
 if ! should_skip 1; then
     INFERENCE_DIR="${ANALYSIS_DIR}/inference"
 
+    # Observed-coverage tracks are variant-independent; callers that already
+    # serve them statically can skip the extraction entirely.
+    INFERENCE_LABEL_ARGS=()
+    [ "${NO_LABELS:-false}" = true ] && INFERENCE_LABEL_ARGS+=(--no-labels)
+
     # If midpoint is specified, run BOTH region and variant inference
     # Region inference: gives us full genomic context for ref predictions
     # Variant inference: gives us alt/diff predictions for the specific variant
@@ -639,14 +697,16 @@ if ! should_skip 1; then
             --region "$GENE_REGION" \
             --exp_name "$EXP_NAME" \
             --chk "$CHECKPOINT" \
-            --output "$INFERENCE_DIR"
+            --output "$INFERENCE_DIR" \
+            "${INFERENCE_LABEL_ARGS[@]}"
 
         echo "  Running variant inference for alt/diff predictions..."
         python Analysis/01_0_quick_inference_bigwig.py \
             --variant "$VARIANT" \
             --exp_name "$EXP_NAME" \
             --chk "$CHECKPOINT" \
-            --output "$INFERENCE_DIR"
+            --output "$INFERENCE_DIR" \
+            "${INFERENCE_LABEL_ARGS[@]}"
 
         # Track that we have data for the full gene region
         ACTUAL_INFERENCE_REGION="$GENE_REGION"
@@ -656,7 +716,8 @@ if ! should_skip 1; then
             --variant "$VARIANT" \
             --exp_name "$EXP_NAME" \
             --chk "$CHECKPOINT" \
-            --output "$INFERENCE_DIR"
+            --output "$INFERENCE_DIR" \
+            "${INFERENCE_LABEL_ARGS[@]}"
 
         # Variant inference generates data for a limited region around the variant
         # Typically uses context_length (262144 bp window = ±131072 bp)

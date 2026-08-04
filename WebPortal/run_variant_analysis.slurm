@@ -30,15 +30,17 @@
 #       --variant chr11:113400106:G:T \
 #       [--track BasalGanglia-STR-D1-MSN_RNAminus] \
 #       [--gene DRD2 | --region chr11:113400000-113401000] \
-#       [--sat] \
+#       [--sat] [--no-labels] \
 #       [--exp-name NAME] [--checkpoint N] [--output-base DIR] \
 #       [--num-gpus N] [--disease NAME] [--fai PATH] [--baseline random]
 #
-#   --variant   chr:pos:ref:alt           (required)
-#   --track     attribution track name    (optional; no attribution if omitted)
-#   --gene      gene symbol               (optional; requires --track; overrides --region)
-#   --region    chr:start-end             (optional; requires --track)
-#   --sat       run saturation mutagenesis (Step 2)
+#   --variant     chr:pos:ref:alt           (required)
+#   --track       attribution track name    (optional; no attribution if omitted)
+#   --gene        gene symbol               (optional; requires --track; overrides --region)
+#   --region      chr:start-end             (optional; requires --track)
+#   --sat         run saturation mutagenesis (Step 2)
+#   --no-labels   skip inference/label/ bigwigs (observed coverage, identical
+#                 for every variant -- serve them statically instead; ~13s)
 #
 set -euo pipefail
 
@@ -58,6 +60,7 @@ TRACK=""
 GENE=""
 REGION=""
 RUN_SAT=false
+NO_LABELS=false
 EXP_NAME="full_finetune_original_loss_celltype_head_dim8_linear_full_atlas"
 CHECKPOINT=17
 OUTPUT_BASE="Analysis/figures"
@@ -78,6 +81,7 @@ while [[ $# -gt 0 ]]; do
         --gene)         GENE="$2";        shift 2 ;;
         --region)       REGION="$2";      shift 2 ;;
         --sat)          RUN_SAT=true;     shift ;;
+        --no-labels)    NO_LABELS=true;   shift ;;
         --exp-name)     EXP_NAME="$2";    shift 2 ;;
         --checkpoint)   CHECKPOINT="$2";  shift 2 ;;
         --output-base)  OUTPUT_BASE="$2"; shift 2 ;;
@@ -133,6 +137,7 @@ PIPE_ARGS=(
     --num-gpus "$NUM_GPUS"
     --skip-steps "$SKIP"
 )
+$NO_LABELS        && PIPE_ARGS+=(--no-labels)
 [ -n "$GENE" ]    && PIPE_ARGS+=(--gene "$GENE")
 [ -n "$REGION" ]  && PIPE_ARGS+=(--region "$REGION")
 [ -n "$DISEASE" ] && PIPE_ARGS+=(--disease "$DISEASE")

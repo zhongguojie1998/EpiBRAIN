@@ -7,6 +7,7 @@ import multiprocessing as mp
 import os
 import subprocess
 import tempfile
+from functools import lru_cache
 
 import h5py
 import intervaltree
@@ -471,9 +472,15 @@ def write_seqs_bed(bed_file, seqs, labels=False, return_stats=False):
         return stats_dict
 
 
+@lru_cache(maxsize=None)
 def read_blacklist(blacklist_bed, black_buffer=20):
     """Construct interval trees of blacklist
-    regions for each chromosome."""
+    regions for each chromosome.
+
+    Cached: the blacklist BED is static for a run, and get_labels() is called
+    once per track (hundreds of times) with the same path. The returned trees
+    must be treated as read-only by callers.
+    """
     black_chr_trees = {}
 
     if blacklist_bed is not None and os.path.isfile(blacklist_bed):
@@ -510,10 +517,20 @@ def get_labels(
     clip=None,
     clip_soft=None,
 ):
-    """Get coverage labels for model sequences."""
+    """Get coverage labels for model sequences.
+
+    Args:
+        seqs_cov_file: Destination .h5 for the ``targets`` dataset. Pass None to
+            skip the write entirely and only take the returned array -- callers
+            that immediately read the file back (e.g. single-region inference)
+            should do so to avoid a gzip round-trip per track.
+
+    Returns:
+        np.ndarray of shape (n_seqs, kept_num_after_crop), dtype float32.
+    """
 
     logger.debug(
-        f"""Setting for {seqs_cov_file.split('/')[-1].split('.')[0]}:
+        f"""Setting for {os.path.basename(genome_cov_file).split('.')[0]}:
         sum_stat {sum_stat}, baseline_pct {baseline_pct}, umap_pct {umap_pct}, scale {scale}, extreme_clip_pct {extreme_clip_pct}, offset {offset}, anchor_target {anchor_target}, anchor_pct {anchor_pct}, clip_threshold {clip}, softclip_threshold {clip_soft}"""
     )
 
@@ -526,9 +543,6 @@ def get_labels(
     target_length = seq_len_nt // pool_width
     assert target_length > 0
 
-    # initialize sequences coverage file
-    seqs_cov_open = h5py.File(seqs_cov_file, "w")
-    # seqs_cov_open.create_dataset('targets', shape=(num_seqs, target_length), dtype='float16')
     targets = []
 
     # open genome coverage file
@@ -648,13 +662,14 @@ def get_labels(
         raise ValueError("Non-finite values (NaN or Inf) found in targets.")
 
     # write all
-    seqs_cov_open.create_dataset("targets", data=targets, dtype="float32", compression="gzip")
+    if seqs_cov_file is not None:
+        with h5py.File(seqs_cov_file, "w") as seqs_cov_open:
+            seqs_cov_open.create_dataset("targets", data=targets, dtype="float32", compression="gzip")
 
     # close genome coverage file
     genome_cov_open.close()
 
-    # close sequences coverage file
-    seqs_cov_open.close()
+    return targets
 
 
 class CovFace:

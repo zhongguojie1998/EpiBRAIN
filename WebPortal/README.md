@@ -28,6 +28,7 @@ Resources: 1 GPU / 64 GB / 24 h (`--partition=gpu`).
 | `--gene SYMBOL` | no | aggregate attribution over this gene; **requires `--track`**; overrides `--region` |
 | `--region chr:start-end` | no | aggregate attribution over this region; **requires `--track`** |
 | `--sat` | no | also run saturation mutagenesis (Step 2) |
+| `--no-labels` | no | skip `inference/label/` (observed coverage). These are identical for every variant in a region — pass this and serve them statically to save ~13s per run |
 | `--exp-name`, `--checkpoint` | no | model (default: `full_finetune_original_loss_celltype_head_dim8_linear_full_atlas`, ckpt 17) |
 | `--output-base`, `--num-gpus`, `--disease`, `--baseline`, `--fai` | no | passthrough / overrides |
 
@@ -42,6 +43,7 @@ Written to `<output-base>/<variant>_<gene|region>/` (default `output-base` is
 - `inference/pred/<track>.bw` — reference (predicted) track
 - `inference/alt/<track>.bw` — alternative-allele track
 - `inference/diff/<track>.bw` — alt − ref difference track
+- `inference/label/<track>.bw` — observed coverage; variant-independent, suppressed by `--no-labels`
 - `attribution_score.bw` — *(with `--track`)* per-base attribution aggregated to `window_size` (32 bp) bins
 - `motif_interpretation_zoom.pdf` — *(with `--track`)* motif zoom plot, variant ± 50 bp
 - `sat_mutagenesis/` — *(with `--sat`)*

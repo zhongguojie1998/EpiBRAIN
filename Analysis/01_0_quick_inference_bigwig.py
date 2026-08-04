@@ -60,7 +60,7 @@ sys.path.append(str(ROOT / "Analysis"))
 os.chdir(ROOT)
 warnings.filterwarnings("ignore")
 
-from data.data_utils import STD_CHR, ModelSeq, annotate_unmap, get_labels
+from data.data_utils import STD_CHR, ModelSeq, annotate_unmap, get_labels, read_blacklist
 from data.tokenizer import FastaInterval, str_to_one_hot, one_hot_reverse_complement
 from model.model_utils import setup_model
 from utils.config import load_config
@@ -308,12 +308,14 @@ class RegionInference:
         if hasattr(self.cfg.model, 'use_compile'):
             self.cfg.model.use_compile = False
 
-        # Create model
-        self.model = setup_model(self.cfg, logger)
-
-        # Load checkpoint
+        # Load checkpoint first and hand it to setup_model: these weights
+        # overwrite every parameter, so passing them in lets setup_model skip
+        # init_weights() and the redundant pretrained-backbone load.
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+
+        # Create model
+        self.model = setup_model(self.cfg, logger, checkpoint=checkpoint)
+        del checkpoint
 
         self.model.to(device)
         self.model.eval()
@@ -1134,7 +1136,7 @@ class RegionInference:
 
         return pred, window_start, window_end
 
-    def get_labels_for_region(self, chr, window_start, window_end):
+    def get_labels_for_region(self, chr, window_start, window_end, max_workers=None):
         """
         Get ground truth labels for a region by extracting from bigwig files.
 
@@ -1142,6 +1144,8 @@ class RegionInference:
             chr: Chromosome
             window_start: Window start position
             window_end: Window end position
+            max_workers: Number of parallel bigwig readers. Defaults to
+                min(n_tracks, os.cpu_count()).
 
         Returns:
             numpy array: Labels (n_window, n_tracks) or None if not available
@@ -1175,10 +1179,10 @@ class RegionInference:
                 np.save(unmap_npy, mseqs_unmap)
                 unmap_npy_path = unmap_npy
 
-            # Extract labels for each track
-            all_labels = []
+            # Resolve the readable tracks up front so the parallel section is a
+            # pure map over (index, track_name, bigwig path).
+            pending = []
             for track_name in self.label_names:
-                # Get track info from data_config
                 if track_name not in data_config.index:
                     logger.warning(f"Track {track_name} not found in data config, skipping")
                     continue
@@ -1186,33 +1190,44 @@ class RegionInference:
                 track_info = data_config.loc[track_name]
                 genome_cov_file = track_info["file"]
 
-                # Check if bigwig file exists
                 if not Path(genome_cov_file).exists():
                     logger.warning(f"Bigwig file not found for {track_name}: {genome_cov_file}")
                     continue
 
-                # Create temporary H5 file for this track's labels
-                label_h5_file = os.path.join(temp_dir, f"{track_name}_label.h5")
+                pending.append((track_name, genome_cov_file, track_info))
 
-                # Extract labels using get_labels function
-                get_labels(
+            def _read_track(genome_cov_file, track_info):
+                # seqs_cov_file=None keeps the targets in memory instead of
+                # round-tripping them through a gzip-compressed temp .h5.
+                targets = get_labels(
                     mseqs,
                     blacklist_bed=self.cfg.data.preprocess.blacklist_bed,
                     pool_width=self.cfg.data.preprocess.window_size,
                     kept_num_after_crop=self.cfg.data.preprocess.n_window,
-                    seqs_cov_file=label_h5_file,
+                    seqs_cov_file=None,
                     genome_cov_file=genome_cov_file,
                     umap_npy_path=unmap_npy_path,
                     **track_info[["sum_stat", "baseline_pct", "umap_pct", "scale", "clip", "clip_soft"]].to_dict(),
                 )
+                return targets[0]  # Shape: (n_window,)
 
-                # Read the extracted labels
-                with h5py.File(label_h5_file, 'r') as f:
-                    track_labels = f["targets"][0][:]  # Shape: (n_window,)
-                    all_labels.append(track_labels)
+            # Warm the blacklist interval-tree cache before fanning out, so the
+            # workers hit it instead of each parsing the BED concurrently.
+            read_blacklist(self.cfg.data.preprocess.blacklist_bed)
 
-                # Clean up temp file
-                os.remove(label_h5_file)
+            # Each worker opens its own bigwig handle and touches no shared
+            # state; the work is GPFS-latency bound, so threads overlap well.
+            if max_workers is None:
+                max_workers = min(len(pending), os.cpu_count() or 1) or 1
+
+            all_labels = [None] * len(pending)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(_read_track, genome_cov_file, track_info): idx
+                    for idx, (_, genome_cov_file, track_info) in enumerate(pending)
+                }
+                for future in tqdm(as_completed(futures), total=len(futures), desc="Reading labels"):
+                    all_labels[futures[future]] = future.result()
 
             # Clean up temp directory
             import shutil
