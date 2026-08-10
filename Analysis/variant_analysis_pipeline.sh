@@ -61,6 +61,9 @@ usage() {
     echo "  --ref-alpha ALPHA                Transparency for reference tracks, 0.0-1.0 (default: 1.0, opaque)"
     echo "  --alt-alpha ALPHA                Transparency for alternative tracks, 0.0-1.0 (default: 1.0, opaque)"
     echo "  --alt-first                      Display alt track first, then overlay ref (default: ref first, then alt)"
+    echo "  --share-label-pred-scale         Step 3: put label and ref/alt tracks of a modality on one shared y-scale"
+    echo "  --diff-scale-lfc LFC             Step 3: floor the diff y-range at ±(exp(LFC)-1) × the label/ref/alt max"
+    echo "                                   (e.g. 0.05 → ±5.13% of the signal scale; wider observed diffs are kept)"
     echo "  --sat-mutagenesis-viz-plot-width WIDTH   Width of saturation mutagenesis plot in inches (default: 12.0)"
     echo "  --sat-mutagenesis-viz-plot-height HEIGHT Height of saturation mutagenesis plot in inches (default: 4.0)"
     echo "  --sat-mutagenesis-vmin VALUE             Minimum value for heatmap colorscale (default: auto)"
@@ -255,6 +258,14 @@ while [[ $# -gt 0 ]]; do
         --alt-first)
             ALT_FIRST=true
             shift
+            ;;
+        --share-label-pred-scale)
+            SHARE_LABEL_PRED_SCALE=true
+            shift
+            ;;
+        --diff-scale-lfc)
+            DIFF_SCALE_LFC="$2"
+            shift 2
             ;;
         --sat-mutagenesis-viz-plot-width)
             SAT_MUTAGENESIS_VIZ_PLOT_WIDTH="$2"
@@ -849,6 +860,14 @@ if ! should_skip 3; then
     # Add --alt-first flag if set
     if [ "$ALT_FIRST" = true ]; then
         VIZ_CMD="$VIZ_CMD --alt-first"
+    fi
+
+    # Shared label/ref/alt y-scale and diff y-range floor
+    if [ "$SHARE_LABEL_PRED_SCALE" = true ]; then
+        VIZ_CMD="$VIZ_CMD --share-label-pred-scale"
+    fi
+    if [ -n "$DIFF_SCALE_LFC" ]; then
+        VIZ_CMD="$VIZ_CMD --diff-scale-lfc \"$DIFF_SCALE_LFC\""
     fi
 
     eval $VIZ_CMD

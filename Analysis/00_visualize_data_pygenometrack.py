@@ -932,6 +932,14 @@ Examples:
                         help="Override maximum value for pred tracks (default: auto-computed from data)")
     parser.add_argument("--no-auto-scale", action="store_true",
                         help="Disable automatic min/max computation (use pyGenomeTracks auto)")
+    parser.add_argument("--share-label-pred-scale", action="store_true",
+                        help="Variant mode: put label, ref and alt tracks of a modality on one shared "
+                             "y-scale (max over all three) instead of scaling label separately")
+    parser.add_argument("--diff-scale-lfc", type=float, default=None,
+                        help="Variant mode: floor the diff track y-range at +/-(exp(LFC)-1) * signal_max, "
+                             "where signal_max is the label/ref/alt max of the same modality. The observed "
+                             "diff range is kept whenever it is wider. E.g. 0.05 -> at least +/-5.13%% of "
+                             "the signal scale (default: purely data-driven diff range)")
 
     # GTF annotation track
     parser.add_argument("--gtf", type=str, default="Data/source/gencode.v48.annotation.gtf.gz",
@@ -1059,29 +1067,62 @@ Examples:
             minmax_per_modality = {}
 
             if not args.no_auto_scale:
-                # Create track type map for label files
-                track_type_map_label = {f: 'label' for f in label_files}
-                if label_files:
-                    label_minmax_per_mod = compute_minmax_per_modality(label_files, chrom, start, end, track_type_map=track_type_map_label)
-                    minmax_per_modality.update(label_minmax_per_mod)
+                if args.share_label_pred_scale:
+                    # One y-scale per modality across observed coverage and both
+                    # predictions, so label vs ref/alt peak heights are comparable.
+                    signal_files = label_files + pred_files + alt_files
+                    if signal_files:
+                        signal_minmax_per_mod = compute_minmax_per_modality(
+                            signal_files, chrom, start, end,
+                            track_type_map={f: 'pred' for f in signal_files})
+                        for (track_type, mod), value in signal_minmax_per_mod.items():
+                            if track_type == 'pred':
+                                for shared_type in ('label', 'pred', 'alt'):
+                                    minmax_per_modality[(shared_type, mod)] = value
+                else:
+                    # Create track type map for label files
+                    track_type_map_label = {f: 'label' for f in label_files}
+                    if label_files:
+                        label_minmax_per_mod = compute_minmax_per_modality(label_files, chrom, start, end, track_type_map=track_type_map_label)
+                        minmax_per_modality.update(label_minmax_per_mod)
 
-                # Create track type map for pred and alt files (treat both as 'pred' to share same scale)
-                pred_alt_files = pred_files + alt_files
-                track_type_map_pred_alt = {f: 'pred' for f in pred_alt_files}
-                if pred_alt_files:
-                    pred_alt_minmax_per_mod = compute_minmax_per_modality(pred_alt_files, chrom, start, end, track_type_map=track_type_map_pred_alt)
-                    minmax_per_modality.update(pred_alt_minmax_per_mod)
-                    # Also add as 'alt' type (same values as pred)
-                    for key, value in pred_alt_minmax_per_mod.items():
-                        if key[0] == 'pred':
-                            alt_key = ('alt', key[1])
-                            minmax_per_modality[alt_key] = value
+                    # Create track type map for pred and alt files (treat both as 'pred' to share same scale)
+                    pred_alt_files = pred_files + alt_files
+                    track_type_map_pred_alt = {f: 'pred' for f in pred_alt_files}
+                    if pred_alt_files:
+                        pred_alt_minmax_per_mod = compute_minmax_per_modality(pred_alt_files, chrom, start, end, track_type_map=track_type_map_pred_alt)
+                        minmax_per_modality.update(pred_alt_minmax_per_mod)
+                        # Also add as 'alt' type (same values as pred)
+                        for key, value in pred_alt_minmax_per_mod.items():
+                            if key[0] == 'pred':
+                                alt_key = ('alt', key[1])
+                                minmax_per_modality[alt_key] = value
 
                 # Create track type map for diff files (can be negative)
                 track_type_map_diff = {f: 'diff' for f in diff_files}
                 if diff_files:
                     diff_minmax_per_mod = compute_minmax_per_modality(diff_files, chrom, start, end, track_type_map=track_type_map_diff, allow_negative=True)
                     minmax_per_modality.update(diff_minmax_per_mod)
+
+                if args.diff_scale_lfc is not None:
+                    # A diff of (exp(lfc) - 1) * signal_max is what an lfc-sized
+                    # log fold change looks like at the top of the signal track.
+                    # Use it as a floor so tiny diffs stay legible without
+                    # clipping modalities whose diff genuinely runs wider.
+                    factor = float(np.expm1(args.diff_scale_lfc))
+                    print(f"\nFlooring diff y-range at +/-{factor:.4g} x signal max "
+                          f"(--diff-scale-lfc {args.diff_scale_lfc}):")
+                    for (track_type, mod), (d_min, d_max) in list(minmax_per_modality.items()):
+                        if track_type != 'diff':
+                            continue
+                        signal = minmax_per_modality.get(('pred', mod)) or minmax_per_modality.get(('label', mod))
+                        if signal is None:
+                            continue
+                        floor = round(factor * abs(signal[1]), 3)
+                        new_min, new_max = min(d_min, -floor), max(d_max, floor)
+                        minmax_per_modality[(track_type, mod)] = (new_min, new_max)
+                        print(f"  diff/{mod}: [{d_min}, {d_max}] -> [{new_min}, {new_max}] "
+                              f"(signal max {signal[1]}, floor {floor})")
 
             # Build configuration with overlay
             output_path = Path(args.output)
