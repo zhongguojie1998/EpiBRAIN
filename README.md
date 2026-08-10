@@ -2,6 +2,7 @@
 This is the repository for EpiBRAIN (Epigenomics-based Brain Regulation Attention Inference Network), for our manuscript "Single-cell Analysis of Chromatin State and Transcriptome in Human Basal Ganglia" (in submission)
 
 # EpiBRAIN
+- [Subclass nomenclature update (revision)](#subclass-nomenclature-update-revision)
 - [Installation](#installation)
   - [Optional packages](#optional-packages)
 - [Data Pipeline](#data-pipeline)
@@ -14,6 +15,32 @@ This is the repository for EpiBRAIN (Epigenomics-based Brain Regulation Attentio
   - [For developer](#for-developer)
 - [Analysis](#analysis)
 
+# Subclass nomenclature update (revision)
+
+> [!IMPORTANT]
+> During manuscript revision, six `Subclass` labels were **renamed**. The raw data files, model checkpoints, track names, and all intermediate outputs in this repository still carry the **old** names — they were intentionally left untouched. Only the manuscript figures/text use the new names. Apply the mapping below when cross-referencing this repository against the published paper.
+
+| Old name (used in this repo / raw files) | New name (used in the manuscript) |
+| --- | --- |
+| `OT Granular GABA` | `OT Granule GABA` |
+| `SN PAX7 GABA` | `IP PAX7 GABA` |
+| `STR D1 MSN` | `STR D1 SPN` |
+| `STR D2 MSN` | `STR D2 SPN` |
+| `STR Hybrid MSN` | `STR Eccentric SPN` |
+| `ACx MEIS2 GABA` | `OB MEIS2 GABA` |
+
+As a Python dict:
+
+```python
+SUBCLASS_RENAME = {
+    'OT Granular GABA': 'OT Granule GABA',
+    'SN PAX7 GABA': 'IP PAX7 GABA',
+    'STR D1 MSN': 'STR D1 SPN',
+    'STR D2 MSN': 'STR D2 SPN',
+    'STR Hybrid MSN': 'STR Eccentric SPN',
+    'ACx MEIS2 GABA': 'OB MEIS2 GABA',
+}
+```
 
 # Installation
 
