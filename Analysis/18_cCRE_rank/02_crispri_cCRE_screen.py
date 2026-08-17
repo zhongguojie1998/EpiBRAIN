@@ -48,36 +48,6 @@ def _out_dirs(out_root, exp_name, chk):
     return os.path.join(base, "tasks"), os.path.join(base, "results")
 
 
-def build_rc_swap_index(label_meta: pd.DataFrame):
-    """Return (org_index, swap_index) mapping each track dim to its reverse-strand
-    counterpart: RNAplus↔RNAminus of the same cell type are swapped, all others
-    map to themselves. Used to correct reverse-complement predictions."""
-    org = label_meta["dim"].astype(int).tolist()
-    swap = list(org)
-    by_ct_mod = {(r["cell_type"], r["modality"]): int(r["dim"]) for _, r in label_meta.iterrows()}
-    for _, r in label_meta.iterrows():
-        d = int(r["dim"])
-        if r["modality"] == "RNAplus":
-            swap[org.index(d)] = by_ct_mod.get((r["cell_type"], "RNAminus"), d)
-        elif r["modality"] == "RNAminus":
-            swap[org.index(d)] = by_ct_mod.get((r["cell_type"], "RNAplus"), d)
-    return np.array(org), np.array(swap)
-
-
-def _predict(model, onehot, use_head, device, rc_org, rc_swap):
-    """Forward + reverse-complement averaged prediction → [n_bins, n_tracks]."""
-    import torch
-    from data.tokenizer import one_hot_reverse_complement
-
-    with torch.no_grad():
-        fwd = model(onehot.unsqueeze(0).permute(0, 2, 1).to(device), use_head).detach().cpu().numpy().squeeze(0)
-        rev = model(one_hot_reverse_complement(onehot).unsqueeze(0).permute(0, 2, 1).to(device),
-                    use_head).detach().cpu().numpy().squeeze(0)
-    rev = np.flip(rev, axis=0)
-    rev[:, rc_org] = rev[:, rc_swap]
-    return (fwd + rev) / 2.0
-
-
 @click.group()
 def cli():
     pass
@@ -160,7 +130,7 @@ def run(gtf, exp_name, chk, log_base, chk_base, out_root, chunk_id, device, use_
     n_output_bins = context_length // window_size
 
     label_meta = pd.read_csv(os.path.join(log_base, exp_name, "regression_label_meta.csv"))
-    rc_org, rc_swap = build_rc_swap_index(label_meta)
+    rc_org, rc_swap = C.build_rc_swap_index(label_meta)
     # Pre-group RNA readout tracks by modality: modality → [(cell_type, dim), ...]
     rna_tracks = {
         mod: [(row["cell_type"], int(row["dim"]))
@@ -217,8 +187,8 @@ def run(gtf, exp_name, chk, log_base, chk_base, out_root, chunk_id, device, use_
         crispri_onehot[c_s:c_e] = 0.25
 
         try:
-            pred_ref = _predict(model, ref_onehot, use_head, device, rc_org, rc_swap)
-            pred_crispri = _predict(model, crispri_onehot, use_head, device, rc_org, rc_swap)
+            pred_ref = C.predict_fwd_rc(model, ref_onehot, use_head, device, rc_org, rc_swap)
+            pred_crispri = C.predict_fwd_rc(model, crispri_onehot, use_head, device, rc_org, rc_swap)
         except Exception as e:
             logger.warning(f"forward failed {t['cCRE_id']}/{gene}: {type(e).__name__}: {e}")
             continue

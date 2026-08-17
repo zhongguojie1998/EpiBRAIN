@@ -41,8 +41,8 @@ OUT_ROOT_DEFAULT = "Analysis/18_cCRE_rank/output"
 # --------------------------------------------------------------------------- #
 # GTF parsing (matches 11_TFMotif/00_interpret_gene_RNA.py)
 # --------------------------------------------------------------------------- #
-def parse_gtf(gtf_path: str, gene_set: set) -> dict:
-    """Parse GTF for protein-coding genes in ``gene_set``.
+def parse_gtf(gtf_path: str, gene_set: set = None) -> dict:
+    """Parse GTF for protein-coding genes in ``gene_set`` (``None`` → all genes).
 
     Returns {gene_name: {'chr','start','end','strand','exons':[(s,e),...]}} with
     0-based half-open coordinates. Only genes on standard chromosomes are kept.
@@ -65,7 +65,7 @@ def parse_gtf(gtf_path: str, gene_set: set) -> dict:
             if not m:
                 continue
             gname = m.group(1)
-            if gname not in gene_set:
+            if gene_set is not None and gname not in gene_set:
                 continue
             chrom = cols[0]
             start = int(cols[3]) - 1  # GTF 1-based → 0-based
@@ -82,22 +82,35 @@ def parse_gtf(gtf_path: str, gene_set: set) -> dict:
     return genes
 
 
+def exon_bins(exons, origin: int, window_size: int) -> set:
+    """Set of bin indices covered by any exon, in the output frame of a window
+    whose bin 0 starts at genomic coordinate ``origin``.
+
+    Indices are **unclipped**: they may be negative or ``>= n_output_bins`` for
+    exons lying outside the window. Callers that need only the in-window bins
+    should use :func:`exon_bin_range`; callers that also need the fraction of the
+    gene captured by the window compare the clipped set against this one.
+    """
+    bins: set = set()
+    for exon_start, exon_end in exons:
+        rel_s = exon_start - origin
+        rel_e = exon_end - origin
+        if rel_s >= rel_e:
+            continue
+        # floor division is correct for negative offsets too
+        for b in range(rel_s // window_size, (rel_e - 1) // window_size + 1):
+            bins.add(b)
+    return bins
+
+
 def exon_bin_range(exons, real_start: int, window_size: int, n_output_bins: int):
     """Sorted array of output-bin indices covered by any exon; None if empty.
 
     Bins are expressed in the un-cropped model output frame (crop disabled),
-    relative to ``real_start`` (the 0-based genomic start of the input window).
+    relative to ``real_start`` (the 0-based genomic start of the input window),
+    and clipped to ``[0, n_output_bins)``.
     """
-    bins: set = set()
-    for exon_start, exon_end in exons:
-        rel_s = max(0, exon_start - real_start)
-        rel_e = min(n_output_bins * window_size, exon_end - real_start)
-        if rel_s >= rel_e:
-            continue
-        b_s = rel_s // window_size
-        b_e = (rel_e - 1) // window_size
-        for b in range(b_s, min(b_e + 1, n_output_bins)):
-            bins.add(b)
+    bins = [b for b in exon_bins(exons, real_start, window_size) if 0 <= b < n_output_bins]
     return np.array(sorted(bins)) if bins else None
 
 
@@ -106,6 +119,11 @@ def exon_bin_range(exons, real_start: int, window_size: int, n_output_bins: int)
 # --------------------------------------------------------------------------- #
 def gene_midpoint(ginfo: dict) -> int:
     return (int(ginfo["start"]) + int(ginfo["end"])) // 2
+
+
+def gene_tss(ginfo: dict) -> int:
+    """0-based TSS: gene start on the + strand, last base of the gene on the -."""
+    return int(ginfo["start"]) if ginfo["strand"] == "+" else int(ginfo["end"]) - 1
 
 
 def window_center(ccre_start: int, ccre_end: int, gene_mid: int) -> int:
@@ -129,6 +147,40 @@ def rna_trial(cell_type: str, strand: str) -> str:
     """+ strand → RNAminus track; - strand → RNAplus track (matches 00_interpret_gene_RNA)."""
     modality = "RNAminus" if strand == "+" else "RNAplus"
     return f"{cell_type}_{modality}"
+
+
+# --------------------------------------------------------------------------- #
+# Model prediction (torch imported lazily so the CPU-only `build` steps stay light)
+# --------------------------------------------------------------------------- #
+def build_rc_swap_index(label_meta: pd.DataFrame):
+    """Return (org_index, swap_index) mapping each track dim to its reverse-strand
+    counterpart: RNAplus↔RNAminus of the same cell type are swapped, all others
+    map to themselves. Used to correct reverse-complement predictions."""
+    org = label_meta["dim"].astype(int).tolist()
+    swap = list(org)
+    by_ct_mod = {(r["cell_type"], r["modality"]): int(r["dim"]) for _, r in label_meta.iterrows()}
+    for _, r in label_meta.iterrows():
+        d = int(r["dim"])
+        if r["modality"] == "RNAplus":
+            swap[org.index(d)] = by_ct_mod.get((r["cell_type"], "RNAminus"), d)
+        elif r["modality"] == "RNAminus":
+            swap[org.index(d)] = by_ct_mod.get((r["cell_type"], "RNAplus"), d)
+    return np.array(org), np.array(swap)
+
+
+def predict_fwd_rc(model, onehot, use_head, device, rc_org, rc_swap):
+    """Forward + reverse-complement averaged prediction → [n_bins, n_tracks]."""
+    import torch
+    from data.tokenizer import one_hot_reverse_complement
+
+    with torch.no_grad():
+        fwd = model(onehot.unsqueeze(0).permute(0, 2, 1).to(device),
+                    use_head).detach().cpu().numpy().squeeze(0)
+        rev = model(one_hot_reverse_complement(onehot).unsqueeze(0).permute(0, 2, 1).to(device),
+                    use_head).detach().cpu().numpy().squeeze(0)
+    rev = np.flip(rev, axis=0)
+    rev[:, rc_org] = rev[:, rc_swap]
+    return (fwd + rev) / 2.0
 
 
 # --------------------------------------------------------------------------- #

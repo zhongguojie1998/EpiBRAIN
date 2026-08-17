@@ -88,6 +88,7 @@ Analysis/12_s_ldsc_continous/overlap
 WebPortal/test_data
 Analysis/18_cCRE_rank/output/
 Analysis/18_cCRE_rank/logs/
+Analysis/18_cCRE_rank/*.bed
 
 
 # add config files
