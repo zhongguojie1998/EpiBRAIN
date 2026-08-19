@@ -10,20 +10,27 @@ model cell types (strand-aware RNA track). Four forward passes per element
 Unlike ``02_crispri_cCRE_screen.py`` this screen is hypothesis-free: it needs no
 ABC link list, and the window geometry depends only on the element.
 
-Results are HDF5, one group per element holding ``cell_type × gene`` matrices:
+Results are HDF5, one **tidy table per element** — one row per (gene, cell_type),
+gene-major, with the per-gene metadata repeated down each cell-type block:
 
-    /cell_types                        [n_ct] utf-8      canonical row order
-    /elements/<enh_id>/log2fc          f32 [n_ct, n_genes]
-    /elements/<enh_id>/pred_ref        f32 [n_ct, n_genes]
-    /elements/<enh_id>/pred_crispri    f32 [n_ct, n_genes]
-    /elements/<enh_id>/genes           [n_genes] utf-8   column order
-    /elements/<enh_id>/gene_strand     [n_genes] utf-8
-    /elements/<enh_id>/gene_tss        i64 [n_genes]
-    /elements/<enh_id>/dist_to_element i64 [n_genes]     signed: tss - element centre
-    /elements/<enh_id>/n_exon_bins     i32 [n_genes]     exon bins inside the window
-    /elements/<enh_id>/exon_bin_frac   f32 [n_genes]     in-window / total exon bins
-    /elements/<enh_id>/fully_inside    bool [n_genes]    whole gene body in window
-    /elements/<enh_id>.attrs           chr, start, end, class, win_start, win_end
+    /cell_types                [n_ct] utf-8
+    /elements/<enh_id>/table   compound [n_genes * n_ct], LONG_DTYPE:
+        gene S32 | cell_type S40 | strand S1 | tss i8 | dist_to_element i8
+        | n_exon_bins i4 | exon_bin_frac f4 | fully_inside bool
+        | pred_ref f4 | pred_crispri f4 | log2fc f4
+    /elements/<enh_id>.attrs   chr, start, end, class, win_start, win_end
+    /.attrs                    layout="long", context_length, window_size, exp_name, chk
+
+  dist_to_element : signed, tss - element centre
+  n_exon_bins     : exon bins of that gene inside the window
+  exon_bin_frac   : in-window / total exon bins (< 1 ⇒ transcript truncated by the
+                    window edge, so pred_ref covers only part of the gene)
+  fully_inside    : whole gene body inside the window
+
+``read_element(f, enh_id)`` returns that table as a DataFrame with the element's
+``enh_id/chr/start/end/class`` prepended, and also reads the older wide
+``cell_type × gene`` layout (rebuilding the long form on the fly). Use ``convert``
+to migrate wide chunk files in place of re-running the screen.
 
 Note on track indexing: ``regression_label_meta.csv`` carries two indices — ``dim``
 is the model **prediction** dim (the head emits every modality for every cell type,
@@ -37,6 +44,10 @@ Workflow:
   python Analysis/18_cCRE_rank/04_crispri_element_screen.py run \\
       --exp_name ... --chk 17 --chunk_id 1 --device cuda:0
   python Analysis/18_cCRE_rank/04_crispri_element_screen.py merge --exp_name ... --chk 17
+  # migrate pre-existing wide results, then merge from the converted dir:
+  python Analysis/18_cCRE_rank/04_crispri_element_screen.py convert --exp_name ... --chk 17
+  python Analysis/18_cCRE_rank/04_crispri_element_screen.py merge --exp_name ... --chk 17 \
+      --results_subdir results_long --force_restart
 """
 import glob
 import logging
@@ -68,6 +79,17 @@ TASK_COLUMNS = ["enh_id", "chr", "start", "end", "class", "genes"]
 EPS = 1e-6
 STR_DT = h5py.string_dtype(encoding="utf-8")
 
+# One row per (gene, cell_type). Fixed-width bytes for the string fields so the
+# table is a plain packed record array (no vlen heap); the heavy duplication of
+# the gene metadata across cell types compresses away with gzip-1.
+LONG_DTYPE = np.dtype([
+    ("gene", "S32"), ("cell_type", "S40"), ("strand", "S1"),
+    ("tss", "<i8"), ("dist_to_element", "<i8"),
+    ("n_exon_bins", "<i4"), ("exon_bin_frac", "<f4"), ("fully_inside", "?"),
+    ("pred_ref", "<f4"), ("pred_crispri", "<f4"), ("log2fc", "<f4"),
+])
+LONG_STR_COLS = ("gene", "cell_type", "strand")
+
 
 def _out_dirs(out_root, exp_name, chk):
     base = os.path.join(out_root, f"{exp_name}_{chk}", "crispri_element")
@@ -86,12 +108,62 @@ def window_bounds(el_start: int, el_end: int, context_length: int):
     return win_start, win_start + context_length
 
 
-def read_element(f: h5py.File, enh_id: str, key: str = "log2fc") -> pd.DataFrame:
-    """Load one element's ``cell_type × gene`` matrix as a DataFrame."""
+def build_long_table(meta: list, cell_types_b: np.ndarray,
+                     ref_mat: np.ndarray, cri_mat: np.ndarray, log2fc_mat: np.ndarray):
+    """Assemble one element's (gene × cell_type) rows as a ``LONG_DTYPE`` record array.
+
+    ``meta`` is the per-gene metadata list (column order); the three matrices are
+    ``[n_cell_types, n_genes]``. Rows come out gene-major — all cell types of gene 0,
+    then gene 1, ... — which also keeps the duplicated string columns run-length
+    friendly for the compressor.
+    """
+    n_ct = len(cell_types_b)
+    tab = np.empty(len(meta) * n_ct, dtype=LONG_DTYPE)
+    tab["gene"] = np.repeat(np.array([m["gene"].encode() for m in meta], dtype="S32"), n_ct)
+    tab["cell_type"] = np.tile(cell_types_b, len(meta))
+    tab["strand"] = np.repeat(np.array([m["strand"].encode() for m in meta], dtype="S1"), n_ct)
+    tab["tss"] = np.repeat(np.array([m["tss"] for m in meta], dtype=np.int64), n_ct)
+    tab["dist_to_element"] = np.repeat(np.array([m["dist"] for m in meta], dtype=np.int64), n_ct)
+    tab["n_exon_bins"] = np.repeat(np.array([m["n_exon_bins"] for m in meta], dtype=np.int32), n_ct)
+    tab["exon_bin_frac"] = np.repeat(np.array([m["exon_bin_frac"] for m in meta], dtype=np.float32), n_ct)
+    tab["fully_inside"] = np.repeat(np.array([m["fully_inside"] for m in meta], dtype=bool), n_ct)
+    # .T.ravel() → gene-major, matching the repeat/tile order above
+    tab["pred_ref"] = ref_mat.T.ravel()
+    tab["pred_crispri"] = cri_mat.T.ravel()
+    tab["log2fc"] = log2fc_mat.T.ravel()
+    return tab
+
+
+def read_element(f: h5py.File, enh_id: str) -> pd.DataFrame:
+    """One element's screen result as a tidy DataFrame: one row per (gene, cell_type).
+
+    Works on both layouts — the long ``table`` written by `run`/`convert`, and the
+    older wide ``cell_type × gene`` matrices (rebuilt on the fly). The element's own
+    coordinates are injected as leading columns so the frame stands alone when
+    concatenated across elements.
+    """
     g = f[f"elements/{enh_id}"]
-    return pd.DataFrame(g[key][:],
-                        index=f["cell_types"].asstr()[:],
-                        columns=g["genes"].asstr()[:])
+    if "table" in g:
+        df = pd.DataFrame(g["table"][:])
+        for c in LONG_STR_COLS:
+            df[c] = df[c].str.decode("utf-8")
+    else:  # legacy wide layout
+        meta = [{"gene": gene, "strand": st, "tss": t, "dist": d,
+                 "n_exon_bins": nb, "exon_bin_frac": fr, "fully_inside": fi}
+                for gene, st, t, d, nb, fr, fi in zip(
+                    g["genes"].asstr()[:], g["gene_strand"].asstr()[:], g["gene_tss"][:],
+                    g["dist_to_element"][:], g["n_exon_bins"][:], g["exon_bin_frac"][:],
+                    g["fully_inside"][:])]
+        cts_b = np.array([c.encode() for c in f["cell_types"].asstr()[:]], dtype="S40")
+        df = pd.DataFrame(build_long_table(meta, cts_b, g["pred_ref"][:],
+                                           g["pred_crispri"][:], g["log2fc"][:]))
+        for c in LONG_STR_COLS:
+            df[c] = df[c].str.decode("utf-8")
+    df.insert(0, "enh_id", enh_id)
+    for i, k in enumerate(("chr", "start", "end", "class")):
+        v = g.attrs[k]
+        df.insert(1 + i, k, v.decode() if isinstance(v, bytes) else v)
+    return df
 
 
 @click.group()
@@ -307,22 +379,16 @@ def run(exp_name, chk, log_base, chk_base, out_root, chunk_id, device, use_head,
         f.attrs["window_size"] = window_size
         f.attrs["exp_name"] = exp_name
         f.attrs["chk"] = str(chk)
+        f.attrs["layout"] = "long"
+        cts_b = np.array([c.encode() for c in cell_types], dtype="S40")
         eg = f.create_group("elements")
         for rec in buffered:
             g = eg.create_group(rec["enh_id"])
-            # Stored uncompressed on purpose: the matrices are only ~70 x 10 float32,
-            # and gzip's chunk index costs more than it saves on them (measured
-            # 1.63 MB gzip vs 1.30 MB raw per 100 elements).
-            for key in ("log2fc", "pred_ref", "pred_crispri"):
-                g.create_dataset(key, data=rec[key])
-            meta = rec["meta"]
-            g.create_dataset("genes", data=np.array([m["gene"] for m in meta], dtype=object), dtype=STR_DT)
-            g.create_dataset("gene_strand", data=np.array([m["strand"] for m in meta], dtype=object), dtype=STR_DT)
-            g.create_dataset("gene_tss", data=np.array([m["tss"] for m in meta], dtype=np.int64))
-            g.create_dataset("dist_to_element", data=np.array([m["dist"] for m in meta], dtype=np.int64))
-            g.create_dataset("n_exon_bins", data=np.array([m["n_exon_bins"] for m in meta], dtype=np.int32))
-            g.create_dataset("exon_bin_frac", data=np.array([m["exon_bin_frac"] for m in meta], dtype=np.float32))
-            g.create_dataset("fully_inside", data=np.array([m["fully_inside"] for m in meta], dtype=bool))
+            tab = build_long_table(rec["meta"], cts_b,
+                                   rec["pred_ref"], rec["pred_crispri"], rec["log2fc"])
+            # gzip-1: the per-gene columns repeat once per cell type, so the table
+            # compresses ~4x; level 1 gets essentially all of it at the lowest cost.
+            g.create_dataset("table", data=tab, compression="gzip", compression_opts=1)
             g.attrs["chr"] = rec["chr"]
             g.attrs["start"] = rec["start"]
             g.attrs["end"] = rec["end"]
@@ -342,11 +408,14 @@ def run(exp_name, chk, log_base, chk_base, out_root, chunk_id, device, use_head,
 @click.option("--chk", required=True)
 @click.option("--out_root", default=C.OUT_ROOT_DEFAULT)
 @click.option("--out_name", default="elements.h5")
+@click.option("--results_subdir", default="results",
+              help="source dir under crispri_element/ (e.g. results_long)")
 @click.option("--force_restart", is_flag=True)
-def merge(exp_name, chk, out_root, out_name, force_restart):
+def merge(exp_name, chk, out_root, out_name, results_subdir, force_restart):
     """Concatenate per-chunk HDF5 results into one file (optional)."""
     logger = BaseLogger(name="CRISPRi-elem-merge", level=logging.INFO)
     base, _, results_dir = _out_dirs(out_root, exp_name, chk)
+    results_dir = os.path.join(base, results_subdir)
     out_path = os.path.join(base, out_name)
     if os.path.exists(out_path) and not force_restart:
         logger.info(f"exists, skipping: {out_path}")
@@ -373,6 +442,66 @@ def merge(exp_name, chk, out_root, out_name, force_restart):
                 logger.info(f"{ci + 1}/{len(chunks)} chunks  ({n_elem} elements)")
     os.replace(tmp_path, out_path)
     logger.info(f"merged {len(chunks)} chunks, {n_elem} elements → {out_path}")
+
+
+@cli.command()
+@click.option("--exp_name", required=True)
+@click.option("--chk", required=True)
+@click.option("--out_root", default=C.OUT_ROOT_DEFAULT)
+@click.option("--src_subdir", default="results")
+@click.option("--dst_subdir", default="results_long")
+@click.option("--force_restart", is_flag=True)
+def convert(exp_name, chk, out_root, src_subdir, dst_subdir, force_restart):
+    """Rewrite wide ``cell_type × gene`` chunk results into the long table layout.
+
+    CPU-only — no model, no GPU. Use it to migrate results produced before the
+    layout change; `run` now writes the long table directly.
+    """
+    logger = BaseLogger(name="CRISPRi-elem-convert", level=logging.INFO)
+    base, _, _ = _out_dirs(out_root, exp_name, chk)
+    src_dir, dst_dir = os.path.join(base, src_subdir), os.path.join(base, dst_subdir)
+    os.makedirs(dst_dir, exist_ok=True)
+
+    chunks = sorted(glob.glob(os.path.join(src_dir, "chunk_*.h5")))
+    if not chunks:
+        raise FileNotFoundError(f"no chunk_*.h5 under {src_dir}")
+    logger.info(f"{len(chunks)} chunks: {src_dir} → {dst_dir}")
+
+    t0, n_elem, n_rows = time.time(), 0, 0
+    for ci, src_path in enumerate(chunks):
+        dst_path = os.path.join(dst_dir, os.path.basename(src_path))
+        if os.path.exists(dst_path) and not force_restart:
+            continue
+        tmp_path = dst_path + ".tmp"
+        with h5py.File(src_path, "r") as src, h5py.File(tmp_path, "w") as dst:
+            src.copy("cell_types", dst)
+            for k, v in src.attrs.items():
+                dst.attrs[k] = v
+            dst.attrs["layout"] = "long"
+            cts_b = np.array([c.encode() for c in src["cell_types"].asstr()[:]], dtype="S40")
+            eg = dst.create_group("elements")
+            for enh_id in src["elements"]:
+                g = src["elements"][enh_id]
+                meta = [{"gene": gene, "strand": st, "tss": t, "dist": d,
+                         "n_exon_bins": nb, "exon_bin_frac": fr, "fully_inside": fi}
+                        for gene, st, t, d, nb, fr, fi in zip(
+                            g["genes"].asstr()[:], g["gene_strand"].asstr()[:], g["gene_tss"][:],
+                            g["dist_to_element"][:], g["n_exon_bins"][:], g["exon_bin_frac"][:],
+                            g["fully_inside"][:])]
+                tab = build_long_table(meta, cts_b, g["pred_ref"][:],
+                                       g["pred_crispri"][:], g["log2fc"][:])
+                og = eg.create_group(enh_id)
+                og.create_dataset("table", data=tab, compression="gzip", compression_opts=1)
+                for k, v in g.attrs.items():
+                    og.attrs[k] = v
+                n_elem += 1
+                n_rows += len(tab)
+        os.replace(tmp_path, dst_path)
+        if (ci + 1) % 10 == 0:
+            logger.info(f"{ci + 1}/{len(chunks)} chunks  ({n_elem} elements, {n_rows:,} rows, "
+                        f"{time.time() - t0:.0f}s)")
+    logger.info(f"converted {n_elem} elements / {n_rows:,} rows → {dst_dir}  "
+                f"[{time.time() - t0:.0f}s]")
 
 
 if __name__ == "__main__":
