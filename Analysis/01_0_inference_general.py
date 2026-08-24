@@ -20,6 +20,10 @@ Track format (--track_format, default auto):
     h5      /predictions/{row} = [L_bins, n_tracks] restricted to the bins
             overlapping the interval                        (auto for --bed)
 
+Model (--exp_name / --chk, or an explicit --checkpoint + --config):
+    default      full_finetune_original_loss_celltype_head_dim8_linear_full_atlas, epoch 17
+    alternative  full_finetune_original_loss_celltype_head_dim8_linear, epoch 20
+
 Every interval is centered in a data.context_length (524,288 bp) window. By
 default the forward and reverse-complement passes are averaged (--strand both);
 --strand forward / --strand reverse runs a single pass on that strand only, for
@@ -27,26 +31,24 @@ both tracks and embeddings. Reverse-strand output is always flipped back into
 forward-strand bin order.
 
 Usage:
-    # all tracks of one region as bigwigs (pyGenomeTracks / IGV)
+    # all tracks of one region as bigwigs (pyGenomeTracks / IGV), default model
     python Analysis/01_0_inference_general.py \
-        --region chr1:100000-100500 --output_type tracks \
-        --exp_name my_exp --chk 17 -o Res/infer_region
+        --region chr1:100000-100500 --output_type tracks -o Res/infer_region
 
     # embeddings for every peak in a BED, all cell types, sharded over 4 GPUs
     python Analysis/01_0_inference_general.py \
         --bed peaks.bed --output_type embedding \
-        --checkpoint Chk/my_exp/chk_epoch_17.pt \
-        --config logs/my_exp/overall_setting.yaml \
         -o Res/infer_peaks --rank 0 --world_size 4
 
-    # tracks + embeddings for a BED, per-bin HDF5
+    # tracks + embeddings for a BED, per-bin HDF5, basal-ganglia model instead
     python Analysis/01_0_inference_general.py \
-        --bed peaks.bed --output_type both --exp_name my_exp --chk 17 -o Res/infer_peaks
+        --bed peaks.bed --output_type both -o Res/infer_peaks \
+        --exp_name full_finetune_original_loss_celltype_head_dim8_linear --chk 20
 
     # forward strand only (half the GPU time, no RC averaging)
     python Analysis/01_0_inference_general.py \
         --region chr1:100000-100500 --output_type both --strand forward \
-        --exp_name my_exp --chk 17 -o Res/infer_fwd
+        -o Res/infer_fwd
 """
 
 from __future__ import annotations
@@ -91,6 +93,13 @@ STRAND_BOTH = "both"
 STRAND_FORWARD = "forward"
 STRAND_REVERSE = "reverse"
 STRAND_CHOICES = (STRAND_BOTH, STRAND_FORWARD, STRAND_REVERSE)
+
+# Default model: full atlas fine-tune. Alternative (basal ganglia only):
+#   --exp_name full_finetune_original_loss_celltype_head_dim8_linear --chk 20
+DEFAULT_EXP_NAME = "full_finetune_original_loss_celltype_head_dim8_linear_full_atlas"
+DEFAULT_CHK = "17"
+ALT_EXP_NAME = "full_finetune_original_loss_celltype_head_dim8_linear"
+ALT_CHK = "20"
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +692,6 @@ def resolve_model_paths(args: argparse.Namespace) -> tuple[str, str]:
 
     if not (args.exp_name and args.chk):
         raise SystemExit("Provide either --checkpoint (+--config) or --exp_name and --chk")
-
     log_dir = Path(args.log_base) / args.exp_name
     chk_dir = Path(args.chk_base) / args.exp_name
     checkpoint = chk_dir / f"chk_epoch_{args.chk}.pt"
@@ -722,8 +730,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to checkpoint .pt")
     parser.add_argument("--config", type=str, default=None, help="Path to config YAML")
-    parser.add_argument("--exp_name", "-e", type=str, default=None, help="Experiment name")
-    parser.add_argument("--chk", type=str, default=None, help="Checkpoint epoch, e.g. 17")
+    parser.add_argument(
+        "--exp_name", "-e", type=str, default=DEFAULT_EXP_NAME,
+        help=f"Experiment name (default: {DEFAULT_EXP_NAME}; "
+             f"alternative: {ALT_EXP_NAME} with --chk {ALT_CHK})",
+    )
+    parser.add_argument(
+        "--chk", type=str, default=DEFAULT_CHK,
+        help=f"Checkpoint epoch (default: {DEFAULT_CHK}; use {ALT_CHK} with {ALT_EXP_NAME})",
+    )
     parser.add_argument("--log_base", type=str, default="./logs")
     parser.add_argument("--chk_base", type=str, default="./Chk")
 
