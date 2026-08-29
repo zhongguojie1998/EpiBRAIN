@@ -184,6 +184,21 @@ def build_rc_swap_index(label_meta_df):
     return np.array(org_index), np.array(swap_index)
 
 
+def _as_track_index(mask):
+    """Turn a boolean track mask into the cheapest equivalent index.
+
+    Returns None when nothing is selected, a slice when the selected tracks are
+    contiguous (Borzoi's RNA tracks are, at 6068:7611), else the mask itself. A
+    slice indexes a view; a boolean mask forces a copy in and a scatter back.
+    """
+    hits = np.flatnonzero(mask)
+    if hits.size == 0:
+        return None
+    if hits[-1] - hits[0] + 1 == hits.size:
+        return slice(int(hits[0]), int(hits[-1]) + 1)
+    return mask
+
+
 def untransform_predictions(data, label_meta=None, scale=1.0, clip_soft=48.0, sum_stat="sum_three_quarter"):
     """
     Untransform model predictions back to original scale.
@@ -206,35 +221,53 @@ def untransform_predictions(data, label_meta=None, scale=1.0, clip_soft=48.0, su
     data = data.copy()
 
     if label_meta is not None:
-        # do it for each trial based on label_meta
-        for i, row in label_meta.iterrows():
-            trial_scale = row.get('scale', 1.0)
-            trial_clip_soft = row.get('clip_soft', 48.0)
-            trial_sum_stat = row.get('sum_stat', 'sum_three_quarter')
+        # Vectorised across tracks. This previously ran one Python iteration per
+        # trial (7,611 of them) over a strided data[:, :, i] view, twice per batch.
+        # The maths below is the same, applied to whole (B, L, T) arrays at once.
+        n_tracks = data.shape[2]
+        if len(label_meta) != n_tracks:
+            raise ValueError(
+                f"label_meta has {len(label_meta)} rows but predictions have {n_tracks} tracks"
+            )
 
-            # Step 1: Undo scale
-            if trial_scale != 1.0:
-                data[:, :, i] = data[:, :, i] / trial_scale
+        def _column(name, default):
+            if name in label_meta.columns:
+                col = label_meta[name]
+                return col.to_numpy() if name == "sum_stat" else col.to_numpy(dtype=np.float64)
+            return np.full(n_tracks, default)
 
-            # Step 2: Undo soft clip
-            # Forward: if x > clip_soft: x = (clip_soft - 1) + sqrt(x - clip_soft + 1)
-            # Reverse: if x > clip_soft: x = clip_soft - 1 + (x - (clip_soft - 1))^2
-            if trial_clip_soft is not None:
-                clip_mask = data[:, :, i] > trial_clip_soft
-                data[clip_mask, i] = (trial_clip_soft - 1) + (data[clip_mask, i] - (trial_clip_soft - 1)) ** 2
+        trial_scale = _column("scale", 1.0)
+        trial_clip_soft = _column("clip_soft", 48.0)
+        trial_sum_stat = _column("sum_stat", "sum_three_quarter").astype(str)
 
-            # Step 3: Undo three-quarter power
-            # Forward: x = x^(3/4)
-            # Reverse: x = x^(4/3)
-            if trial_sum_stat == "sum_three_quarter":
-                data[:, :, i] = data[:, :, i] ** (4.0 / 3.0)
-            elif trial_sum_stat in ["sum_sqrt", "mean_sqrt", "avg_sqrt"]:
-                data[:, :, i] = (data[:, :, i] + 1) ** 2 - 1
-            elif trial_sum_stat in ['sum', 'mean', "avg"]:
-                # no transformation applied
-                pass
-            else:
-                raise ValueError(f"Unknown sum_stat: {trial_sum_stat}")
+        KNOWN = {"sum_three_quarter", "sum_sqrt", "mean_sqrt", "avg_sqrt", "sum", "mean", "avg"}
+        unknown = sorted(set(trial_sum_stat) - KNOWN)
+        if unknown:
+            raise ValueError(f"Unknown sum_stat: {unknown[0]}")
+
+        # Step 1: Undo scale
+        np.divide(data, trial_scale.astype(data.dtype, copy=False), out=data)
+
+        # Step 2: Undo soft clip
+        # Forward: if x > clip_soft: x = (clip_soft - 1) + sqrt(x - clip_soft + 1)
+        # Reverse: if x > clip_soft: x = clip_soft - 1 + (x - (clip_soft - 1))^2
+        clip_row = trial_clip_soft.astype(data.dtype, copy=False)
+        # Cheap guard first: predictions rarely exceed clip_soft, and this avoids
+        # allocating a (B, L, T) boolean mask on every batch. NaN compares False.
+        if np.nanmax(data) > np.nanmin(clip_row):
+            clip_mask = data > clip_row
+            if clip_mask.any():
+                edge = np.broadcast_to(clip_row - 1, data.shape)[clip_mask]
+                data[clip_mask] = edge + (data[clip_mask] - edge) ** 2
+
+        # Step 3: Undo the summary-statistic transform ('sum'/'mean'/'avg' are no-ops)
+        # Forward: x = x^(3/4)  ->  Reverse: x = x^(4/3)
+        three_quarter = _as_track_index(trial_sum_stat == "sum_three_quarter")
+        sqrt_like = _as_track_index(np.isin(trial_sum_stat, ["sum_sqrt", "mean_sqrt", "avg_sqrt"]))
+        if three_quarter is not None:
+            data[:, :, three_quarter] = data[:, :, three_quarter] ** (4.0 / 3.0)
+        if sqrt_like is not None:
+            data[:, :, sqrt_like] = (data[:, :, sqrt_like] + 1) ** 2 - 1
     else:
         # Step 1: Undo scale
         if scale != 1.0:
@@ -344,6 +377,22 @@ def validate_score_names(score_names):
 
     return score_names
 
+
+LOCAL_HALF_WIDTH = 15  # centre bin +/- 15 -> 31 bins of 32 bp = 992 bp
+
+
+def crop_local(data):
+    """Centre-crop (B, L, T) predictions to the 31 bins the local_* scores use.
+
+    The local_* scores previously ran their elementwise maths (log2, squaring)
+    across all L bins and only then discarded 99.5% of the result. Every one of
+    those operations is elementwise, so cropping first is bit-identical and about
+    two orders of magnitude cheaper.
+    """
+    mid = data.shape[1] // 2
+    return data[:, mid - LOCAL_HALF_WIDTH: mid + LOCAL_HALF_WIDTH + 1, :]
+
+
 # calculate score
 def vep_score(pred_mut, pred_wt, score_name):
     if score_name == "raw_diff":
@@ -369,34 +418,27 @@ def vep_score(pred_mut, pred_wt, score_name):
         scores = np.sqrt(sum_diff)  # shape: (B, T)
     elif score_name == "local_l1_sum":
         # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
-        diffs = np.abs(pred_mut - pred_wt)  # shape: (B, L, T)
-        diffs_local = diffs[:, diffs.shape[1] // 2 - 15: diffs.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
-        scores = np.sum(diffs_local, axis=1)  # shape: (B, T)
+        mut_local, wt_local = crop_local(pred_mut), crop_local(pred_wt)  # (B, 31, T)
+        scores = np.sum(np.abs(mut_local - wt_local), axis=1)  # shape: (B, T)
     elif score_name == "local_l2_sum":
         # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
-        diff_squared = (pred_mut - pred_wt) ** 2  # shape: (B, L, T)
-        diff_squared_local = diff_squared[:, diff_squared.shape[1] // 2 - 15: diff_squared.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
-        sum_diff = np.sum(diff_squared_local, axis=1)  # shape: (B, T)
+        mut_local, wt_local = crop_local(pred_mut), crop_local(pred_wt)  # (B, 31, T)
+        sum_diff = np.sum((mut_local - wt_local) ** 2, axis=1)  # shape: (B, T)
         scores = np.sqrt(sum_diff)  # shape: (B, T)
     elif score_name == "local_raw_diff":
         # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
-        diffs = pred_mut - pred_wt
-        diffs_local = diffs[:, diffs.shape[1] // 2 - 15: diffs.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
-        scores = np.sum(diffs_local, axis=1)  # shape: (B, T)
+        mut_local, wt_local = crop_local(pred_mut), crop_local(pred_wt)  # (B, 31, T)
+        scores = np.sum(mut_local - wt_local, axis=1)  # shape: (B, T)
     elif score_name == "local_raw_log_diff":
         # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
-        log_alt = np.log2(1 + pred_mut)
-        log_ref = np.log2(1 + pred_wt)
-        diffs = log_alt - log_ref
-        diffs_local = diffs[:, diffs.shape[1] // 2 - 15: diffs.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
-        scores = np.sum(diffs_local, axis=1)  # shape: (B, T)
+        mut_local, wt_local = crop_local(pred_mut), crop_local(pred_wt)  # (B, 31, T)
+        diffs = np.log2(1 + mut_local) - np.log2(1 + wt_local)  # shape: (B, 31, T)
+        scores = np.sum(diffs, axis=1)  # shape: (B, T)
     elif score_name == "local_log_square":
         # only consider the center position ± 15 bins, i.e., 31 bins in total, giving 32*31=992bp
-        log_alt = np.log2(1 + pred_mut)
-        log_ref = np.log2(1 + pred_wt)
-        diff_squared = (log_alt - log_ref) ** 2  # shape: (B, L, T)
-        diff_squared_local = diff_squared[:, diff_squared.shape[1] // 2 - 15: diff_squared.shape[1] // 2 + 16, :]  # shape: (B, 31, T)
-        sum_diff = np.sum(diff_squared_local, axis=1)  # shape: (B, T)
+        mut_local, wt_local = crop_local(pred_mut), crop_local(pred_wt)  # (B, 31, T)
+        diffs = np.log2(1 + mut_local) - np.log2(1 + wt_local)  # shape: (B, 31, T)
+        sum_diff = np.sum(diffs ** 2, axis=1)  # shape: (B, T)
         scores = np.sqrt(sum_diff)  # shape: (B, T)
     else:
         raise ValueError(f"Score '{score_name}' not implemented")
@@ -476,6 +518,19 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=8, pin_memory=True, drop_last=False, persistent_workers=True)
     trial_dims = load_label_meta_from_h5(hdf5_file)
 
+    # Precompute GPU-side indices for the forward/reverse combination.
+    trial_idx = torch.as_tensor(np.asarray(trial_dims), dtype=torch.long, device=device)
+    rc_swap_t = None
+    if rc_swap_index is not None:
+        if not np.array_equal(np.asarray(rc_orig_index), np.arange(len(rc_orig_index))):
+            raise ValueError("rc_orig_index must enumerate every track in order")
+        rc_swap_t = torch.as_tensor(np.asarray(rc_swap_index), dtype=torch.long, device=device)
+    # Every local_* score reads only the centre 31 bins, so the other 6113 never
+    # need to leave the GPU. Mixed score sets keep the full window.
+    local_only = all(name.startswith("local_") for name in score_names)
+    if local_only:
+        print(f"All scores are local_*: cropping to {2 * LOCAL_HALF_WIDTH + 1} bins on device")
+
     print(f"Computing variant effects for chunk {chunk_id}...")
     start_time = time.time()
 
@@ -505,23 +560,25 @@ def main(hdf5_file, chunk_indices, model_path, config_path, device, batch_size, 
             wt_rev_input = dtype_fn(wt_rev_batch.permute(0, 2, 1).to(device))
             mut_rev_input = dtype_fn(mut_rev_batch.permute(0, 2, 1).to(device))
 
-            pred_wt_fwd = model(wt_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
-            pred_mut_fwd = model(mut_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
-            pred_wt_rev = model(wt_rev_input, use_head).detach().cpu().numpy()[:,:, trial_dims, ...]
-            pred_mut_rev = model(mut_rev_input, use_head).detach().cpu().numpy()[:, :, trial_dims, ...]
+            # Combine forward and reverse-complement on the GPU, then copy once.
+            # The old code copied all four raw (B, 6144, T) predictions to the host
+            # (~0.43 s/variant of pageable transfer) and combined them in numpy.
+            # flip/swap are pure data movement and (a+b)/2 is exact in float32, so
+            # this is bit-identical. When every requested score is a local_* one,
+            # crop to 31 bins before the copy as well -- but only AFTER the flip:
+            # L is even, so a centre crop taken before flipping is off by one bin.
+            def _combine(fwd_out, rev_out):
+                fwd = fwd_out.index_select(2, trial_idx)
+                rev = rev_out.index_select(2, trial_idx).flip(1)
+                if rc_swap_t is not None:
+                    rev = rev.index_select(2, rc_swap_t)
+                combined = (fwd + rev) / 2.0
+                if local_only:
+                    combined = crop_local(combined)
+                return combined.detach().cpu().numpy()
 
-            # Flip predictions along sequence dimension (reverse order)
-            pred_wt_rev = np.flip(pred_wt_rev, axis=1)
-            pred_mut_rev = np.flip(pred_mut_rev, axis=1)
-
-            # Swap stranded tracks (+ and -) for reverse complement
-            if rc_swap_index is not None:
-                pred_wt_rev[:, :, rc_orig_index] = pred_wt_rev[:, :, rc_swap_index]
-                pred_mut_rev[:, :, rc_orig_index] = pred_mut_rev[:, :, rc_swap_index]
-
-            # Average the forward and reverse predictions
-            pred_wt = (pred_wt_fwd + pred_wt_rev) / 2.0
-            pred_mut = (pred_mut_fwd + pred_mut_rev) / 2.0
+            pred_wt = _combine(model(wt_input, use_head), model(wt_rev_input, use_head))
+            pred_mut = _combine(model(mut_input, use_head), model(mut_rev_input, use_head))
 
             # Untransform predictions if requested
             if untransform:
